@@ -1,0 +1,50 @@
+# cargo-deny configuration (ADR-0017), checked by `cargo deny check` as part of `cargo xtask verify`.
+# CORE-001 added this minimal version so that the first dependencies, which arrive while X-003 is still in progress, are already checked against the policy. X-003 completes it.
+
+[graph]
+# Check the dependencies of every feature, so nothing escapes the check by hiding behind an optional feature.
+all-features = true
+
+[advisories]
+# Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version. An exception needs the advisory ID in `ignore`, with a comment explaining why we are not affected.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The license allowlist of ADR-0017 §8. A dual-licensed crate qualifies if one of its options is on the list. Anything else needs an ADR amendment.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+# The allowlist is policy, not a list of what we happen to use today, so an entry no dependency uses yet is not reported.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates are unpublished (`publish = false`) and licensed under the repository license, not a third-party license, so the allowlist does not apply to them.
+ignore = true
+
+[bans]
+# Two versions of the same crate are reported (they cost size and review effort) but do not fail the check.
+multiple-versions = "warn"
+# Version requirements must be exact (ADR-0017); a `*` requirement fails. Path dependencies between our own unpublished crates need no version.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Dependencies come only from crates.io. A Git dependency needs an explicit entry in `allow-git` at a pinned revision (X-003).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,9 @@
+# Cargo settings for everyone who builds bayan-core.
+
+[alias]
+# `cargo xtask verify` runs the verification gate (see AGENTS.md).
+xtask = "run --package xtask --locked --"
+
+[registry]
+# Never resolve a dependency version published less than one day ago (ADR-0017). Cargo enforces this from Rust 1.100; until the workspace moves to 1.100, Cargo prints "ignoring `registry.global-min-publish-age` without `-Zmin-publish-age`", which is expected. Keep the setting.
+global-min-publish-age = "1 day"

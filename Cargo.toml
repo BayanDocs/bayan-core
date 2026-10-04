@@ -1,0 +1,81 @@
+# The bayan-core Cargo workspace. Plain-language guide: AGENTS.md. Decisions: ADR-0005 (deterministic math), ADR-0006 (Rust and the unsafe policy), ADR-0017 (dependencies), in https://github.com/BayanDocs/docs.
+
+[workspace]
+resolver = "3"
+# crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
+members = ["crates/*", "xtask", "xtask/lint-canary"]
+# fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# Equal to the toolchain pinned in rust-toolchain.toml, which is also the minimum supported Rust version (ADR-0006 §7). `cargo xtask verify` checks that they match.
+rust-version = "1.99.0"
+# The SPDX 3.0 spelling of the repository license, which cargo-deny accepts (ADR-0003 §4). REUSE metadata writes the same permission as `LicenseRef-BayanDocs-App-Store-Permission`.
+license = "GPL-3.0-or-later WITH AdditionRef-BayanDocs-App-Store-Permission"
+repository = "https://github.com/BayanDocs/bayan-core"
+# Nothing is published to crates.io until the release work packages set up trusted publishing (ADR-0017, ADR-0026).
+publish = false
+
+# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017). There are none yet.
+[workspace.dependencies]
+
+# Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
+# "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.
+[workspace.lints.rust]
+# No unsafe code outside the binding crates (ADR-0006 §2). `forbid`, unlike `deny`, cannot be switched off again inside the code.
+unsafe_code = "forbid"
+# Inside an `unsafe fn`, each unsafe operation still needs its own `unsafe { }` block with a `// SAFETY:` comment.
+unsafe_op_in_unsafe_fn = "deny"
+# Every public item is documented.
+missing_docs = "warn"
+# Identifiers are ASCII, so look-alike letters from other scripts cannot hide in code review (documents may of course contain any script).
+non_ascii_idents = "deny"
+# Declares the switch that lets the lint canary (xtask/lint-canary) compile its deliberately broken code; nothing else uses it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bayan_lint_canary, values(any()))"] }
+
+[workspace.lints.clippy]
+# Clippy's default groups: correctness, suspicious, style, complexity, performance.
+all = { level = "warn", priority = -1 }
+# Pedantic subset, numbers: layout arithmetic is integer BLU (ADR-0005), where a silent truncating, wrapping or sign-losing `as` cast is a layout bug.
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+checked_conversions = "warn"
+invalid_upcast_comparisons = "warn"
+unreadable_literal = "warn"
+# Pedantic subset, raw pointers: explicit and checked pointer casts in the FFI and WebAssembly bindings.
+borrow_as_ptr = "warn"
+cast_ptr_alignment = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
+transmute_ptr_to_ptr = "warn"
+# Pedantic subset, robustness and clarity: documented errors and panics, no huge stack arrays (the WebAssembly stack is small), no wildcard that hides a new enum variant, explicit imports.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+large_stack_arrays = "warn"
+match_wildcard_for_single_variants = "warn"
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+# Restriction lints, determinism: iterating a hash map or set visits items in a random order (ADR-0005 §5).
+iter_over_hash_type = "warn"
+# Restriction lints, unsafe code (binding crates only): one operation per `unsafe` block, each with a `// SAFETY:` comment, and no such comments on safe code.
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+# Restriction lints, exceptions: a lint is switched off only with `#[expect(lint, reason = "…")]`, never `#[allow]`, so every exception carries a justification and is flagged once it is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Restriction lints, engine hygiene: no `unwrap()` on hostile input (tests may), no leftover debugging or placeholders, no exiting the host process, and no printing (the engine never logs document content; the command-line tools opt in).
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+exit = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
