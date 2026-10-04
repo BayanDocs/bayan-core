@@ -1,0 +1,22 @@
+# REUSE configuration (https://reuse.software): which license applies to which files in bayan-core.
+# Decision and reasons: ADR-0003; plain-language FAQ: LICENSING.md (both in https://github.com/BayanDocs/docs).
+# Full license texts are in LICENSES/. When several annotations match a file, the last one wins, so specific areas come after the default.
+# A file's own SPDX header, if it has one, takes precedence over this file.
+version = 1
+
+# Default for the whole repository: GPL-3.0-or-later with the BayanDocs App Store Permission (LICENSES/LicenseRef-BayanDocs-App-Store-Permission.txt).
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 BayanDocs contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission"
+
+# Protocol definitions crate: Apache-2.0, so anyone can implement BayanDocs clients and integrations under any license.
+# It must never depend on or copy from GPL or AGPL code. Whoever adds its first file also adds LICENSES/Apache-2.0.txt (`reuse download Apache-2.0`) and a crate-level LICENSE file.
+[[annotations]]
+path = "crates/bayan-protocol/**"
+SPDX-FileCopyrightText = "2026 BayanDocs contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Templates, sample content and default styles that the apps copy into users' documents are CC0-1.0, and fonts created by the project are OFL-1.1 (ADR-0003 §1).
+# When such a directory is created, add an annotation for it here and add the license text with `reuse download <SPDX-ID>`.
+# Third-party files keep their own license and copyright: record them here or in a `.license` file next to them.

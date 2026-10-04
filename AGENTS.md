@@ -23,7 +23,7 @@ The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`la
 
 ## Rules specific to bayan-core
 
-- **Licensing (ADR-0003):** the workspace is GPL-3.0-or-later, except `crates/bayan-protocol/`, which is Apache-2.0 so that anyone can implement BayanDocs clients and integrations. That crate must never depend on, or copy from, any GPL or AGPL code; GPL crates may depend on it.
+- **Licensing (ADR-0003):** the workspace is GPL-3.0-or-later with the BayanDocs App Store Permission (`GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission`), except `crates/bayan-protocol/`, which is Apache-2.0 so that anyone can implement BayanDocs clients and integrations. That crate must never depend on, or copy from, any GPL or AGPL code; GPL crates may depend on it. `REUSE.toml` records which license applies to which files and `LICENSES/` holds the full texts; keep `reuse lint` passing, and add a new license text only with `reuse download <SPDX-ID>`.
 - **Layering:** a crate may depend only on crates in its own layer or below (foundation → model and formats → text → layout → output → interaction → engine → bindings and tools). Never add an upward dependency.
 - **Determinism (ADR-0004, ADR-0005):**
   - layout arithmetic uses integer BLU types from `bayan-units`, never floating point;
@@ -43,3 +43,5 @@ The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`la
 ## Dependency mechanisms
 
 Exact `=x.y.z` requirements in `[workspace.dependencies]`; `Cargo.lock` committed and builds run with `--locked`; `.cargo/config.toml` sets `global-min-publish-age = "1 day"` (enforced natively from Rust 1.100); a lockfile-age check and `cargo deny` run in CI (X-003). Routine upgrades happen only in the monthly dependency session.
+
+In BayanDocs cloud sessions the tools are preinstalled at pinned versions by `docs/scripts/cloud-environment-setup.sh`; run `bayandocs-tools` to list them. If a tool is missing, install the version pinned there (never a newer one) and mention it in the pull request.
