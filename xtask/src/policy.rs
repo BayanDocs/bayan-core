@@ -579,14 +579,15 @@ unwrap_used = "warn"
 
     #[test]
     fn reads_the_disallowed_lists_of_the_real_clippy_toml() {
-        // The real file must parse and contain every required entry; it may contain more, which the canaries then prove.
+        // The real file must parse and contain every required entry; it may contain more, which the canaries then prove. A failure shows the problem itself, not just "assertion failed".
         let text = include_str!("../../clippy.toml");
         let clippy = ClippyConfig {
-            methods: disallowed(text, "disallowed-methods").unwrap(),
-            types: disallowed(text, "disallowed-types").unwrap(),
+            methods: disallowed(text, "disallowed-methods")
+                .unwrap_or_else(|problem| panic!("{problem}")),
+            types: disallowed(text, "disallowed-types")
+                .unwrap_or_else(|problem| panic!("{problem}")),
         };
-        assert!(clippy.methods.contains(&"f64::sin".to_owned()));
-        assert!(check_clippy_requirements(&clippy).is_ok());
+        check_clippy_requirements(&clippy).unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]
@@ -602,7 +603,8 @@ unwrap_used = "warn"
                 include_str!("../../crates/bayan-wasm/Cargo.toml"),
             ),
         ];
-        assert!(check_binding_copies(root, &members).is_ok());
+        // A failure shows which lint drifted, not just "assertion failed".
+        check_binding_copies(root, &members).unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     /// A folder tree for one test, removed again when the test ends.
