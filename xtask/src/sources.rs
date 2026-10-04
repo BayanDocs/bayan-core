@@ -337,7 +337,9 @@ fn run() {
             "#[cfg(clippy)] fn skipped() {}\n",
         );
         write("crates/a/notes.txt", "cfg(not(clippy))\n");
-        let folders = [root.join("crates/a"), root.join("crates/a")];
+        // Built from separate parts, so the expected paths match on Windows too.
+        let member = root.join("crates").join("a");
+        let folders = [member.clone(), member];
         let line = check(&root, &folders).unwrap_or_else(|problem| panic!("{problem}"));
         assert!(line.contains("none of the 2 Rust files"), "{line}");
 
@@ -346,7 +348,8 @@ fn run() {
             "\n#[cfg(not(clippy))]\npub fn sine(x: f64) -> f64 { x.sin() }\n",
         );
         let problem = check(&root, &folders).unwrap_err();
-        let shown = format!("  {}:2", Path::new("crates/a/src/hidden.rs").display());
+        let hidden = Path::new("crates").join("a").join("src").join("hidden.rs");
+        let shown = format!("  {}:2", hidden.display());
         assert!(problem.contains(&shown), "{problem}");
         assert!(problem.contains("never checked by Clippy"), "{problem}");
         std::fs::remove_dir_all(&root).unwrap();
