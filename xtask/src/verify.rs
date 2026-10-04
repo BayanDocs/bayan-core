@@ -125,7 +125,7 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools, so that a pass means the same thing everywhere.
+/// Checks that the gate runs with the pinned tools and with the root Clippy configuration only, so that a pass means the same thing everywhere.
 fn preflight(root: &Path) -> Result<(), String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -150,12 +150,19 @@ fn preflight(root: &Path) -> Result<(), String> {
     match tool_version(&found, "cargo-deny") {
         Some(version) if version == CARGO_DENY_VERSION => {
             println!("    cargo-deny: {version} (pinned in xtask/src/verify.rs)");
-            Ok(())
         }
-        _ => Err(format!(
-            "the gate is pinned to cargo-deny {CARGO_DENY_VERSION}, but found `{found}`. Install it with `cargo install --locked cargo-deny@{CARGO_DENY_VERSION}`."
-        )),
+        _ => {
+            return Err(format!(
+                "the gate is pinned to cargo-deny {CARGO_DENY_VERSION}, but found `{found}`. Install it with `cargo install --locked cargo-deny@{CARGO_DENY_VERSION}`."
+            ));
+        }
     }
+
+    // Checked before Clippy first runs, because another configuration file would quietly change what every later step checks.
+    let clippy_conf_dir = std::env::var_os("CLIPPY_CONF_DIR");
+    let line = policy::check_clippy_configuration(root, clippy_conf_dir.as_deref())?;
+    println!("    {line}");
+    Ok(())
 }
 
 fn fmt(root: &Path) -> Result<(), String> {

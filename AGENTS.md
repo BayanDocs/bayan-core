@@ -53,7 +53,7 @@ The Rust engine is a Cargo workspace. The crate map and the layering are in `doc
 
 ## Verification gate
 
-Run `cargo xtask verify` before every push, from anywhere in the repository. CI runs the same command on `ubuntu-24.04`, `windows-latest` and `macos-latest` (arm64) for every pull request, every push to `main`, and every night. It needs rustup, which installs the pinned toolchain from `rust-toolchain.toml` by itself, and cargo-deny 0.20.2 (`cargo install --locked cargo-deny@0.20.2`; the BayanDocs cloud environment already has it). It first checks that both match their pins, then runs these steps in order and stops at the first failure:
+Run `cargo xtask verify` before every push, from anywhere in the repository. CI runs the same command on `ubuntu-24.04`, `windows-latest` and `macos-latest` (arm64) for every pull request, every push to `main`, and every night. It needs rustup, which installs the pinned toolchain from `rust-toolchain.toml` by itself, and cargo-deny 0.20.2 (`cargo install --locked cargo-deny@0.20.2`; the BayanDocs cloud environment already has it). It first checks that both match their pins and that Clippy reads only the root `clippy.toml` (no other `clippy.toml` or `.clippy.toml` anywhere in the repository, and no `CLIPPY_CONF_DIR` environment variable), then runs these steps in order and stops at the first failure:
 
 1. `fmt`: `cargo fmt --all --check`.
 2. `clippy`: `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (every warning is an error).
@@ -61,7 +61,7 @@ Run `cargo xtask verify` before every push, from anywhere in the repository. CI 
 4. `wasm32`: `cargo build --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --target wasm32-unknown-unknown --locked`, with warnings as errors. Every crate is built for WebAssembly unless `NATIVE_ONLY` in `xtask/src/verify.rs` lists it with a reason.
 5. `doc`: `cargo doc --workspace --no-deps --locked`, with warnings as errors.
 6. `deny`: `cargo deny --locked check` (security advisories, licenses, banned or duplicate crates, sources).
-7. `guardrails`: checks that every crate inherits the workspace lints, that the copies in bayan-ffi and bayan-wasm have not drifted, that `rust-version` equals the pinned toolchain, and that `clippy.toml` still forbids everything ADR-0005 requires; then compiles each case of `xtask/lint-canary` and checks that Clippy or the compiler rejects it (or, for the one sanctioned exception, accepts it).
+7. `guardrails`: checks that every crate inherits the workspace lints, that the copies in bayan-ffi and bayan-wasm have not drifted, that `rust-version` equals the pinned toolchain, and that `clippy.toml` still forbids everything ADR-0005 requires; then compiles each case of `xtask/lint-canary`, a crate configured like the core crates, and checks that Clippy or the compiler rejects it (or, for the one sanctioned exception, accepts it). The canary proves the rules work; the inheritance check and the preflight's Clippy-configuration check make sure they reach every crate.
 8. `supply-chain`: the hook where X-003 adds `check-exact-pins` and `check-lockfile-age`; no checks yet.
 9. `determinism`: the hook for determinism checks (ADR-0025 §1); no checks yet.
 
@@ -75,6 +75,7 @@ Every Cargo command prints `warning: ignoring registry.global-min-publish-age wi
 - `HashMap` and `HashSet` are forbidden because their iteration order is random (ADR-0005 §5); use `BTreeMap` and `BTreeSet`.
 - `unsafe` code is forbidden everywhere except bayan-ffi and bayan-wasm. There it is still denied by default and allowed only where `#[expect(unsafe_code, reason = "…")]` marks it, and every `unsafe` block needs a `// SAFETY:` comment (ADR-0006 §2).
 - Engine code never prints, never calls `unwrap()` outside tests, and never exits the process; documented errors and panics, and explicit numeric conversions, are required. `Cargo.toml` explains each lint.
+- Never add a `clippy.toml` or `.clippy.toml` anywhere below the repository root, and never set the `CLIPPY_CONF_DIR` environment variable (also not in the `[env]` table of `.cargo/config.toml`). Clippy does not merge configuration files: for each crate it reads only the nearest one above the crate's folder, so such a file would replace the root `clippy.toml`, bans included, for every crate beneath it. Put every Clippy setting in the root `clippy.toml`; the gate rejects any other configuration.
 - The only way to make an exception is `#[expect(lint_name, reason = "why this is safe")]` on the smallest item that needs it. `#[allow]`, and exceptions without a reason, are rejected; an `#[expect]` that is no longer needed fails the build, so exceptions cannot go stale. Clippy's own hint to "add `#[allow(…)]`" does not apply here. A hash map is acceptable only where its iteration order cannot affect any output, and the reason must say why.
 
 ## Adding a crate

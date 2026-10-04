@@ -1,4 +1,5 @@
 # Clippy configuration for every crate in the workspace (ADR-0005, ADR-0006 §6). `cargo xtask verify` proves that each entry below still triggers (Clippy silently ignores a misspelled method name).
+# This must stay the only Clippy configuration file in the repository. Clippy does not merge configuration files: for each crate it reads only the nearest clippy.toml or .clippy.toml above the crate's folder, so a file below the root would replace this one, bans included, for every crate beneath it. `cargo xtask verify` rejects such files and the CLIPPY_CONF_DIR environment variable; put every setting here.
 
 # Platform floating-point math: these methods call each platform's own math library, whose results differ between Windows, macOS, Linux and WebAssembly, so the same document would lay out or render differently (ADR-0005 §4). Basic arithmetic, `sqrt` and `mul_add` are exact IEEE-754 operations and stay allowed.
 # The list is every stable transcendental method of f32 and f64 in Rust 1.99. When a new one is stabilized (for example `gamma` or `erf`), add it in the monthly dependency session and call it in xtask/lint-canary.

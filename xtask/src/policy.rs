@@ -1,6 +1,7 @@
-//! Guardrail checks on the configuration itself. They make sure that the lint rules really apply to every crate, that the binding crates' copies of them have not drifted, that the toolchain and `rust-version` agree, and that `clippy.toml` still forbids everything ADR-0005 requires. The lint canaries (`canary.rs`) then prove that the configuration has the intended effect.
+//! Guardrail checks on the configuration itself. They make sure that Clippy reads only the root `clippy.toml`, that the lint rules really apply to every crate, that the binding crates' copies of them have not drifted, that the toolchain and `rust-version` agree, and that `clippy.toml` still forbids everything ADR-0005 requires. The lint canaries (`canary.rs`) then prove that the configuration has the intended effect.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::{json, process, toml_subset};
@@ -20,6 +21,12 @@ pub const REQUIRED_FLOAT_METHODS: [&str; 26] = [
 
 /// The types that `clippy.toml` must forbid because their iteration order is random (ADR-0005 §5).
 pub const REQUIRED_TYPES: [&str; 2] = ["std::collections::HashMap", "std::collections::HashSet"];
+
+/// The file names Clippy reads its configuration from. They are compared without regard to case, because on Windows and macOS `Clippy.toml` is the same file as `clippy.toml`.
+const CLIPPY_CONFIG_NAMES: [&str; 2] = ["clippy.toml", ".clippy.toml"];
+
+/// The folders of the repository root that the search for Clippy configuration files skips: build output and Git's own data.
+const NOT_SEARCHED: [&str; 2] = ["target", ".git"];
 
 /// A crate of the workspace.
 pub struct Member {
@@ -225,6 +232,63 @@ fn check_clippy_requirements(clippy: &ClippyConfig) -> Result<String, String> {
             missing.join(", ")
         ))
     }
+}
+
+/// Clippy reads only the root `clippy.toml`. `conf_dir` is the value of the `CLIPPY_CONF_DIR` environment variable, if it is set.
+///
+/// Clippy does not merge configuration files: for each crate it uses only the nearest `clippy.toml` or `.clippy.toml` it finds walking up from the crate's folder, or the one in `CLIPPY_CONF_DIR`. Any other file, or that variable, therefore replaces the root `clippy.toml` and silently drops its bans on platform floating-point math and hash collections, while the lint canary, which lives in `xtask/`, may keep passing.
+pub fn check_clippy_configuration(root: &Path, conf_dir: Option<&OsStr>) -> Result<String, String> {
+    if let Some(conf_dir) = conf_dir {
+        return Err(format!(
+            "the CLIPPY_CONF_DIR environment variable is set (to `{}`). It makes Clippy read its configuration from that folder instead of the root clippy.toml, so the bans on platform floating-point math and hash collections (ADR-0005) would silently stop applying. Unset it, or remove it from the [env] table of .cargo/config.toml, and run the gate again.",
+            conf_dir.to_string_lossy()
+        ));
+    }
+    let strays = stray_clippy_configs(root)?;
+    if strays.is_empty() {
+        return Ok("Clippy reads only the root clippy.toml (no other clippy.toml or .clippy.toml, and CLIPPY_CONF_DIR is not set)".to_owned());
+    }
+    let list: Vec<String> = strays
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect();
+    Err(format!(
+        "Clippy configuration files other than the root clippy.toml were found:\n{}\nClippy does not merge configuration files: for each crate it reads only the nearest clippy.toml or .clippy.toml above the crate's folder. A file below the root therefore replaces the root clippy.toml for every crate beneath it, and silently drops its bans on platform floating-point math and hash collections (ADR-0005). Put any Clippy setting you need into the root clippy.toml and delete these files.",
+        list.join("\n")
+    ))
+}
+
+/// Every file or folder named like a Clippy configuration file anywhere in the repository, except the root `clippy.toml`, as paths relative to the root and sorted. Symbolic links are reported by name but not followed.
+fn stray_clippy_configs(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let mut folders = vec![PathBuf::new()];
+    while let Some(folder) = folders.pop() {
+        let absolute = root.join(&folder);
+        let entries = std::fs::read_dir(&absolute)
+            .map_err(|error| format!("cannot read {}: {error}", absolute.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("cannot read {}: {error}", absolute.display()))?;
+            let name = entry.file_name();
+            let path = folder.join(&name);
+            let is_config = CLIPPY_CONFIG_NAMES
+                .iter()
+                .any(|config| name.to_string_lossy().eq_ignore_ascii_case(config));
+            if is_config && path != Path::new("clippy.toml") {
+                found.push(path.clone());
+            }
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("cannot read {}: {error}", root.join(&path).display()))?;
+            let skipped = folder.as_os_str().is_empty()
+                && NOT_SEARCHED.iter().any(|skip| name == OsStr::new(skip));
+            if file_type.is_dir() && !skipped {
+                folders.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// The pinned toolchain version from `rust-toolchain.toml`.
@@ -505,5 +569,97 @@ unwrap_used = "warn"
             ),
         ];
         assert!(check_binding_copies(root, &members).is_ok());
+    }
+
+    /// A folder tree for one test, removed again when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(test: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("bayan-xtask-{}-{test}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn files(self, relative_paths: &[&str]) -> Self {
+            for relative in relative_paths {
+                let path = self.0.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+            }
+            self
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_root_clippy_toml() {
+        let scratch = Scratch::new("only-root").files(&[
+            "clippy.toml",
+            "Cargo.toml",
+            "crates/bayan-units/Cargo.toml",
+            "crates/bayan-units/src/lib.rs",
+            // Build output and Git's data are not searched.
+            "target/package/old/clippy.toml",
+            ".git/clippy.toml",
+        ]);
+        let line = check_clippy_configuration(&scratch.0, None)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(
+            line.starts_with("Clippy reads only the root clippy.toml"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn rejects_clippy_configuration_files_below_or_beside_the_root() {
+        let scratch = Scratch::new("strays").files(&[
+            "clippy.toml",
+            ".clippy.toml",
+            "crates/clippy.toml",
+            "crates/bayan-units/.clippy.toml",
+            // On Windows and macOS this is the same file as `clippy.toml`.
+            "fuzz/Clippy.TOML",
+            // Only the root's `target` folder is skipped.
+            "spikes/target/clippy.toml",
+        ]);
+        let expected: Vec<PathBuf> = [
+            ".clippy.toml",
+            "crates/bayan-units/.clippy.toml",
+            "crates/clippy.toml",
+            "fuzz/Clippy.TOML",
+            "spikes/target/clippy.toml",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(stray_clippy_configs(&scratch.0).unwrap(), expected);
+        let problem = check_clippy_configuration(&scratch.0, None).unwrap_err();
+        assert!(
+            problem.contains("Clippy does not merge configuration files"),
+            "{problem}"
+        );
+        let listed = format!("  {}", Path::new("crates").join("clippy.toml").display());
+        assert!(problem.contains(&listed), "{problem}");
+    }
+
+    #[test]
+    fn rejects_clippy_conf_dir() {
+        let scratch = Scratch::new("conf-dir").files(&["clippy.toml"]);
+        let problem = check_clippy_configuration(&scratch.0, Some(OsStr::new("/somewhere/else")))
+            .unwrap_err();
+        assert!(problem.contains("CLIPPY_CONF_DIR"), "{problem}");
+        assert!(problem.contains("/somewhere/else"), "{problem}");
+        assert!(
+            check_clippy_configuration(&scratch.0, Some(OsStr::new(""))).is_err(),
+            "an empty value is still set"
+        );
     }
 }
