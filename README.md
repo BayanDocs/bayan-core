@@ -18,4 +18,4 @@ Contributors and agents: start with [AGENTS.md](AGENTS.md).
 
 ## License
 
-Planned: MPL-2.0 ([ADR-0003](https://github.com/BayanDocs/docs/blob/HEAD/adr/0003-licensing-and-contribution-model.md), awaiting the owner's confirmation). Until a `LICENSE` file is added, all rights are reserved.
+GPL-3.0-or-later, except `crates/bayan-protocol/` (Apache-2.0, so anyone can build clients and integrations). See the [licensing FAQ](https://github.com/BayanDocs/docs/blob/HEAD/LICENSING.md) and [ADR-0003](https://github.com/BayanDocs/docs/blob/HEAD/adr/0003-licensing-and-contribution-model.md). The license files are being added by work package X-001; until then, all rights are reserved.

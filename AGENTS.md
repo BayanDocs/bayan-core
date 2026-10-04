@@ -23,6 +23,7 @@ The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`la
 
 ## Rules specific to bayan-core
 
+- **Licensing (ADR-0003):** the workspace is GPL-3.0-or-later, except `crates/bayan-protocol/`, which is Apache-2.0 so that anyone can implement BayanDocs clients and integrations. That crate must never depend on, or copy from, any GPL or AGPL code; GPL crates may depend on it.
 - **Layering:** a crate may depend only on crates in its own layer or below (foundation → model and formats → text → layout → output → interaction → engine → bindings and tools). Never add an upward dependency.
 - **Determinism (ADR-0004, ADR-0005):**
   - layout arithmetic uses integer BLU types from `bayan-units`, never floating point;
