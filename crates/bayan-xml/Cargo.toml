@@ -1,0 +1,12 @@
+[package]
+name = "bayan-xml"
+description = "BayanDocs streaming XML with Markup Compatibility processing and lossless preservation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

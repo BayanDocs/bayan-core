@@ -1,0 +1,7 @@
+# The exact Rust toolchain for bayan-core (ADR-0006 §1). rustup reads this file and installs this version automatically.
+# Rust 1.99.0 was released on 2026-10-01. Change it only in the monthly dependency session, to the newest stable release that is at least 24 hours old, together with `rust-version` in Cargo.toml and RUST_STABLE in the docs repository's scripts/cloud-environment-setup.sh.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

@@ -1,0 +1,12 @@
+[package]
+name = "bayan-crdt"
+description = "BayanDocs adapter to the CRDT library, exposing document-shaped collaboration primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

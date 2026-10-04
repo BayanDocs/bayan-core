@@ -1,0 +1,13 @@
+[package]
+name = "lint-canary"
+description = "Deliberately broken code that `cargo xtask verify` compiles to prove the workspace lints reject it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Configured exactly like a core crate, so what the lints reject here they reject in every core crate.
+[lints]
+workspace = true

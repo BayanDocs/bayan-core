@@ -1,0 +1,12 @@
+[package]
+name = "bayan-engine"
+description = "BayanDocs engine facade: message protocol, sessions, scheduling, host services, record and replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@ The engine of [BayanDocs](https://github.com/BayanDocs/docs): a free, open-sourc
 
 bayan-core contains everything that understands documents: the document model, `.docx` (and later RTF, DOC, ODT) import and export, text shaping, layout, rendering, PDF output, editing logic, proofing, collaboration data structures (CRDT) and end-to-end encryption (MLS). It is written in Rust and compiles to native libraries for the [desktop app](https://github.com/BayanDocs/bayan-desktop) and to WebAssembly for the [web app](https://github.com/BayanDocs/bayan-web). It also hosts the Fidelity Lab, which measures BayanDocs against Microsoft Word.
 
-> **Status: Phase 0 (Foundations).** No code yet. The first work package is [CORE-001](https://github.com/BayanDocs/docs/blob/HEAD/workpackages/phase-0/CORE-001-workspace-and-gate.md).
+> **Status: Phase 0 (Foundations).** The Cargo workspace, the crate skeletons and the verification gate, `cargo xtask verify`, are in place ([CORE-001](https://github.com/BayanDocs/docs/blob/HEAD/workpackages/phase-0/CORE-001-workspace-and-gate.md)); the crates themselves are still empty and are filled in by the next work packages.
 
 ## Where things are decided
 

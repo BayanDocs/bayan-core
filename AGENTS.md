@@ -19,7 +19,22 @@ The plan, decisions (ADRs), specifications and work packages live in the [BayanD
 
 ## What lives here
 
-The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`lab/`), fuzz targets (`fuzz/`), time-boxed experiments (`spikes/`, excluded from release artifacts), and the `xtask` automation crate. The crate map and layering are in `docs/plan/03-architecture.md` §4.
+The Rust engine is a Cargo workspace. The crate map and the layering are in `docs/plan/03-architecture.md` §4, and each crate's documentation (the top of its `src/lib.rs`) states its responsibility and its layer.
+
+| Path | What it is |
+|---|---|
+| `crates/` | The engine's crates. Phase 0 skeletons: bayan-units, bayan-opc and bayan-xml (Foundation layer); bayan-crdt and bayan-model (Model and formats); bayan-engine (Engine); bayan-ffi, bayan-wasm and bayan-cli (Bindings and tools). |
+| `xtask/` | The build automation behind `cargo xtask verify`, using only the standard library. |
+| `xtask/lint-canary/` | Deliberately broken code that the gate compiles to prove that the lint rules really reject what they must. |
+| `lab/` | Fidelity Lab tools (from LAB-001). |
+| `fuzz/` | Fuzz targets: a separate workspace on the nightly toolchain (from CORE-005 and CORE-006). |
+| `spikes/` | Time-boxed experiments, checked like all other code but excluded from release artifacts. |
+| `Cargo.toml` | Workspace settings, the shared dependency pins, and the lint levels of every crate. |
+| `rust-toolchain.toml` | The exact Rust version. |
+| `clippy.toml` | The methods and types Clippy forbids: platform floating-point math and hash collections. |
+| `deny.toml` | The dependency policy cargo-deny checks: security advisories, the license allowlist, allowed sources. |
+| `.cargo/config.toml` | The `cargo xtask` alias and the 24-hour minimum publish age. |
+| `.github/workflows/verify.yml` | CI: the verification gate on Linux, Windows and macOS. |
 
 ## Rules specific to bayan-core
 
@@ -27,7 +42,7 @@ The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`la
 - **Layering:** a crate may depend only on crates in its own layer or below (foundation → model and formats → text → layout → output → interaction → engine → bindings and tools). Never add an upward dependency.
 - **Determinism (ADR-0004, ADR-0005):**
   - layout arithmetic uses integer BLU types from `bayan-units`, never floating point;
-  - no platform floating-point transcendental functions (`sin`, `exp`, `powf`, …) anywhere in the core; use `bayan-units`;
+  - no platform floating-point transcendental functions (`sin`, `exp`, `powf`, …) anywhere in the core; use `bayan-units` (the full list of forbidden float methods is under "Lint rules and exceptions");
   - no output that depends on hash-map iteration order (use ordered maps or deterministic hashers);
   - no system time, locale, environment variables, installed fonts or thread scheduling in anything that affects output unless passed in by the host.
 - **Safety (ADR-0006):** `#![forbid(unsafe_code)]` everywhere except `bayan-ffi` and `bayan-wasm`; no C or C++ libraries for parsing untrusted input; every parser enforces size, depth and count limits and has a fuzz target; panics never cross the FFI or WebAssembly boundary.
@@ -38,10 +53,47 @@ The Rust engine (a Cargo workspace under `crates/`), the Fidelity Lab tools (`la
 
 ## Verification gate
 
-`cargo xtask verify` (created by CORE-001). Until CORE-001 has landed there is no code and no gate.
+Run `cargo xtask verify` before every push, from anywhere in the repository. CI runs the same command on `ubuntu-24.04`, `windows-latest` and `macos-latest` (arm64) for every pull request, every push to `main`, and every night. It needs rustup, which installs the pinned toolchain from `rust-toolchain.toml` by itself, and cargo-deny 0.20.2 (`cargo install --locked cargo-deny@0.20.2`; the BayanDocs cloud environment already has it). It first checks that both match their pins and that Clippy reads only the root `clippy.toml` (no other `clippy.toml` or `.clippy.toml` anywhere in the repository, and no `CLIPPY_CONF_DIR` environment variable), then runs these steps in order and stops at the first failure:
+
+1. `fmt`: `cargo fmt --all --check`.
+2. `clippy`: `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (every warning is an error).
+3. `test`: `cargo test --workspace --locked`.
+4. `wasm32`: `cargo build --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --target wasm32-unknown-unknown --locked`, with warnings as errors. Every crate is built for WebAssembly unless `NATIVE_ONLY` in `xtask/src/verify.rs` lists it with a reason.
+5. `doc`: `cargo doc --workspace --no-deps --locked`, with warnings as errors.
+6. `deny`: `cargo deny --locked check` (security advisories, licenses, banned or duplicate crates, sources).
+7. `guardrails`: checks that every crate inherits the workspace lints, that the copies in bayan-ffi and bayan-wasm have not drifted, that `rust-version` equals the pinned toolchain, and that `clippy.toml` still forbids everything ADR-0005 requires; then compiles each case of `xtask/lint-canary`, a crate configured like the core crates, and checks that Clippy or the compiler rejects it (or, for the two cases that must pass, accepts it: the sanctioned `#[expect]` exception, and the explicit comparison that replaces the forbidden float `clamp`). The canary proves the rules work; the inheritance check and the preflight's Clippy-configuration check make sure they reach every crate. An explicit `#[expect(…)]` exception in a crate's code still switches a rule off there, and the gate does not yet reject one for the float methods, so reviewers must (see "Lint rules and exceptions").
+8. `supply-chain`: the hook where X-003 adds `check-exact-pins` and `check-lockfile-age`; no checks yet.
+9. `determinism`: the hook for determinism checks (ADR-0025 §1); no checks yet.
+
+Each step prints its command, so a failing step can be re-run by itself. Never skip, weaken or disable a step to make a change pass (`docs/AGENTS.md` §4).
+
+Every Cargo command prints `warning: ignoring registry.global-min-publish-age without -Zmin-publish-age`. That is expected until the toolchain is Rust 1.100; keep the setting.
+
+## Lint rules and exceptions
+
+- Floating-point methods whose result is not exactly specified are forbidden in every crate, with no exceptions, because ADR-0005 §4 allows floating point only as exact IEEE-754 basic operations: platform math such as `sin`, `exp` and `powf`, whose results differ between platforms (use the deterministic functions in bayan-units); the `algebraic_*` methods, which let the compiler reorder or fuse operations (use the plain `+ - * / %` operators); and `min`, `max` and `clamp`, which may return `+0.0` or `-0.0` non-deterministically (compare explicitly, as in `if a > b { a } else { b }`). Arithmetic, `sqrt`, `mul_add`, rounding, sign and comparison methods are exact and allowed. The full list, with the reason for each, is in `clippy.toml`.
+- `HashMap` and `HashSet` are forbidden because their iteration order is random (ADR-0005 §5); use `BTreeMap` and `BTreeSet`.
+- `unsafe` code is forbidden everywhere except bayan-ffi and bayan-wasm. There it is still denied by default and allowed only where `#[expect(unsafe_code, reason = "…")]` marks it, and every `unsafe` block needs a `// SAFETY:` comment (ADR-0006 §2).
+- Engine code never prints, never calls `unwrap()` outside tests, and never exits the process; documented errors and panics, and explicit numeric conversions, are required. `Cargo.toml` explains each lint.
+- Never add a `clippy.toml` or `.clippy.toml` anywhere below the repository root, and never set the `CLIPPY_CONF_DIR` environment variable (also not in the `[env]` table of `.cargo/config.toml`). Clippy does not merge configuration files: for each crate it reads only the nearest one above the crate's folder, so such a file would replace the root `clippy.toml`, bans included, for every crate beneath it. Put every Clippy setting in the root `clippy.toml`; the gate rejects any other configuration.
+- The only way to make an exception is `#[expect(lint_name, reason = "why this is safe")]` on the smallest item that needs it. `#[allow]`, and exceptions without a reason, are rejected; an `#[expect]` that is no longer needed fails the build, so exceptions cannot go stale. Clippy's own hint to "add `#[allow(…)]`" does not apply here. The float-method bans have no exceptions, because ADR-0005 §4 allows none: never write `#[expect(clippy::disallowed_methods, …)]`. `#[expect(clippy::disallowed_types, reason = "…")]` is only for a hash map or set whose iteration order cannot affect any output, and the reason must say why.
+
+## Adding a crate
+
+1. Create `crates/<name>/` with a `Cargo.toml` like the existing crates' (every `[package]` field taken from the workspace, plus `[lints]` with `workspace = true`), and make sure the crate is in the crate map of `docs/plan/03-architecture.md`.
+2. Start `src/lib.rs` with crate documentation that states the crate's responsibility, its layer and the layering rule (copy the wording of an existing crate), followed by `#![forbid(unsafe_code)]`.
+3. Depend only on crates of the same layer or below. Declare third-party dependencies once in `[workspace.dependencies]` of the root `Cargo.toml`, with an exact `=x.y.z` version, and justify each in the pull request (ADR-0017).
+4. If the crate cannot run in a browser, such as a command-line tool, add it to `NATIVE_ONLY` in `xtask/src/verify.rs` with the reason; otherwise the gate builds it for WebAssembly.
+5. Run `cargo xtask verify`.
+
+Spike and Fidelity Lab crates live in `spikes/` and `lab/` and are added to `members` in the root `Cargo.toml` by name; see the READMEs there.
+
+## Toolchain
+
+Rust is pinned to 1.99.0 (released 2026-10-01) in `rust-toolchain.toml`, which is also the minimum supported version (`rust-version` in `Cargo.toml`, ADR-0006 §7). Change it only in the monthly dependency session, to the newest stable release that is at least 24 hours old, in three places at once: `rust-toolchain.toml`, `rust-version` in `Cargo.toml` (the gate checks that they are equal), and `RUST_STABLE` in the docs repository's `scripts/cloud-environment-setup.sh`. Rust 1.100 (2026-11-12) is the first release that enforces `global-min-publish-age`; adopt it in the first session after it is 24 hours old.
 
 ## Dependency mechanisms
 
-Exact `=x.y.z` requirements in `[workspace.dependencies]`; `Cargo.lock` committed and builds run with `--locked`; `.cargo/config.toml` sets `global-min-publish-age = "1 day"` (enforced natively from Rust 1.100); a lockfile-age check and `cargo deny` run in CI (X-003). Routine upgrades happen only in the monthly dependency session.
+Exact `=x.y.z` requirements in `[workspace.dependencies]`; `Cargo.lock` committed and every build runs with `--locked`; `.cargo/config.toml` sets `global-min-publish-age = "1 day"` (enforced natively from Rust 1.100). `cargo deny check` runs in the gate on every pull request and every night, with the minimal `deny.toml` from CORE-001: RustSec advisories (yanked versions included), the ADR-0017 license allowlist, and crates.io as the only source. X-003 completes `deny.toml` and adds the lockfile-age and exact-pin checks to the gate. Tools used in CI are pinned and checksum-verified: cargo-deny 0.20.2 in `.github/workflows/verify.yml`, matched by `CARGO_DENY_VERSION` in `xtask/src/verify.rs` (a test keeps them equal); GitHub Actions are pinned to full commit SHAs. xtask itself has no dependencies. Routine upgrades happen only in the monthly dependency session.
 
 In BayanDocs cloud sessions the tools are preinstalled at pinned versions by `docs/scripts/cloud-environment-setup.sh`; run `bayandocs-tools` to list them. If a tool is missing, install the version pinned there (never a newer one) and mention it in the pull request.

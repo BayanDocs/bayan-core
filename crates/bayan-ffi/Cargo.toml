@@ -1,0 +1,69 @@
+[package]
+name = "bayan-ffi"
+description = "BayanDocs engine C ABI for the desktop shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A binding crate must contain unsafe code, and Cargo cannot override a single inherited lint, so this crate keeps its own copy of the workspace lint tables (root Cargo.toml) with one difference: `unsafe_code` is "deny" instead of "forbid". `cargo xtask verify` fails if the copy drifts from the original. Unsafe code is allowed only where `#[expect(unsafe_code, reason = "…")]` marks it, and every `unsafe` block needs a `// SAFETY:` comment (ADR-0006 §2).
+[lints.rust]
+# The only difference from the workspace tables: unsafe code is denied, not forbidden, so it can be allowed where it is unavoidable.
+unsafe_code = "deny"
+# Inside an `unsafe fn`, each unsafe operation still needs its own `unsafe { }` block with a `// SAFETY:` comment.
+unsafe_op_in_unsafe_fn = "deny"
+# Every public item is documented.
+missing_docs = "warn"
+# Identifiers are ASCII, so look-alike letters from other scripts cannot hide in code review (documents may of course contain any script).
+non_ascii_idents = "deny"
+# Declares the switch that lets the lint canary (xtask/lint-canary) compile its deliberately broken code; nothing else uses it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bayan_lint_canary, values(any()))"] }
+
+[lints.clippy]
+# Clippy's default groups: correctness, suspicious, style, complexity, performance.
+all = { level = "warn", priority = -1 }
+# One lint of those groups is switched off: manual_clamp recommends f32::clamp and f64::clamp, which clippy.toml forbids because they may return +0.0 or -0.0 non-deterministically, and it flags exactly the explicit comparison that is the sanctioned replacement (`if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }`). The lint canary's explicit_clamp case fails if this line is removed.
+manual_clamp = "allow"
+# Pedantic subset, numbers: layout arithmetic is integer BLU (ADR-0005), where a silent truncating, wrapping or sign-losing `as` cast is a layout bug.
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+checked_conversions = "warn"
+invalid_upcast_comparisons = "warn"
+unreadable_literal = "warn"
+# Pedantic subset, raw pointers: explicit and checked pointer casts in the FFI and WebAssembly bindings.
+borrow_as_ptr = "warn"
+cast_ptr_alignment = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
+transmute_ptr_to_ptr = "warn"
+# Pedantic subset, robustness and clarity: documented errors and panics, no huge stack arrays (the WebAssembly stack is small), no wildcard that hides a new enum variant, explicit imports.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+large_stack_arrays = "warn"
+match_wildcard_for_single_variants = "warn"
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+# Restriction lints, determinism: iterating a hash map or set visits items in a random order (ADR-0005 §5).
+iter_over_hash_type = "warn"
+# Restriction lints, unsafe code (binding crates only): one operation per `unsafe` block, each with a `// SAFETY:` comment, and no such comments on safe code.
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+# Restriction lints, exceptions: a lint is switched off only with `#[expect(lint, reason = "…")]`, never `#[allow]`, so every exception carries a justification and is flagged once it is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Restriction lints, engine hygiene: no `unwrap()` on hostile input (tests may), no leftover debugging or placeholders, no exiting the host process, and no printing (the engine never logs document content; the command-line tools opt in).
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+exit = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
