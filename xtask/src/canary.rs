@@ -25,9 +25,13 @@ pub struct Case {
 }
 
 /// Every case, in the order they run.
-pub const CASES: [Case; 7] = [
+pub const CASES: [Case; 8] = [
     Case {
         name: "disallowed_methods",
+        tool: Tool::Clippy,
+    },
+    Case {
+        name: "explicit_clamp",
         tool: Tool::Clippy,
     },
     Case {
@@ -151,6 +155,13 @@ pub fn judge(case: &str, outcome: &Outcome, clippy: &ClippyConfig) -> Result<Str
                 "Clippy rejected all {} disallowed methods, including a path-style call, pointing to bayan-units",
                 clippy.methods.len()
             ))
+        }
+        "explicit_clamp" => {
+            if outcome.success {
+                Ok("Clippy accepted the explicit comparison that replaces the forbidden `clamp` (`manual_clamp` is switched off)".to_owned())
+            } else {
+                Err("Clippy rejected the explicit comparison that replaces the forbidden `f32::clamp` and `f64::clamp`; is `manual_clamp = \"allow\"` still in the workspace lints?".to_owned())
+            }
         }
         "disallowed_types" => {
             rejected(outcome, "clippy::disallowed_types")?;
@@ -347,9 +358,24 @@ mod tests {
     }
 
     #[test]
+    fn requires_the_explicit_clamp_to_compile() {
+        let accepted = Outcome {
+            success: true,
+            text: String::new(),
+        };
+        assert!(judge("explicit_clamp", &accepted, &clippy()).is_ok());
+        let problem = judge("explicit_clamp", &failed(""), &clippy()).unwrap_err();
+        assert!(problem.contains("manual_clamp"), "{problem}");
+    }
+
+    #[test]
     fn shows_how_to_reproduce_a_case() {
+        let case = CASES
+            .iter()
+            .find(|case| case.name == "unsafe_block")
+            .unwrap();
         assert_eq!(
-            reproduction(&CASES[5]),
+            reproduction(case),
             "RUSTFLAGS='--cfg bayan_lint_canary=\"unsafe_block\"' cargo build -p lint-canary --target-dir target/lint-canary"
         );
     }
