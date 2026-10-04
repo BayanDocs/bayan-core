@@ -7,7 +7,7 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use crate::process::{self, cargo};
-use crate::{canary, flags, policy};
+use crate::{canary, flags, policy, sources};
 
 /// The cargo-deny version the gate uses. CI installs exactly this version, checked against SHA-256 checksums in `.github/workflows/verify.yml`; change both together, in the monthly dependency session.
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
@@ -56,7 +56,7 @@ pub const STEPS: [Step; 9] = [
     Step {
         name: "clippy",
         title: "Lints (Clippy; warnings are errors)",
-        run: clippy,
+        run: clippy_step,
     },
     Step {
         name: "test",
@@ -128,7 +128,7 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script, so that a pass means the same thing everywhere. Everything here is checked before anything is built.
+/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels, no unlisted build script and no code hidden from Clippy, so that a pass means the same thing everywhere. Everything here is checked before anything is built.
 fn preflight(root: &Path) -> Result<(), String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -179,9 +179,15 @@ fn preflight(root: &Path) -> Result<(), String> {
     println!("    {line}");
 
     // Checked before anything is built, because Cargo runs a build script before it compiles the script's crate.
-    let (members, scripts) = policy::build_scripts(&policy::metadata(root)?)?;
+    let metadata = policy::metadata(root)?;
+    let (members, scripts) = policy::build_scripts(&metadata)?;
     let allowed: Vec<&str> = BUILD_SCRIPTS.iter().map(|(name, _)| *name).collect();
     let line = policy::check_build_scripts(&members, &scripts, &allowed)?;
+    println!("    {line}");
+
+    // Checked before Clippy first runs, because code under `cfg(not(clippy))` would pass the Clippy step unseen.
+    let folders = policy::member_folders(&metadata);
+    let line = sources::check(root, &folders)?;
     println!("    {line}");
     Ok(())
 }
@@ -190,7 +196,7 @@ fn fmt(root: &Path) -> Result<(), String> {
     process::run(cargo(root).args(["fmt", "--all", "--check"]))
 }
 
-fn clippy(root: &Path) -> Result<(), String> {
+fn clippy_step(root: &Path) -> Result<(), String> {
     process::run(cargo(root).args([
         "clippy",
         "--workspace",
@@ -243,7 +249,7 @@ fn guardrails(root: &Path) -> Result<(), String> {
     for line in policy::check(&workspace, &native_only)? {
         println!("    ok: {line}");
     }
-    canary::check_all(root, &workspace.clippy)
+    canary::check_all(root, &workspace.clippy_config)
 }
 
 fn supply_chain(root: &Path) -> Result<(), String> {

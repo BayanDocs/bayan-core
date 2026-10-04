@@ -87,7 +87,7 @@ pub struct Workspace {
     /// `rust-toolchain.toml`.
     pub toolchain_toml: String,
     /// What `clippy.toml` disallows.
-    pub clippy: ClippyConfig,
+    pub clippy_config: ClippyConfig,
     /// Every crate of the workspace, as Cargo sees it.
     pub members: Vec<Member>,
 }
@@ -96,7 +96,7 @@ impl Workspace {
     /// Reads the configuration files and asks Cargo for the list of workspace members.
     pub fn load(root: &Path) -> Result<Self, String> {
         let clippy_toml = read(&root.join("clippy.toml"))?;
-        let clippy = ClippyConfig {
+        let clippy_config = ClippyConfig {
             methods: disallowed(&clippy_toml, "disallowed-methods")?,
             types: disallowed(&clippy_toml, "disallowed-types")?,
         };
@@ -116,7 +116,7 @@ impl Workspace {
         Ok(Self {
             cargo_toml: read(&root.join("Cargo.toml"))?,
             toolchain_toml: read(&root.join("rust-toolchain.toml"))?,
-            clippy,
+            clippy_config,
             members,
         })
     }
@@ -130,7 +130,7 @@ pub fn check(workspace: &Workspace, native_only: &[&str]) -> Result<Vec<String>,
         check_lint_inheritance(&workspace.members, native_only),
         check_binding_copies(&workspace.cargo_toml, &workspace.members),
         check_rust_version(&workspace.cargo_toml, &workspace.toolchain_toml),
-        check_clippy_requirements(&workspace.clippy),
+        check_clippy_requirements(&workspace.clippy_config),
     ];
     let mut passed = Vec::new();
     let mut problems = Vec::new();
@@ -255,18 +255,22 @@ fn check_rust_version(cargo_toml: &str, toolchain_toml: &str) -> Result<String, 
 }
 
 /// `clippy.toml` still forbids every method and type that ADR-0005 requires.
-fn check_clippy_requirements(clippy: &ClippyConfig) -> Result<String, String> {
+fn check_clippy_requirements(clippy_config: &ClippyConfig) -> Result<String, String> {
     let mut missing = Vec::new();
     for float in ["f32", "f64"] {
         for method in REQUIRED_FLOAT_METHODS {
             let path = format!("{float}::{method}");
-            if !clippy.methods.contains(&path) {
+            if !clippy_config.methods.contains(&path) {
                 missing.push(path);
             }
         }
     }
     for path in REQUIRED_TYPES {
-        if !clippy.types.iter().any(|configured| configured == path) {
+        if !clippy_config
+            .types
+            .iter()
+            .any(|configured| configured == path)
+        {
             missing.push(path.to_owned());
         }
     }
@@ -508,6 +512,14 @@ pub fn check_build_scripts(
         "{}\nA build script runs code during the build and can change how its crate is compiled, for example by setting CLIPPY_CONF_DIR or other compiler variables through `cargo::rustc-env`, which switches off the bans of the root clippy.toml for that crate. Build scripts are therefore kept to a minimum (ADR-0017): remove the script (or `build = \"…\"` from the manifest), or, if the crate really needs it, add it to BUILD_SCRIPTS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the script. A build script must never set Clippy or compiler variables.",
         problems.join("\n")
     ))
+}
+
+/// The folder of every workspace member (the folder of its `Cargo.toml`), from the JSON of [`metadata`].
+pub fn member_folders(metadata: &str) -> Vec<PathBuf> {
+    json::string_values(metadata, "manifest_path")
+        .into_iter()
+        .filter_map(|manifest| PathBuf::from(manifest).parent().map(Path::to_path_buf))
+        .collect()
 }
 
 /// The manifest of every workspace member, from `cargo metadata`.
@@ -811,13 +823,13 @@ unwrap_used = "warn"
     fn reads_the_disallowed_lists_of_the_real_clippy_toml() {
         // The real file must parse and contain every required entry; it may contain more, which the canaries then prove. A failure shows the problem itself, not just "assertion failed".
         let text = include_str!("../../clippy.toml");
-        let clippy = ClippyConfig {
+        let clippy_config = ClippyConfig {
             methods: disallowed(text, "disallowed-methods")
                 .unwrap_or_else(|problem| panic!("{problem}")),
             types: disallowed(text, "disallowed-types")
                 .unwrap_or_else(|problem| panic!("{problem}")),
         };
-        check_clippy_requirements(&clippy).unwrap_or_else(|problem| panic!("{problem}"));
+        check_clippy_requirements(&clippy_config).unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]

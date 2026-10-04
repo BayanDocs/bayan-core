@@ -77,7 +77,7 @@ pub struct Outcome {
 }
 
 /// Compiles every case and checks the result, printing one line per case.
-pub fn check_all(root: &Path, clippy: &ClippyConfig) -> Result<(), String> {
+pub fn check_all(root: &Path, clippy_config: &ClippyConfig) -> Result<(), String> {
     // The canaries have their own build directory, so they never disturb the normal build, and each case has its own folder in it, so no case can reuse another's result. It is emptied first: Cargo replays the result of an earlier compilation when it believes nothing changed, and a guardrail must not depend on that belief.
     let target_dir = root.join("target").join(CANARY_DIR);
     match std::fs::remove_dir_all(&target_dir) {
@@ -88,7 +88,7 @@ pub fn check_all(root: &Path, clippy: &ClippyConfig) -> Result<(), String> {
     }
     for case in &CASES {
         let outcome = compile(root, &target_dir.join(case.name), case)?;
-        match judge(case.name, &outcome, clippy) {
+        match judge(case.name, &outcome, clippy_config) {
             Ok(summary) => println!("    ok: canary `{}`: {summary}", case.name),
             Err(problem) => {
                 let diagnostics = json::string_values(&outcome.text, "rendered").concat();
@@ -169,11 +169,19 @@ fn overruled_exceptions(case: &str) -> &'static [(&'static str, &'static str)] {
 }
 
 /// Decides whether a case behaved as required. Returns a one-line summary, or what went wrong.
-pub fn judge(case: &str, outcome: &Outcome, clippy: &ClippyConfig) -> Result<String, String> {
+pub fn judge(
+    case: &str,
+    outcome: &Outcome,
+    clippy_config: &ClippyConfig,
+) -> Result<String, String> {
     match case {
         "disallowed_methods" => {
             rejected(outcome, "clippy::disallowed_methods")?;
-            every_path_reported(outcome, "use of a disallowed method", &clippy.methods)?;
+            every_path_reported(
+                outcome,
+                "use of a disallowed method",
+                &clippy_config.methods,
+            )?;
             mentions(
                 outcome,
                 "f64::sin(x)",
@@ -186,7 +194,7 @@ pub fn judge(case: &str, outcome: &Outcome, clippy: &ClippyConfig) -> Result<Str
             )?;
             Ok(format!(
                 "Clippy rejected all {} disallowed methods, including a path-style call, pointing to bayan-units",
-                clippy.methods.len()
+                clippy_config.methods.len()
             ))
         }
         "explicit_clamp" => {
@@ -198,10 +206,10 @@ pub fn judge(case: &str, outcome: &Outcome, clippy: &ClippyConfig) -> Result<Str
         }
         "disallowed_types" => {
             rejected(outcome, "clippy::disallowed_types")?;
-            every_path_reported(outcome, "use of a disallowed type", &clippy.types)?;
+            every_path_reported(outcome, "use of a disallowed type", &clippy_config.types)?;
             Ok(format!(
                 "Clippy rejected all {} disallowed types",
-                clippy.types.len()
+                clippy_config.types.len()
             ))
         }
         "expect_with_reason" => {
@@ -342,7 +350,7 @@ fn reproduction(case: &Case) -> String {
 mod tests {
     use super::*;
 
-    fn clippy() -> ClippyConfig {
+    fn clippy_config() -> ClippyConfig {
         ClippyConfig {
             methods: vec!["f32::sin".to_owned(), "f64::sin".to_owned()],
             types: vec!["std::collections::HashMap".to_owned()],
@@ -378,7 +386,7 @@ mod tests {
     #[test]
     fn every_case_has_a_verdict() {
         for case in &CASES {
-            let verdict = judge(case.name, &failed(""), &clippy());
+            let verdict = judge(case.name, &failed(""), &clippy_config());
             assert!(
                 verdict
                     .as_ref()
@@ -392,13 +400,20 @@ mod tests {
 
     #[test]
     fn accepts_a_complete_rejection_of_the_disallowed_methods() {
-        assert!(judge("disallowed_methods", &failed(METHODS_REJECTED), &clippy()).is_ok());
+        assert!(
+            judge(
+                "disallowed_methods",
+                &failed(METHODS_REJECTED),
+                &clippy_config()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn notices_a_disallowed_method_that_did_not_trigger() {
         let text = METHODS_REJECTED.replace("`f32::sin`", "`f32::cos`");
-        let problem = judge("disallowed_methods", &failed(&text), &clippy()).unwrap_err();
+        let problem = judge("disallowed_methods", &failed(&text), &clippy_config()).unwrap_err();
         assert!(problem.contains("no diagnostic for f32::sin"), "{problem}");
     }
 
@@ -408,14 +423,14 @@ mod tests {
             success: true,
             text: String::new(),
         };
-        let problem = judge("unsafe_block", &outcome, &clippy()).unwrap_err();
+        let problem = judge("unsafe_block", &outcome, &clippy_config()).unwrap_err();
         assert!(problem.contains("it compiled"), "{problem}");
     }
 
     #[test]
     fn notices_a_canary_that_failed_for_another_reason() {
         let outcome = failed(r#"{"message":{"code":{"code":"E0425","explanation":null}}}"#);
-        let problem = judge("unsafe_block", &outcome, &clippy()).unwrap_err();
+        let problem = judge("unsafe_block", &outcome, &clippy_config()).unwrap_err();
         assert!(
             problem.contains("not because of `unsafe_code`"),
             "{problem}"
@@ -431,11 +446,11 @@ mod tests {
                     success: true,
                     text: String::new()
                 },
-                &clippy()
+                &clippy_config()
             )
             .is_ok()
         );
-        assert!(judge("expect_with_reason", &failed(""), &clippy()).is_err());
+        assert!(judge("expect_with_reason", &failed(""), &clippy_config()).is_err());
     }
 
     #[test]
@@ -444,8 +459,8 @@ mod tests {
             success: true,
             text: String::new(),
         };
-        assert!(judge("explicit_clamp", &accepted, &clippy()).is_ok());
-        let problem = judge("explicit_clamp", &failed(""), &clippy()).unwrap_err();
+        assert!(judge("explicit_clamp", &accepted, &clippy_config()).is_ok());
+        let problem = judge("explicit_clamp", &failed(""), &clippy_config()).unwrap_err();
         assert!(problem.contains("manual_clamp"), "{problem}");
     }
 
@@ -485,7 +500,7 @@ mod tests {
         let verdict = judge(
             "expect_disallowed_methods",
             &failed(&all.join("\n")),
-            &clippy(),
+            &clippy_config(),
         );
         assert!(verdict.is_ok(), "{verdict:?}");
 
@@ -493,7 +508,7 @@ mod tests {
         let problem = judge(
             "expect_disallowed_methods",
             &failed(&all[..3].join("\n")),
-            &clippy(),
+            &clippy_config(),
         )
         .unwrap_err();
         assert!(
@@ -507,7 +522,8 @@ mod tests {
             overruled("clippy::style", "canary: all group"),
         ]
         .join("\n");
-        let problem = judge("expect_lint_groups", &failed(&wrong_lint), &clippy()).unwrap_err();
+        let problem =
+            judge("expect_lint_groups", &failed(&wrong_lint), &clippy_config()).unwrap_err();
         assert!(problem.contains("expect(clippy::all"), "{problem}");
         assert!(!problem.contains("expect(clippy::style"), "{problem}");
     }
@@ -518,7 +534,7 @@ mod tests {
             success: true,
             text: String::new(),
         };
-        let problem = judge("expect_lint_groups", &compiled, &clippy()).unwrap_err();
+        let problem = judge("expect_lint_groups", &compiled, &clippy_config()).unwrap_err();
         assert!(problem.contains("it compiled"), "{problem}");
     }
 

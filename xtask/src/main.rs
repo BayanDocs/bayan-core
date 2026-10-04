@@ -20,6 +20,7 @@ mod flags;
 mod json;
 mod policy;
 mod process;
+mod sources;
 mod toml_subset;
 mod verify;
 
