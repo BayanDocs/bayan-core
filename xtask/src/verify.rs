@@ -7,7 +7,7 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use crate::process::{self, cargo};
-use crate::{canary, policy};
+use crate::{canary, flags, policy};
 
 /// The cargo-deny version the gate uses. CI installs exactly this version, checked against SHA-256 checksums in `.github/workflows/verify.yml`; change both together, in the monthly dependency session.
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
@@ -24,6 +24,9 @@ pub const NATIVE_ONLY: [(&str, &str); 3] = [
     ),
     ("xtask", "this build automation"),
 ];
+
+/// Workspace members that may have a build script, with the reason. A build script runs code during the build and can change how its crate is compiled (for example, setting `CLIPPY_CONF_DIR` through `cargo::rustc-env` would switch off the bans of the root `clippy.toml` for that crate), so the preflight rejects every build script that is not listed here (ADR-0017 asks to keep them to a minimum). Reviewers read every listed script, and a build script must never set Clippy or compiler variables.
+pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
@@ -125,7 +128,7 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools and with the root Clippy configuration only, so that a pass means the same thing everywhere.
+/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script, so that a pass means the same thing everywhere. Everything here is checked before anything is built.
 fn preflight(root: &Path) -> Result<(), String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -161,6 +164,24 @@ fn preflight(root: &Path) -> Result<(), String> {
     // Checked before Clippy first runs, because another configuration file would quietly change what every later step checks.
     let clippy_conf_dir = std::env::var_os("CLIPPY_CONF_DIR");
     let line = policy::check_clippy_configuration(root, clippy_conf_dir.as_deref())?;
+    println!("    {line}");
+
+    // Cargo passes the [env] table of .cargo/config.toml to `cargo run`, so xtask's environment includes it.
+    let env: Vec<(String, String)> = std::env::vars_os()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let line = flags::check(&env, &flags::read_configs(root)?)?;
+    println!("    {line}");
+
+    // Checked before anything is built, because Cargo runs a build script before it compiles the script's crate.
+    let (members, scripts) = policy::build_scripts(&policy::metadata(root)?)?;
+    let allowed: Vec<&str> = BUILD_SCRIPTS.iter().map(|(name, _)| *name).collect();
+    let line = policy::check_build_scripts(&members, &scripts, &allowed)?;
     println!("    {line}");
     Ok(())
 }

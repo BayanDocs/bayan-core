@@ -16,6 +16,7 @@
 )]
 
 mod canary;
+mod flags;
 mod json;
 mod policy;
 mod process;
