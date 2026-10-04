@@ -1,0 +1,104 @@
+# Runs the verification gate, `cargo xtask verify`, on Linux, Windows and macOS for every pull request and every push to main (work package CORE-001).
+# Workflow rules (ADR-0017): actions pinned to full commit SHAs with the version in a comment, minimal permissions, no credentials kept after checkout, a timeout on every job, tools downloaded at pinned versions and checked against SHA-256 checksums, and caching only with GitHub's own actions.
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Every night, so that a new security advisory against a dependency on main is noticed even when nobody pushes (ADR-0017 §7).
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation helps only when one machine rebuilds again and again; in CI it just makes the cache bigger.
+  CARGO_INCREMENTAL: 0
+  # Must equal CARGO_DENY_VERSION in xtask/src/verify.rs (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
+  CARGO_DENY_VERSION: 0.20.2
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - name: Install cargo-deny (pinned version, SHA-256 checked)
+        run: |
+          # Release archives of cargo-deny 0.20.2 (published 2026-07-09); the checksums match the .sha256 files published with the release.
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) target=x86_64-unknown-linux-musl sha256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f exe= ;;
+            Windows-X64) target=x86_64-pc-windows-msvc sha256=975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc exe=.exe ;;
+            macOS-ARM64) target=aarch64-apple-darwin sha256=fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3 exe= ;;
+            *) echo "::error::No pinned cargo-deny build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          name="cargo-deny-$CARGO_DENY_VERSION-$target"
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          if command -v sha256sum > /dev/null; then actual=$(sha256sum "$name.tar.gz"); else actual=$(shasum -a 256 "$name.tar.gz"); fi
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::cargo-deny checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          tar -xzf "$name.tar.gz"
+          # Install next to cargo (rustup's bin directory), which is already on PATH.
+          cp "$name/cargo-deny$exe" "$(dirname "$(command -v cargo)")/"
+          cargo deny --version
+
+      - name: Restore the build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Run the verification gate
+        run: cargo xtask verify
+
+      # Only runs on main write the cache, so a pull request can never change what other runs restore.
+      - name: Save the build cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
