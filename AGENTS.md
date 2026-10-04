@@ -42,7 +42,7 @@ The Rust engine is a Cargo workspace. The crate map and the layering are in `doc
 - **Layering:** a crate may depend only on crates in its own layer or below (foundation → model and formats → text → layout → output → interaction → engine → bindings and tools). Never add an upward dependency.
 - **Determinism (ADR-0004, ADR-0005):**
   - layout arithmetic uses integer BLU types from `bayan-units`, never floating point;
-  - no platform floating-point transcendental functions (`sin`, `exp`, `powf`, …) anywhere in the core; use `bayan-units`;
+  - no platform floating-point transcendental functions (`sin`, `exp`, `powf`, …) anywhere in the core; use `bayan-units` (the full list of forbidden float methods is under "Lint rules and exceptions");
   - no output that depends on hash-map iteration order (use ordered maps or deterministic hashers);
   - no system time, locale, environment variables, installed fonts or thread scheduling in anything that affects output unless passed in by the host.
 - **Safety (ADR-0006):** `#![forbid(unsafe_code)]` everywhere except `bayan-ffi` and `bayan-wasm`; no C or C++ libraries for parsing untrusted input; every parser enforces size, depth and count limits and has a fuzz target; panics never cross the FFI or WebAssembly boundary.
@@ -71,12 +71,12 @@ Every Cargo command prints `warning: ignoring registry.global-min-publish-age wi
 
 ## Lint rules and exceptions
 
-- Floating-point methods such as `sin`, `exp` and `powf` are forbidden in every crate, because their results differ between platforms (ADR-0005 §4); use the deterministic functions in bayan-units. Basic arithmetic, `sqrt` and `mul_add` are exact and allowed.
+- Floating-point methods whose result is not exactly specified are forbidden in every crate, with no exceptions, because ADR-0005 §4 allows floating point only as exact IEEE-754 basic operations: platform math such as `sin`, `exp` and `powf`, whose results differ between platforms (use the deterministic functions in bayan-units); the `algebraic_*` methods, which let the compiler reorder or fuse operations (use the plain `+ - * / %` operators); and `min`, `max` and `clamp`, which may return `+0.0` or `-0.0` non-deterministically (compare explicitly, as in `if a > b { a } else { b }`). Arithmetic, `sqrt`, `mul_add`, rounding, sign and comparison methods are exact and allowed. The full list, with the reason for each, is in `clippy.toml`.
 - `HashMap` and `HashSet` are forbidden because their iteration order is random (ADR-0005 §5); use `BTreeMap` and `BTreeSet`.
 - `unsafe` code is forbidden everywhere except bayan-ffi and bayan-wasm. There it is still denied by default and allowed only where `#[expect(unsafe_code, reason = "…")]` marks it, and every `unsafe` block needs a `// SAFETY:` comment (ADR-0006 §2).
 - Engine code never prints, never calls `unwrap()` outside tests, and never exits the process; documented errors and panics, and explicit numeric conversions, are required. `Cargo.toml` explains each lint.
 - Never add a `clippy.toml` or `.clippy.toml` anywhere below the repository root, and never set the `CLIPPY_CONF_DIR` environment variable (also not in the `[env]` table of `.cargo/config.toml`). Clippy does not merge configuration files: for each crate it reads only the nearest one above the crate's folder, so such a file would replace the root `clippy.toml`, bans included, for every crate beneath it. Put every Clippy setting in the root `clippy.toml`; the gate rejects any other configuration.
-- The only way to make an exception is `#[expect(lint_name, reason = "why this is safe")]` on the smallest item that needs it. `#[allow]`, and exceptions without a reason, are rejected; an `#[expect]` that is no longer needed fails the build, so exceptions cannot go stale. Clippy's own hint to "add `#[allow(…)]`" does not apply here. A hash map is acceptable only where its iteration order cannot affect any output, and the reason must say why.
+- The only way to make an exception is `#[expect(lint_name, reason = "why this is safe")]` on the smallest item that needs it. `#[allow]`, and exceptions without a reason, are rejected; an `#[expect]` that is no longer needed fails the build, so exceptions cannot go stale. Clippy's own hint to "add `#[allow(…)]`" does not apply here. The float-method bans have no exceptions, because ADR-0005 §4 allows none: never write `#[expect(clippy::disallowed_methods, …)]`. `#[expect(clippy::disallowed_types, reason = "…")]` is only for a hash map or set whose iteration order cannot affect any output, and the reason must say why.
 
 ## Adding a crate
 

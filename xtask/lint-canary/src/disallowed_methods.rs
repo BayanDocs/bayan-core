@@ -27,6 +27,14 @@ pub fn f32_methods(x: f32, y: f32) -> f32 {
         + x.asinh()
         + x.acosh()
         + x.atanh()
+        + x.algebraic_add(y)
+        + x.algebraic_sub(y)
+        + x.algebraic_mul(y)
+        + x.algebraic_div(y)
+        + x.algebraic_rem(y)
+        + x.min(y)
+        + x.max(y)
+        + x.clamp(0.0, 1.0)
 }
 
 /// Calls every disallowed `f64` method once.
@@ -58,6 +66,14 @@ pub fn f64_methods(x: f64, y: f64) -> f64 {
         + x.asinh()
         + x.acosh()
         + x.atanh()
+        + x.algebraic_add(y)
+        + x.algebraic_sub(y)
+        + x.algebraic_mul(y)
+        + x.algebraic_div(y)
+        + x.algebraic_rem(y)
+        + x.min(y)
+        + x.max(y)
+        + x.clamp(0.0, 1.0)
 }
 
 /// The same method called as a path instead of with a dot; Clippy must catch this spelling too.

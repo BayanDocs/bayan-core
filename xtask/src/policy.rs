@@ -12,11 +12,45 @@ pub const BINDING_CRATES: [&str; 2] = ["bayan-ffi", "bayan-wasm"];
 /// The tool tables of `[workspace.lints]`.
 const LINT_TOOLS: [&str; 3] = ["rust", "clippy", "rustdoc"];
 
-/// The floating-point methods that `clippy.toml` must forbid for both `f32` and `f64`: the list in work package CORE-001, plus `sin_cos`, `asinh`, `acosh` and `atanh`, which ADR-0005 §4 forbids too ("platform transcendental methods"). Together they are every stable transcendental method in Rust 1.99.
-pub const REQUIRED_FLOAT_METHODS: [&str; 26] = [
-    "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "exp", "exp2",
-    "exp_m1", "ln", "log", "log2", "log10", "ln_1p", "powf", "powi", "cbrt", "hypot", "sin_cos",
-    "asinh", "acosh", "atanh",
+/// The floating-point methods that `clippy.toml` must forbid for both `f32` and `f64`: every stable method of Rust 1.99 whose result is not exactly specified, which ADR-0005 §4 rules out because it allows only exact IEEE-754 basic operations. The other stable float methods (arithmetic, `sqrt`, `mul_add`, rounding, sign, comparisons, bit conversions) give the same bits on every platform.
+pub const REQUIRED_FLOAT_METHODS: [&str; 34] = [
+    // Platform math: the list in work package CORE-001, plus `sin_cos`, `asinh`, `acosh` and `atanh`. Each platform's math library rounds them differently.
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "exp",
+    "exp2",
+    "exp_m1",
+    "ln",
+    "log",
+    "log2",
+    "log10",
+    "ln_1p",
+    "powf",
+    "powi",
+    "cbrt",
+    "hypot",
+    "sin_cos",
+    "asinh",
+    "acosh",
+    "atanh",
+    // Relaxed arithmetic (stable since Rust 1.98): the compiler may reorder, fuse or approximate it.
+    "algebraic_add",
+    "algebraic_sub",
+    "algebraic_mul",
+    "algebraic_div",
+    "algebraic_rem",
+    // Documented to return +0.0 or -0.0 non-deterministically when the inputs compare equal.
+    "min",
+    "max",
+    "clamp",
 ];
 
 /// The types that `clippy.toml` must forbid because their iteration order is random (ADR-0005 §5).

@@ -1,8 +1,11 @@
 # Clippy configuration for every crate in the workspace (ADR-0005, ADR-0006 §6). `cargo xtask verify` proves that each entry below still triggers (Clippy silently ignores a misspelled method name).
 # This must stay the only Clippy configuration file in the repository. Clippy does not merge configuration files: for each crate it reads only the nearest clippy.toml or .clippy.toml above the crate's folder, so a file below the root would replace this one, bans included, for every crate beneath it. `cargo xtask verify` rejects such files and the CLIPPY_CONF_DIR environment variable; put every setting here.
 
-# Platform floating-point math: these methods call each platform's own math library, whose results differ between Windows, macOS, Linux and WebAssembly, so the same document would lay out or render differently (ADR-0005 §4). Basic arithmetic, `sqrt` and `mul_add` are exact IEEE-754 operations and stay allowed.
-# The list is every stable transcendental method of f32 and f64 in Rust 1.99. When a new one is stabilized (for example `gamma` or `erf`), add it in the monthly dependency session and call it in xtask/lint-canary.
+# Floating-point methods whose result is not exactly specified. ADR-0005 §4 allows floating point only in rendering, and only as exact IEEE-754 basic operations, so these methods are forbidden in every crate with no exceptions: never write #[expect(clippy::disallowed_methods, …)].
+# - Platform math (sin, exp, powf and the like) calls each platform's own math library, whose results differ between Windows, macOS, Linux and WebAssembly. Use the deterministic functions in bayan-units.
+# - The algebraic_* methods let the compiler reorder the operation, fuse a multiply and an add, or replace a division by a reciprocal, so results depend on the platform and the optimization level. Use the plain + - * / % operators.
+# - min, max and clamp may return +0.0 or -0.0 non-deterministically when the inputs compare equal (Rust's documentation says so). Compare explicitly instead.
+# The other stable float methods of Rust 1.99 (arithmetic, sqrt, mul_add, rounding, sign, comparisons and bit conversions) give the same bits on every platform and stay allowed. When Rust stabilizes another method whose result is not exactly specified (for example gamma, erf or exp10), add it here in the monthly dependency session and call it in xtask/lint-canary.
 disallowed-methods = [
   { path = "f32::sin", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
   { path = "f32::cos", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
@@ -56,9 +59,25 @@ disallowed-methods = [
   { path = "f64::asinh", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
   { path = "f64::acosh", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
   { path = "f64::atanh", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
+  { path = "f32::algebraic_add", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f32::algebraic_sub", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f32::algebraic_mul", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f32::algebraic_div", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f32::algebraic_rem", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f64::algebraic_add", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f64::algebraic_sub", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f64::algebraic_mul", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f64::algebraic_div", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f64::algebraic_rem", reason = "lets the compiler reorder, fuse or approximate the operation, so results differ between platforms and optimization levels; use the plain + - * / % operators (ADR-0005 §4)" },
+  { path = "f32::min", reason = "returns +0.0 or -0.0 non-deterministically when the inputs compare equal; compare explicitly, as in `if a < b { a } else { b }` (ADR-0005 §4)" },
+  { path = "f32::max", reason = "returns +0.0 or -0.0 non-deterministically when the inputs compare equal; compare explicitly, as in `if a > b { a } else { b }` (ADR-0005 §4)" },
+  { path = "f32::clamp", reason = "returns +0.0 or -0.0 non-deterministically when the result is zero; compare explicitly, as in `if x < lo { lo } else if x > hi { hi } else { x }` (ADR-0005 §4)" },
+  { path = "f64::min", reason = "returns +0.0 or -0.0 non-deterministically when the inputs compare equal; compare explicitly, as in `if a < b { a } else { b }` (ADR-0005 §4)" },
+  { path = "f64::max", reason = "returns +0.0 or -0.0 non-deterministically when the inputs compare equal; compare explicitly, as in `if a > b { a } else { b }` (ADR-0005 §4)" },
+  { path = "f64::clamp", reason = "returns +0.0 or -0.0 non-deterministically when the result is zero; compare explicitly, as in `if x < lo { lo } else if x > hi { hi } else { x }` (ADR-0005 §4)" },
 ]
 
-# Hash maps and sets with Rust's default hasher visit their items in a random order that changes from run to run (ADR-0005 §5). Use BTreeMap or BTreeSet. Where iteration order cannot affect any output, allow one use with `#[expect(clippy::disallowed_types, reason = "…")]` explaining why.
+# Hash maps and sets with Rust's default hasher visit their items in a random order that changes from run to run (ADR-0005 §5). Use BTreeMap or BTreeSet. Where iteration order cannot affect any output, allow one use with `#[expect(clippy::disallowed_types, reason = "…")]` explaining why; this is the only determinism ban with an exception.
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "iteration order is random; use BTreeMap, or #[expect(clippy::disallowed_types, reason = \"...\")] where order cannot affect output (ADR-0005 §5)" },
   { path = "std::collections::HashSet", reason = "iteration order is random; use BTreeSet, or #[expect(clippy::disallowed_types, reason = \"...\")] where order cannot affect output (ADR-0005 §5)" },
