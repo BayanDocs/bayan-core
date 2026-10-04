@@ -126,6 +126,7 @@ impl Workspace {
 pub fn check(workspace: &Workspace, native_only: &[&str]) -> Result<Vec<String>, String> {
     let results = [
         check_unsafe_forbidden(&workspace.cargo_toml),
+        check_float_bans_forbidden(&workspace.cargo_toml),
         check_lint_inheritance(&workspace.members, native_only),
         check_binding_copies(&workspace.cargo_toml, &workspace.members),
         check_rust_version(&workspace.cargo_toml, &workspace.toolchain_toml),
@@ -154,6 +155,20 @@ fn check_unsafe_forbidden(cargo_toml: &str) -> Result<String, String> {
         }
         other => Err(format!(
             "the root Cargo.toml must set `unsafe_code = \"forbid\"` in [workspace.lints.rust] (ADR-0006 §2); found {}",
+            other.unwrap_or_else(|| "nothing".to_owned())
+        )),
+    }
+}
+
+/// The workspace lint table forbids `clippy::disallowed_methods`, the lint behind the float bans of `clippy.toml` (ADR-0005 §4). At "warn" or "deny", any crate could switch the bans off again with `#[expect(clippy::disallowed_methods, …)]`, or with a group such as `#[expect(clippy::all, …)]`; `forbid` makes the compiler reject such an exception (error E0453). The binding crates' copies are compared with this table by `check_binding_copies`.
+fn check_float_bans_forbidden(cargo_toml: &str) -> Result<String, String> {
+    match toml_subset::value(cargo_toml, "workspace.lints.clippy", "disallowed_methods")? {
+        Some(level) if level == "\"forbid\"" => Ok(
+            "the workspace lints forbid exceptions to the float bans (`disallowed_methods = \"forbid\"`)"
+                .to_owned(),
+        ),
+        other => Err(format!(
+            "the root Cargo.toml must set `disallowed_methods = \"forbid\"` in [workspace.lints.clippy] (ADR-0005 §4); found {}. At any lower level, a crate could switch the float bans of clippy.toml off with `#[expect(clippy::disallowed_methods, …)]` or `#[expect(clippy::all, …)]`.",
             other.unwrap_or_else(|| "nothing".to_owned())
         )),
     }
@@ -472,6 +487,37 @@ unwrap_used = "warn"
         assert!(check_unsafe_forbidden(ROOT).is_ok());
         assert!(check_unsafe_forbidden(&ROOT.replace("\"forbid\"", "\"deny\"")).is_err());
         assert!(check_unsafe_forbidden("[workspace]\n").is_err());
+    }
+
+    #[test]
+    fn requires_forbidden_float_bans_in_the_workspace() {
+        let forbidden = ROOT.replace(
+            "unwrap_used = \"warn\"",
+            "disallowed_methods = \"forbid\"\nunwrap_used = \"warn\"",
+        );
+        assert!(check_float_bans_forbidden(&forbidden).is_ok());
+        for weaker in [
+            "\"warn\"",
+            "\"deny\"",
+            "{ level = \"forbid\", priority = 1 }",
+        ] {
+            let text = forbidden.replace("\"forbid\"\nunwrap", &format!("{weaker}\nunwrap"));
+            let problem = check_float_bans_forbidden(&text).unwrap_err();
+            assert!(
+                problem.contains("`disallowed_methods = \"forbid\"`"),
+                "{problem}"
+            );
+        }
+        assert!(
+            check_float_bans_forbidden(ROOT).is_err(),
+            "the entry is missing"
+        );
+    }
+
+    #[test]
+    fn the_real_workspace_forbids_the_float_bans() {
+        check_float_bans_forbidden(include_str!("../../Cargo.toml"))
+            .unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]
