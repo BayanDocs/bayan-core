@@ -2,6 +2,8 @@
 //!
 //! The lint rules only work if the compiler applies them. Some compiler flags lower lint levels for every crate at once: `--cap-lints=allow` even lowers `forbid`, which switches off the float bans, the hash-collection bans and the unsafe policy (ADR-0005, ADR-0006 §2) without a word. Flags reach the compiler from the environment and from `rustflags` in Cargo's configuration files, so the gate reads both before it builds anything and rejects the dangerous ones. Flags that do not touch lint levels, such as `-C target-feature=+simd128` or `--cfg …`, stay allowed.
 //!
+//! The same goes for programs that stand in for the compiler: a wrapper (`RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `[build] rustc-wrapper`) or a replacement compiler (`RUSTC`, `[build] rustc`) sees every compiler call and can add or drop flags for one chosen crate only, which neither this check nor the lint canary would see. The gate therefore rejects them too.
+//!
 //! The lint canary covers what this check cannot read, such as Cargo configuration files outside the repository: it is compiled with the same flags, so a flag that weakens a rule it exercises makes it compile, and the gate fails (`canary.rs`).
 
 use std::path::Path;
@@ -13,6 +15,22 @@ pub const CONFIG_FILES: [&str; 2] = [".cargo/config.toml", ".cargo/config"];
 
 /// Environment variables that unlock unstable compiler features on the stable toolchain.
 const UNSTABLE_VARIABLES: [&str; 1] = ["RUSTC_BOOTSTRAP"];
+
+/// Environment variables that make Cargo run another program in place of, or around, the compiler. The `CARGO_BUILD_…` names are the environment forms of the `[build]` settings in [`COMPILER_SETTINGS`].
+const COMPILER_VARIABLES: [&str; 6] = [
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC",
+];
+
+/// The settings of the `[build]` table that do the same as [`COMPILER_VARIABLES`].
+const COMPILER_SETTINGS: [&str; 3] = ["rustc-wrapper", "rustc-workspace-wrapper", "rustc"];
+
+/// Why a wrapper or replacement compiler is rejected.
+const COMPILER_REASON: &str = "Cargo would run that program in place of, or around, the compiler for every crate. It sees every compiler call and can add or drop flags for one chosen crate only, for example `--cap-lints=allow`, where neither this check nor the lint canary would notice";
 
 /// Why a compiler argument is rejected, or `None` if it is allowed.
 ///
@@ -47,6 +65,11 @@ pub fn check(env: &[(String, String)], configs: &[(String, String)]) -> Result<S
                 "the environment variable {name} is set (to `{value}`). It unlocks unstable compiler features on the stable toolchain, such as `-Zcrate-attr`, which adds an attribute to every crate, and `core::intrinsics`, whose platform math clippy.toml does not list. Unset it, or remove it from the [env] table of .cargo/config.toml."
             ));
         }
+        if COMPILER_VARIABLES.contains(&name.as_str()) && !value.is_empty() {
+            problems.push(format!(
+                "the environment variable {name} is set (to `{value}`). {COMPILER_REASON}. Unset it."
+            ));
+        }
         for arg in env_flags(name, value) {
             if let Some(why) = rejection(&arg) {
                 problems.push(format!(
@@ -56,10 +79,15 @@ pub fn check(env: &[(String, String)], configs: &[(String, String)]) -> Result<S
         }
     }
     for (path, text) in configs {
-        let flags = config_flags(text).map_err(|error| {
-            format!("{path}: {error}. The gate reads compiler flags from this file and must understand it; write `rustflags` in a [build] or [target.…] table, as a string or an array of strings.")
+        let settings = config_settings(text).map_err(|error| {
+            format!("{path}: {error}. The gate reads compiler flags and compiler settings from this file and must understand it; write `rustflags` in a [build] or [target.…] table, as a string or an array of strings, and `rustc`, `rustc-wrapper` and `rustc-workspace-wrapper` in [build], as strings.")
         })?;
-        for (location, args) in flags {
+        for (key, value) in settings.compilers {
+            problems.push(format!(
+                "{path}: `{key}` in [build] is set (to `{value}`). {COMPILER_REASON}. Remove the setting."
+            ));
+        }
+        for (location, args) in settings.flags {
             for arg in args {
                 if let Some(why) = rejection(&arg) {
                     problems.push(format!(
@@ -70,10 +98,10 @@ pub fn check(env: &[(String, String)], configs: &[(String, String)]) -> Result<S
         }
     }
     if problems.is_empty() {
-        return Ok("no compiler flag lowers lint levels or unlocks unstable features (environment and .cargo/config.toml checked; RUSTC_BOOTSTRAP is not set)".to_owned());
+        return Ok("no compiler flag lowers lint levels or unlocks unstable features, and no wrapper or replacement compiler is set (environment and .cargo/config.toml checked; RUSTC_BOOTSTRAP is not set)".to_owned());
     }
     Err(format!(
-        "{}\nThe lint rules of this repository (ADR-0005, ADR-0006 §2) only work if no compiler flag lowers lint levels or unlocks unstable features, so the gate rejects `--cap-lints`, `-A`/`--allow`, `--force-warn`, `-Z` options and `@file` arguments in RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS, CARGO_TARGET_<TRIPLE>_RUSTFLAGS and the `rustflags` of .cargo/config.toml, and the RUSTC_BOOTSTRAP variable. Remove them and run the gate again. Flags that do not change lint levels, such as `-C target-feature=…`, are fine.",
+        "{}\nThe lint rules of this repository (ADR-0005, ADR-0006 §2) only work if no compiler flag lowers lint levels or unlocks unstable features, so the gate rejects `--cap-lints`, `-A`/`--allow`, `--force-warn`, `-Z` options and `@file` arguments in RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS, CARGO_TARGET_<TRIPLE>_RUSTFLAGS and the `rustflags` of .cargo/config.toml, and the RUSTC_BOOTSTRAP variable. For the same reason it rejects compiler wrappers and replacement compilers: RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER, RUSTC (and their CARGO_BUILD_… forms), and `rustc-wrapper`, `rustc-workspace-wrapper` and `rustc` in the [build] table. Remove them and run the gate again. Flags that do not change lint levels, such as `-C target-feature=…`, are fine.",
         problems.join("\n")
     ))
 }
@@ -93,9 +121,18 @@ fn env_flags(name: &str, value: &str) -> Vec<String> {
     }
 }
 
-/// Every `rustflags` setting of a Cargo configuration file, in `[build]` and in every `[target.…]` table, also written with dotted keys such as `build.rustflags = …`. Each comes with where it was found and its arguments; a string is split at whitespace, as Cargo does. Anything that could hide such a setting from this reader, such as an inline table `build = { rustflags = … }`, is an error.
-fn config_flags(text: &str) -> Result<Vec<(String, Vec<String>)>, String> {
-    let mut found = Vec::new();
+/// What a Cargo configuration file sets that this check looks at.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Settings {
+    /// Every `rustflags` setting, with where it was found and its arguments.
+    flags: Vec<(String, Vec<String>)>,
+    /// Every non-empty `rustc`, `rustc-wrapper` or `rustc-workspace-wrapper` in `[build]`, as its key and value. (An empty value switches the wrapper off.)
+    compilers: Vec<(String, String)>,
+}
+
+/// Reads the settings of a Cargo configuration file that this check looks at: every `rustflags`, in `[build]` and in every `[target.…]` table, and the compiler and wrapper settings of `[build]`, also written with dotted keys such as `build.rustflags = …`. A `rustflags` string is split at whitespace, as Cargo does. Anything that could hide such a setting from this reader, such as an inline table `build = { rustflags = … }`, is an error.
+fn config_settings(text: &str) -> Result<Settings, String> {
+    let mut found = Settings::default();
     for section in toml_subset::sections(text)? {
         let header = if section.header.is_empty() {
             Vec::new()
@@ -111,6 +148,14 @@ fn config_flags(text: &str) -> Result<Vec<(String, Vec<String>)>, String> {
             );
             let parts: Vec<&str> = path.iter().map(String::as_str).collect();
             let location = match parts.as_slice() {
+                ["build", key] if COMPILER_SETTINGS.contains(key) => {
+                    let value = toml_subset::any_string(&entry.value)
+                        .map_err(|error| format!("line {}: {error}", entry.line))?;
+                    if !value.is_empty() {
+                        found.compilers.push(((*key).to_owned(), value));
+                    }
+                    continue;
+                }
                 ["build", "rustflags"] => "[build]".to_owned(),
                 ["target", target, "rustflags"] => format!("[target.'{target}']"),
                 ["build"] | ["target"] | ["target", _] => {
@@ -129,7 +174,7 @@ fn config_flags(text: &str) -> Result<Vec<(String, Vec<String>)>, String> {
                     .map(|flags| flags.split_whitespace().map(str::to_owned).collect())
             }
             .map_err(|error| format!("line {}: {error}", entry.line))?;
-            found.push((location, args));
+            found.flags.push((location, args));
         }
     }
     Ok(found)
@@ -273,6 +318,51 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn rejects_compiler_wrappers_and_replacements_in_the_environment() {
+        for name in COMPILER_VARIABLES {
+            let problem = check(&env(&[(name, "/usr/bin/sccache")]), &[]).unwrap_err();
+            assert!(
+                problem.contains(&format!(
+                    "the environment variable {name} is set (to `/usr/bin/sccache`)"
+                )) && problem.contains("in place of, or around, the compiler"),
+                "{name}: {problem}"
+            );
+        }
+        // An empty value switches a wrapper off, which is fine.
+        assert!(check(&env(&[("RUSTC_WRAPPER", "")]), &[]).is_ok());
+    }
+
+    #[test]
+    fn rejects_compiler_wrappers_and_replacements_in_the_configuration() {
+        let cases = [
+            (
+                "[build]\nrustc-wrapper = \"scripts/wrap.sh\"\n",
+                "rustc-wrapper",
+                "scripts/wrap.sh",
+            ),
+            (
+                "[build]\nrustc-workspace-wrapper = 'wrap'\n",
+                "rustc-workspace-wrapper",
+                "wrap",
+            ),
+            ("[build]\nrustc = \"/opt/rustc\"\n", "rustc", "/opt/rustc"),
+            ("build.rustc-wrapper = \"w\"\n", "rustc-wrapper", "w"),
+        ];
+        for (text, key, value) in cases {
+            let problem = check(&[], &config(text)).unwrap_err();
+            assert!(
+                problem.contains(&format!(
+                    ".cargo/config.toml: `{key}` in [build] is set (to `{value}`)"
+                )),
+                "{text}: {problem}"
+            );
+        }
+        assert!(check(&[], &config("[build]\nrustc-wrapper = \"\"\n")).is_ok());
+        let problem = check(&[], &config("[build]\nrustc-wrapper = [\"w\"]\n")).unwrap_err();
+        assert!(problem.contains("must understand it"), "{problem}");
     }
 
     #[test]
