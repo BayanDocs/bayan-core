@@ -65,7 +65,7 @@ Run `cargo xtask verify` before every push, from anywhere in the repository. CI 
 8. `supply-chain`: the hook where X-003 adds `check-exact-pins` and `check-lockfile-age`; no checks yet.
 9. `determinism`: the hook for determinism checks (ADR-0025 §1); no checks yet.
 
-Each step prints its command, so a failing step can be re-run by itself. Never skip, weaken or disable a step to make a change pass (`docs/AGENTS.md` §4).
+Each step prints its command, so a failing step can be re-run by itself. Never skip, weaken or disable a step to make a change pass (`docs/AGENTS.md` §4). Two more workflows run on every pull request, as in every BayanDocs repository: the DCO check (`.github/workflows/dco.yml`; the rules are in `CONTRIBUTING.md`) and `reuse lint` (`.github/workflows/reuse.yml`).
 
 Every Cargo command prints `warning: ignoring registry.global-min-publish-age without -Zmin-publish-age`. That is expected until the toolchain is Rust 1.100; keep the setting.
 
