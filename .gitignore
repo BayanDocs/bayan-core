@@ -1,2 +1,4 @@
 # Build output of Cargo and of `cargo xtask verify`.
 /target/
+# Python's bytecode cache (from running the tests of the DCO check in .github/dco/).
+__pycache__/
