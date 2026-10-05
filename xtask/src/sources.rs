@@ -1562,6 +1562,19 @@ macro_rules! outer {
         // error suggests): the bracket holds no metavariable and no `path =`.
         let index = "macro_rules! m { ($arr:expr) => {{ let i = 0; $arr [i] }}; }";
         assert_eq!(found(index), Findings::default(), "index by a plain name");
+        // Both the `#` and the bracket come from `tt` metavariables (`$a $b`, or a repetition), so
+        // the transcriber holds neither a literal `#` nor a literal `[`. The caller must still write
+        // them adjacently, `# [ … ]` (the compiler assembles `#[ … ]` from any two such token trees),
+        // and that is read as the attribute where the macro is called, on line 2 of each case here.
+        for double_tt in [
+            "macro_rules! m { ($a:tt $b:tt) => { $a $b mod hidden; }; }\nm!(# [path = \"x\"]);",
+            "macro_rules! m { ($($t:tt)*) => { $($t)* mod hidden; }; }\nm!(# [path = \"x\"]);",
+        ] {
+            let found = found(double_tt);
+            assert_eq!(found.path_attribute, [2], "double tt: {double_tt}");
+            assert_eq!(found.macro_attributes, [], "double tt: {double_tt}");
+            assert_eq!(found.stray_hash, [], "double tt: {double_tt}");
+        }
     }
 
     /// A scratch folder for one test, removed again at the end.
