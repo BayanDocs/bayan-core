@@ -128,7 +128,7 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels, no unlisted build script and no code hidden from Clippy, so that a pass means the same thing everywhere. Everything here is checked before anything is built.
+/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script, and that the Rust sources neither use the condition `clippy` nor make the compiler read a file that the source check does not (`sources.rs`), so that a pass means the same thing everywhere. Everything here is checked before anything is built.
 fn preflight(root: &Path) -> Result<(), String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -179,15 +179,17 @@ fn preflight(root: &Path) -> Result<(), String> {
     println!("    {line}");
 
     // Checked before anything is built, because Cargo runs a build script before it compiles the script's crate.
-    let metadata = policy::metadata(root)?;
-    let (members, scripts) = policy::build_scripts(&metadata)?;
+    let packages = policy::packages(&policy::metadata(root)?)?;
+    let members: Vec<String> = packages
+        .iter()
+        .map(|package| package.name.clone())
+        .collect();
     let allowed: Vec<&str> = BUILD_SCRIPTS.iter().map(|(name, _)| *name).collect();
-    let line = policy::check_build_scripts(&members, &scripts, &allowed)?;
+    let line = policy::check_build_scripts(&members, &policy::build_scripts(&packages), &allowed)?;
     println!("    {line}");
 
     // Checked before Clippy first runs, because code under `cfg(not(clippy))` would pass the Clippy step unseen.
-    let folders = policy::member_folders(&metadata);
-    let line = sources::check(root, &folders)?;
+    let line = sources::check(root, &packages)?;
     println!("    {line}");
     Ok(())
 }

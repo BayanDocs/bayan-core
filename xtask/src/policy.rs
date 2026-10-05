@@ -415,6 +415,93 @@ pub fn metadata(root: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// A workspace member, as `cargo metadata` describes it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Package {
+    /// The package name.
+    pub name: String,
+    /// The folder of its `Cargo.toml`.
+    pub folder: PathBuf,
+    /// Its library, binaries, tests, benchmarks, examples and build script.
+    pub targets: Vec<Target>,
+}
+
+/// A target of a workspace member.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Target {
+    /// What it is, such as `lib`, `bin`, `test` or `custom-build` (a build script).
+    pub kinds: Vec<String>,
+    /// Its name.
+    pub name: String,
+    /// The file the compiler starts from (`src_path`). Cargo's defaults put it in the package's folder, but a path in `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]`, or `build = "…"`, can move it anywhere. Cargo reports it as the package's folder joined with that path, without resolving `..`.
+    pub root_file: PathBuf,
+}
+
+/// The workspace members and their targets, from the JSON of [`metadata`].
+pub fn packages(metadata: &str) -> Result<Vec<Package>, String> {
+    let invalid = |what: &str| format!("unexpected `cargo metadata` output: {what}");
+    let value = json::parse(metadata).map_err(|error| invalid(&error))?;
+    let list = value
+        .get("packages")
+        .and_then(json::Value::as_array)
+        .ok_or_else(|| invalid("no `packages` list"))?;
+    let mut packages = Vec::new();
+    for package in list {
+        let name = package
+            .get("name")
+            .and_then(json::Value::as_str)
+            .ok_or_else(|| invalid("a package without a name"))?;
+        let folder = package
+            .get("manifest_path")
+            .and_then(json::Value::as_str)
+            .and_then(|manifest| Path::new(manifest).parent())
+            .ok_or_else(|| invalid(&format!("no `manifest_path` for {name}")))?;
+        let mut targets = Vec::new();
+        for target in package
+            .get("targets")
+            .and_then(json::Value::as_array)
+            .ok_or_else(|| invalid(&format!("no `targets` for {name}")))?
+        {
+            let kinds = target
+                .get("kind")
+                .and_then(json::Value::as_array)
+                .and_then(|kinds| {
+                    kinds
+                        .iter()
+                        .map(|kind| kind.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| invalid(&format!("a target of {name} without a `kind`")))?;
+            let target_name = target
+                .get("name")
+                .and_then(json::Value::as_str)
+                .ok_or_else(|| invalid(&format!("a target of {name} without a name")))?;
+            let root_file = target
+                .get("src_path")
+                .and_then(json::Value::as_str)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the target `{target_name}` of {name} has no `src_path`"
+                    ))
+                })?;
+            targets.push(Target {
+                kinds,
+                name: target_name.to_owned(),
+                root_file: PathBuf::from(root_file),
+            });
+        }
+        packages.push(Package {
+            name: name.to_owned(),
+            folder: folder.to_path_buf(),
+            targets,
+        });
+    }
+    if packages.is_empty() {
+        return Err(invalid("no workspace members"));
+    }
+    Ok(packages)
+}
+
 /// A workspace member's build script, as `cargo metadata` reports it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct BuildScript {
@@ -424,50 +511,20 @@ pub struct BuildScript {
     pub path: String,
 }
 
-/// The names of the workspace members and their build scripts, from the JSON of [`metadata`]. Cargo reports a build script as a target whose `kind` is `["custom-build"]`, whether it is the automatically found `build.rs` or a file named by `build = "…"` in the manifest.
-pub fn build_scripts(metadata: &str) -> Result<(Vec<String>, Vec<BuildScript>), String> {
-    let invalid = |what: &str| format!("unexpected `cargo metadata` output: {what}");
-    let value = json::parse(metadata).map_err(|error| invalid(&error))?;
-    let packages = value
-        .get("packages")
-        .and_then(json::Value::as_array)
-        .ok_or_else(|| invalid("no `packages` list"))?;
-    let mut names = Vec::new();
+/// The build scripts of the workspace members. Cargo reports a build script as a target whose `kind` is `["custom-build"]`, whether it is the automatically found `build.rs` or a file named by `build = "…"` in the manifest.
+pub fn build_scripts(packages: &[Package]) -> Vec<BuildScript> {
     let mut scripts = Vec::new();
     for package in packages {
-        let name = package
-            .get("name")
-            .and_then(json::Value::as_str)
-            .ok_or_else(|| invalid("a package without a name"))?;
-        names.push(name.to_owned());
-        let targets = package
-            .get("targets")
-            .and_then(json::Value::as_array)
-            .ok_or_else(|| invalid(&format!("no `targets` for {name}")))?;
-        for target in targets {
-            let kinds = target
-                .get("kind")
-                .and_then(json::Value::as_array)
-                .ok_or_else(|| invalid(&format!("a target of {name} without a `kind`")))?;
-            if kinds
-                .iter()
-                .any(|kind| kind.as_str() == Some("custom-build"))
-            {
-                let path = target
-                    .get("src_path")
-                    .and_then(json::Value::as_str)
-                    .ok_or_else(|| invalid(&format!("the build script of {name} has no path")))?;
+        for target in &package.targets {
+            if target.kinds.iter().any(|kind| kind == "custom-build") {
                 scripts.push(BuildScript {
-                    package: name.to_owned(),
-                    path: path.to_owned(),
+                    package: package.name.clone(),
+                    path: target.root_file.display().to_string(),
                 });
             }
         }
     }
-    if names.is_empty() {
-        return Err(invalid("no workspace members"));
-    }
-    Ok((names, scripts))
+    scripts
 }
 
 /// No workspace member has a build script unless `allowed` (xtask's `BUILD_SCRIPTS`) lists it.
@@ -512,14 +569,6 @@ pub fn check_build_scripts(
         "{}\nA build script runs code during the build and can change how its crate is compiled, for example by setting CLIPPY_CONF_DIR or other compiler variables through `cargo::rustc-env`, which switches off the bans of the root clippy.toml for that crate. Build scripts are therefore kept to a minimum (ADR-0017): remove the script (or `build = \"…\"` from the manifest), or, if the crate really needs it, add it to BUILD_SCRIPTS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the script. A build script must never set Clippy or compiler variables.",
         problems.join("\n")
     ))
-}
-
-/// The folder of every workspace member (the folder of its `Cargo.toml`), from the JSON of [`metadata`].
-pub fn member_folders(metadata: &str) -> Vec<PathBuf> {
-    json::string_values(metadata, "manifest_path")
-        .into_iter()
-        .filter_map(|manifest| PathBuf::from(manifest).parent().map(Path::to_path_buf))
-        .collect()
 }
 
 /// The manifest of every workspace member, from `cargo metadata`.
@@ -622,23 +671,69 @@ unwrap_used = "warn"
         )
     }
 
+    /// The names of `packages`, as the build-script check takes them.
+    fn member_names(packages: &[Package]) -> Vec<String> {
+        packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reads_packages_and_their_targets() {
+        let json = metadata_json(&[("bayan-units", &["lib", "test"]), ("xtask", &["bin"])]);
+        let found = packages(&json).unwrap();
+        let target = |kind: &str, file: &str| Target {
+            kinds: vec![kind.to_owned()],
+            name: "t".to_owned(),
+            root_file: PathBuf::from(file),
+        };
+        assert_eq!(
+            found,
+            [
+                Package {
+                    name: "bayan-units".to_owned(),
+                    folder: PathBuf::from("/repo/crates/bayan-units"),
+                    targets: vec![
+                        target("lib", "/repo/crates/bayan-units/lib.rs"),
+                        target("test", "/repo/crates/bayan-units/test.rs"),
+                    ],
+                },
+                Package {
+                    name: "xtask".to_owned(),
+                    folder: PathBuf::from("/repo/crates/xtask"),
+                    targets: vec![target("bin", "/repo/crates/xtask/bin.rs")],
+                },
+            ]
+        );
+        for (field, removed) in [
+            ("src_path", r#","src_path":"/repo/crates/xtask/bin.rs""#),
+            (
+                "manifest_path",
+                r#","manifest_path":"/repo/crates/xtask/Cargo.toml""#,
+            ),
+            ("kind", r#""kind":["bin"],"#),
+        ] {
+            let problem = packages(&json.replace(removed, "")).unwrap_err();
+            assert!(problem.contains(field), "{field}: {problem}");
+        }
+        assert!(packages("{\"packages\":[]}").is_err());
+        assert!(packages("not json").is_err());
+    }
+
     #[test]
     fn finds_build_scripts() {
         let json = metadata_json(&[
             ("bayan-units", &["lib"]),
             ("bayan-cli", &["bin", "custom-build"]),
         ]);
-        let (names, scripts) = build_scripts(&json).unwrap();
-        assert_eq!(names, ["bayan-units", "bayan-cli"]);
         assert_eq!(
-            scripts,
+            build_scripts(&packages(&json).unwrap()),
             [BuildScript {
                 package: "bayan-cli".to_owned(),
                 path: "/repo/crates/bayan-cli/custom-build.rs".to_owned()
             }]
         );
-        assert!(build_scripts("{\"packages\":[]}").is_err());
-        assert!(build_scripts("not json").is_err());
     }
 
     #[test]
@@ -647,7 +742,8 @@ unwrap_used = "warn"
             ("bayan-units", &["lib", "custom-build"]),
             ("bayan-model", &["lib"]),
         ]);
-        let (names, scripts) = build_scripts(&json).unwrap();
+        let found = packages(&json).unwrap();
+        let (names, scripts) = (member_names(&found), build_scripts(&found));
         let problem = check_build_scripts(&names, &scripts, &[]).unwrap_err();
         assert!(
             problem.contains("bayan-units has a build script (/repo/crates/bayan-units/custom-build.rs) that xtask does not list"),
