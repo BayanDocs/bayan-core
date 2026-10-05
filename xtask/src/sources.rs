@@ -17,6 +17,12 @@
 //!
 //! A `macro_rules!` macro could write any attribute from what it is handed, such as `#[$attribute] mod sine;` handed `path = "…"`, which makes the compiler read a file that this check never sees. Outside the patterns that a macro's input must match (its matchers), a metavariable may therefore appear in an attribute only to pass on an attribute exactly as it was written where the macro is called, such as a doc comment, which this check reads there: the matcher binds it with `#[$name:meta]` and the macro writes it as `#[$name]`.
 //!
+//! An attribute is still an attribute when its `#` and its `[` are written apart, so that the reader cannot find it by looking for `#[`. Three rules close that family, so that every attribute a macro writes is read as one:
+//!
+//! - A `#` must be written directly against the `[` or `![` it opens. A `#` that any other token follows is rejected, in the code a macro writes (`# $attribute …`, which becomes `#[…]` when `$attribute` is a bracket group) and in what is handed to a macro (`m!(#, …)`, which hands it a bare `#` to place before a bracket) alike. The compiler never writes a bare `#`, so one has no other purpose.
+//! - A `[…]` written directly after a metavariable (`$name [ … ]`), a repetition (`$( … )* [ … ]`), or either with a `!` between (`$name ![ … ]`), is read as an attribute, because the substitution before it could expand to `#` or `#!`. This catches the bracket even when its `#` is supplied separately, as when a benign attribute at the call site gives up its `#` to a `$name:tt` and the macro writes `$name [path = "…"]`.
+//! - Together these mean no metavariable can hold a bare `#` and no `[…]` after one escapes the check, so a split attribute is read wherever it is assembled. The pass-on exception above still holds: `$(#[$name])*`, written against its bracket and bound by `#[$name:meta]`, passes on the caller's attribute, which this check reads where it is written.
+//!
 //! # The files it reads
 //!
 //! The check is only as good as the files it reads. It reads every `.rs` file below every member's folder, and it rejects every way it knows to make the compiler read another Rust file for a workspace member:
@@ -116,9 +122,13 @@ const CONDITION_WORDS: (&str, &str) = (
     "the word `cfg` or `cfg_attr` is used here without its condition directly after it, or another word that starts with `cfg`",
     "`cfg` must be followed directly by `(`, as in `#[cfg(…)]`, or by `!(`, as in `cfg!(…)`, and `cfg_attr` by `(`, so that no macro can assemble a condition from pieces, such as `#[$name(not(feature = \"x\"))]` handed `cfg`. Every other word that starts with `cfg` is rejected too: `cfg_select!` chooses code by conditions that are not written inside `cfg(…)`, which this check would not read, and later Rust versions may add more such macros. Write conditions as `#[cfg(…)]`, `#[cfg_attr(…, …)]` or `cfg!(…)`, and do not give anything a name that starts with `cfg`.",
 );
+const STRAY_HASH: (&str, &str) = (
+    "a `#` that is not written directly against the `[` or `![` it opens is used here",
+    "In Rust a `#` begins an attribute, `#[…]` or `#![…]`, so every `#` is written against its bracket. A `#` apart from its bracket is how a macro smuggles an attribute past a check that looks for `#[`: `macro_rules! m { ($a:tt) => { # $a mod sine; } }`, handed `[path = \"…\"]`, writes `#[path = \"…\"]`, and `m!(#, …)` hands a macro a bare `#` to place before a bracket of its own. The gate rejects every `#` that another token follows, in the code a macro writes and in what is handed to a macro alike, because the compiler never writes a bare `#`. Write attributes as `#[…]` and `#![…]`, with nothing between the `#` and the `[`.",
+);
 const MACRO_ATTRIBUTES: (&str, &str) = (
     "an attribute is built from a macro's arguments here",
-    "A macro can be handed anything, so an attribute that it builds from its arguments, such as `#[$attribute] mod sine;` handed `path = \"…\"`, can make the compiler read a file or choose code that this check never sees. Write every attribute out in full inside a macro. The one exception passes on an attribute exactly as it was written where the macro is called, such as a doc comment, where this check reads it: bind it with `$(#[$name:meta])*` in the macro's pattern and write it as `$(#[$name])*`.",
+    "A macro can be handed anything, so an attribute that it builds from its arguments can make the compiler read a file or choose code that this check never sees: `#[$attribute] mod sine;` handed `path = \"…\"`, or `$hash [$name = $file] mod sine;` handed `#`, `path` and a file name. A `[…]` written directly after a metavariable (`$name [ … ]`), a repetition (`$( … )* [ … ]`), or either with a `!` between (`$name ![ … ]`), is read as an attribute, because the substitution before it could expand to `#` or `#!`. Write every attribute out in full inside a macro. The one exception passes on an attribute exactly as it was written where the macro is called, such as a doc comment, where this check reads it: bind it with `$(#[$name:meta])*` in the macro's pattern and write it as `$(#[$name])*`. If a `[…]` after a metavariable is an index rather than an attribute (`$array [$index]`), bind the index to a variable first: `let index = $index; $array[index]`.",
 );
 
 /// Why conditions outside the approved list are rejected, naming the approved ones.
@@ -161,6 +171,8 @@ enum Kind<'a> {
 /// What the check found in one file, as the lines (counting from 1) of each finding.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Findings {
+    /// A `#` that the `[` or `![` it opens does not directly follow.
+    stray_hash: Vec<usize>,
     /// The bare identifier `clippy`, not followed by `::`.
     bare_clippy: Vec<usize>,
     /// The identifier `include`.
@@ -177,14 +189,17 @@ struct Findings {
     macro_attributes: Vec<usize>,
 }
 
-/// Finds in Rust source everything this check rejects: the bare identifier `clippy` (not followed by `::`), the identifier `include`, `path =` inside an attribute (`#[…]` or `#![…]`, at any depth, so also inside `cfg_attr`), conditions outside the approved list (`allowed`; the canary's switch only where `in_canary` says the file belongs to the lint canary's crate), conditions that contain a metavariable, words starting with `cfg` that do not stand directly before their condition, and attributes that a macro builds from its arguments. Comments, strings (also raw, byte and C strings), character literals and lifetimes are skipped. Source the reader cannot follow is an error, so nothing can hide behind a misreading.
+/// Finds in Rust source everything this check rejects: a `#` that the `[` or `![` it opens does not directly follow, the bare identifier `clippy` (not followed by `::`), the identifier `include`, `path =` inside an attribute (`#[…]` or `#![…]`, at any depth, so also inside `cfg_attr`, and a `[…]` after a metavariable), conditions outside the approved list (`allowed`; the canary's switch only where `in_canary` says the file belongs to the lint canary's crate), conditions that contain a metavariable, words starting with `cfg` that do not stand directly before their condition, and attributes that a macro builds from its arguments. Comments, strings (also raw, byte and C strings), character literals and lifetimes are skipped. Source the reader cannot follow is an error, so nothing can hide behind a misreading.
 fn findings(source: &str, allowed: &Allowed<'_>, in_canary: bool) -> Result<Findings, String> {
     let tokens = tokenize(source)?;
     let closing = closing_brackets(&tokens)?;
+    let opening = opening_brackets(&closing);
+    // Attributes written in full, `#[…]` or `#![…]`, and brackets after a metavariable that could expand to `#`, `$name [ … ]`. The first kind alone binds macro pass-through (`#[$name:meta]`); both are checked for `path =` and for being built from a macro's arguments.
     let attributes = attributes(&tokens, &closing);
+    let groups = substitution_groups(&tokens, &closing, &opening);
     let rules = rules_of_macros(&tokens, &closing, &attributes)?;
     let mut in_attribute = vec![false; tokens.len()];
-    for attribute in &attributes {
+    for attribute in attributes.iter().chain(&groups) {
         for flag in &mut in_attribute[attribute.content.clone()] {
             *flag = true;
         }
@@ -195,6 +210,9 @@ fn findings(source: &str, allowed: &Allowed<'_>, in_canary: bool) -> Result<Find
     for (index, token) in tokens.iter().enumerate() {
         let next = tokens.get(index + 1).map(|token| token.kind);
         match token.kind {
+            Kind::Punct(b'#') if !opens_attribute(&tokens, index) => {
+                found.stray_hash.push(token.line);
+            }
             Kind::Ident(CLIPPY) if next != Some(Kind::PathSeparator) => {
                 found.bare_clippy.push(token.line);
             }
@@ -214,20 +232,39 @@ fn findings(source: &str, allowed: &Allowed<'_>, in_canary: bool) -> Result<Find
             _ => {}
         }
     }
-    for attribute in &attributes {
-        let built = attribute
+    // Whether an attribute's content holds a metavariable that is not part of a condition (which is reported on its own), so that the attribute is built from the macro's arguments.
+    let built = |attribute: &Attribute| {
+        attribute
             .content
             .clone()
-            .any(|at| tokens[at].kind == Kind::Punct(b'$') && !in_condition[at]);
-        // A matcher is a pattern for the macro's input, never code, so its attributes are not checked.
-        let in_matcher = rules
-            .iter()
-            .any(|rule| rule.matcher.contains(&attribute.hash));
-        if built && !in_matcher && !passed_on(attribute, &tokens, &rules) {
-            found.macro_attributes.push(tokens[attribute.hash].line);
+            .any(|at| tokens[at].kind == Kind::Punct(b'$') && !in_condition[at])
+    };
+    // A matcher is a pattern for the macro's input, never code, so its attributes are not checked.
+    let in_matcher = |anchor: usize| rules.iter().any(|rule| rule.matcher.contains(&anchor));
+    for attribute in &attributes {
+        if built(attribute)
+            && !in_matcher(attribute.anchor)
+            && !passed_on(attribute, &tokens, &rules)
+        {
+            found.macro_attributes.push(tokens[attribute.anchor].line);
         }
     }
+    // A `[…]` after a metavariable is never a pass-through (that is written `#[$name]`, with the `#`), so any such group built from the macro's arguments is rejected.
+    for group in &groups {
+        if built(group) && !in_matcher(group.anchor) {
+            found.macro_attributes.push(tokens[group.anchor].line);
+        }
+    }
+    found.macro_attributes.sort_unstable();
     Ok(found)
+}
+
+/// Whether the `#` at `tokens[index]` is written directly against the `[` or `![` it opens, so that it begins an attribute rather than standing apart from its bracket.
+fn opens_attribute(tokens: &[Token<'_>], index: usize) -> bool {
+    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
+    kind(index + 1) == Some(Kind::Punct(b'['))
+        || (kind(index + 1) == Some(Kind::Punct(b'!'))
+            && kind(index + 2) == Some(Kind::Punct(b'[')))
 }
 
 /// Checks the word that starts with `cfg` at `tokens[index]`: `cfg` and `cfg_attr` must stand directly before their condition, which may contain no metavariable and may use only the allowed conditions; every other such word is reported. Returns the positions of the condition's tokens, if the word has one.
@@ -399,15 +436,15 @@ fn top_level_comma(
     None
 }
 
-/// An attribute, `#[…]` or `#![…]`.
+/// An attribute, `#[…]` or `#![…]`, or a `[…]` group read as one because a metavariable precedes it.
 struct Attribute {
-    /// The position of its `#`.
-    hash: usize,
+    /// The token it is anchored to: the `#` of `#[…]` or `#![…]`, or the `[` of a `[…]` after a metavariable. Its line is where the attribute is reported, and rules contain it when it lies in their matcher or transcriber.
+    anchor: usize,
     /// The positions of the tokens between its brackets.
     content: Range<usize>,
 }
 
-/// Every attribute in `tokens`, also those nested in other attributes or in macros.
+/// Every attribute written in full in `tokens`, `#[…]` or `#![…]`, also those nested in other attributes or in macros.
 fn attributes(tokens: &[Token<'_>], closing: &[Option<usize>]) -> Vec<Attribute> {
     let kind = |at: usize| tokens.get(at).map(|token| token.kind);
     let mut found = Vec::new();
@@ -424,12 +461,64 @@ fn attributes(tokens: &[Token<'_>], closing: &[Option<usize>]) -> Vec<Attribute>
             && let Some(close) = closing[bracket]
         {
             found.push(Attribute {
-                hash: index,
+                anchor: index,
                 content: bracket + 1..close,
             });
         }
     }
     found
+}
+
+/// Every `[…]` group in `tokens` that is read as an attribute because the macro substitution written directly before it could expand to `#` or `#!`: a group after a metavariable (`$name [ … ]`), after a repetition (`$( … )* [ … ]`), or after either with a `!` between (`$name ![ … ]`). The compiler never writes a bare `#`, so a macro that places a group after such a substitution and is handed a `#` builds an attribute that does not appear as `#[` in the source. Each group is anchored to its `[`.
+fn substitution_groups(
+    tokens: &[Token<'_>],
+    closing: &[Option<usize>],
+    opening: &[Option<usize>],
+) -> Vec<Attribute> {
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == Kind::Punct(b'[')
+            && after_substitution(tokens, opening, index)
+            && let Some(close) = closing[index]
+        {
+            found.push(Attribute {
+                anchor: index,
+                content: index + 1..close,
+            });
+        }
+    }
+    found
+}
+
+/// Whether the bracket at `tokens[bracket]` directly follows a macro substitution that could expand to `#` or `#!`: a metavariable (`$name [`), a repetition (`$( … )sep? * [`, and likewise `+` and `?`), or either with a `!` just before the bracket for an inner attribute (`$name ![`). `opening` maps each closing bracket to the one it closes, so a repetition's `)` can be traced back to its `$(`.
+fn after_substitution(tokens: &[Token<'_>], opening: &[Option<usize>], bracket: usize) -> bool {
+    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
+    // Step over the `!` of an inner attribute, `… ![ … ]`.
+    let before = match bracket.checked_sub(1) {
+        Some(bang) if tokens[bang].kind == Kind::Punct(b'!') => bang.checked_sub(1),
+        other => other,
+    };
+    let Some(before) = before else {
+        return false;
+    };
+    match tokens[before].kind {
+        // A metavariable, `$name`.
+        Kind::Ident(_) => before >= 1 && tokens[before - 1].kind == Kind::Punct(b'$'),
+        // A repetition, `$( … )sep? *` (also `+` and `?`): the operator, then `)` with an optional one-token separator between them, and the matching `(` written as `$(`.
+        Kind::Punct(b'*' | b'+' | b'?') => {
+            let paren = if before >= 1 && kind(before - 1) == Some(Kind::Punct(b')')) {
+                Some(before - 1)
+            } else if before >= 2 && kind(before - 2) == Some(Kind::Punct(b')')) {
+                Some(before - 2)
+            } else {
+                None
+            };
+            paren
+                .and_then(|paren| opening[paren])
+                .is_some_and(|open| open >= 1 && tokens[open - 1].kind == Kind::Punct(b'$'))
+        }
+        _ => false,
+    }
 }
 
 /// A rule of a `macro_rules!` definition.
@@ -519,7 +608,7 @@ fn attribute_bindings<'a>(
 ) -> BTreeSet<&'a str> {
     attributes
         .iter()
-        .filter(|attribute| matcher.contains(&attribute.hash))
+        .filter(|attribute| matcher.contains(&attribute.anchor))
         .filter_map(|attribute| match content(attribute, tokens)[..] {
             [
                 Kind::Punct(b'$'),
@@ -540,7 +629,7 @@ fn passed_on(attribute: &Attribute, tokens: &[Token<'_>], rules: &[Rule<'_>]) ->
     // The innermost rule whose transcriber holds the attribute: rules nest when a macro writes a macro.
     rules
         .iter()
-        .filter(|rule| rule.transcriber.contains(&attribute.hash))
+        .filter(|rule| rule.transcriber.contains(&attribute.anchor))
         .max_by_key(|rule| rule.transcriber.start)
         .is_some_and(|rule| rule.attributes.contains(name))
 }
@@ -581,6 +670,17 @@ fn closing_brackets(tokens: &[Token<'_>]) -> Result<Vec<Option<usize>>, String> 
         )),
         None => Ok(closing),
     }
+}
+
+/// The inverse of [`closing_brackets`]: for each closing bracket, the position of the opening bracket it closes. Used to trace a repetition's `)` back to the `(` of its `$(`.
+fn opening_brackets(closing: &[Option<usize>]) -> Vec<Option<usize>> {
+    let mut opening = vec![None; closing.len()];
+    for (open, close) in closing.iter().enumerate() {
+        if let Some(close) = *close {
+            opening[close] = Some(open);
+        }
+    }
+    opening
 }
 
 /// Splits Rust source into the tokens this check needs.
@@ -736,7 +836,7 @@ fn quote_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read, and that none of the files it reads uses the bare identifier `clippy`, a condition outside `allowed` or not written out in full, or an attribute that a macro builds from its arguments. Returns one line describing what was checked, or every problem found.
+/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read, and that none of the files it reads writes a `#` apart from its bracket, uses the bare identifier `clippy`, a condition outside `allowed` or not written out in full, or an attribute that a macro builds from its arguments. Returns one line describing what was checked, or every problem found.
 pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result<String, String> {
     let build_folder = root.join(BUILD_FOLDER);
     let misplaced = misplaced_roots(root, &build_folder, packages);
@@ -744,6 +844,7 @@ pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result
     for package in packages {
         walk_folder(&package.folder, &build_folder, &mut walk)?;
     }
+    let mut stray_hash_places = Vec::new();
     let mut include_places = Vec::new();
     let mut path_places = Vec::new();
     let mut clippy_places = Vec::new();
@@ -772,6 +873,7 @@ pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result
                 .map(|(line, what)| format!("  {shown}:{line}: {}", show(what)))
                 .collect::<Vec<_>>()
         };
+        stray_hash_places.extend(places(&found.stray_hash));
         include_places.extend(places(&found.include_macro));
         path_places.extend(places(&found.path_attribute));
         clippy_places.extend(places(&found.bare_clippy));
@@ -792,6 +894,7 @@ pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result
         (unread, UNREAD_ENTRIES.0, UNREAD_ENTRIES.1.to_owned()),
         (include_places, INCLUDE_USED.0, INCLUDE_USED.1.to_owned()),
         (path_places, PATH_USED.0, PATH_USED.1.to_owned()),
+        (stray_hash_places, STRAY_HASH.0, STRAY_HASH.1.to_owned()),
         (clippy_places, CLIPPY_USED.0, CLIPPY_USED.1.to_owned()),
         (
             condition_places,
@@ -817,7 +920,7 @@ pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result
     if problems.is_empty() {
         let approved: Vec<String> = allowed.conditions.iter().map(Condition::written).collect();
         return Ok(format!(
-            "Rust sources: the {} `.rs` files below the members' folders use only the approved conditions ({}), written out in full, and no macro builds a condition or an attribute from its arguments; none uses the bare identifier `clippy`, `include!` or `#[path]`; every target starts from one of them, and no member's folder holds a symbolic link",
+            "Rust sources: the {} `.rs` files below the members' folders use only the approved conditions ({}), written out in full; every `#` opens an attribute and no macro builds a condition or an attribute from its arguments; none uses the bare identifier `clippy`, `include!` or `#[path]`; every target starts from one of them, and no member's folder holds a symbolic link",
             walk.files.len(),
             approved.join(", ")
         ));
@@ -1403,6 +1506,62 @@ macro_rules! outer {
         let found = found(source);
         assert_eq!(found.path_attribute, [2]);
         assert_eq!(found.conditions, [(3, "`windows`".to_owned())]);
+    }
+
+    #[test]
+    fn finds_a_hash_that_no_bracket_follows() {
+        let cases = [
+            // Form A of the review: the macro writes `#` apart from the bracket it is handed,
+            // so `module_at!([path = "…"])` becomes `#[path = "…"]`.
+            "macro_rules! m { ($a:tt) => { # $a pub mod sine; }; }",
+            // Its inner-attribute spelling, `#! $a`.
+            "macro_rules! m { ($a:tt) => { # ! $a pub mod sine; }; }",
+            // Form B's call site: a bare `#` handed to a macro to place before a bracket of its own.
+            "module_at!(#, path, \"../../../shared/sine.rs\");",
+            "m!(#);",
+            // A `#` before a repetition the macro expands.
+            "macro_rules! m { ($($a:tt)*) => { # $($a)* mod sine; }; }",
+        ];
+        for source in cases {
+            assert_eq!(found(&format!("\n{source}\n")).stray_hash, [2], "{source}");
+        }
+        // A `#` written against its bracket, inner or outer, begins an attribute, not a stray `#`.
+        for ok in [
+            "#[path = \"x\"] mod sine;",
+            "#![allow(dead_code)]",
+            "macro_rules! m { () => { #[cfg(test)] fn f() {} }; }",
+            "macro_rules! m { ($(#[$meta:meta])*) => { $(#[$meta])* fn f() {} }; }",
+        ] {
+            assert_eq!(found(ok).stray_hash, [], "{ok}");
+        }
+    }
+
+    #[test]
+    fn closes_split_attributes_that_macros_assemble() {
+        // Form B of the review: `#` comes from a metavariable, so the whole attribute is written
+        // as a bracket after one; it was handed `#`, `path` and a file name.
+        let form_b = "macro_rules! module_at { ($hash:tt, $name:ident, $file:literal) => { $hash [$name = $file] pub mod hidden; }; }";
+        assert_eq!(found(form_b).macro_attributes, [1], "form B");
+        // The inner-attribute spelling, `$hash ![ … ]`.
+        let inner = "macro_rules! m { ($hash:tt) => { $hash ![path = \"x\"] mod hidden; }; }";
+        assert_eq!(found(inner).path_attribute, [1], "inner");
+        // A bracket right after a repetition that could expand to `#`, with and without a separator.
+        let repetition = "macro_rules! m { ($($h:tt)*) => { $($h)* [path = \"x\"] mod hidden; }; }";
+        assert_eq!(found(repetition).path_attribute, [1], "repetition");
+        let separated =
+            "macro_rules! m { ($($h:tt),*) => { $($h),* [cfg(windows)] mod hidden; }; }";
+        let conditions = found(separated).conditions;
+        assert_eq!(conditions.len(), 1, "separated repetition: {conditions:?}");
+        assert!(conditions[0].1.contains("windows"), "{conditions:?}");
+        // The recombination the simpler rules miss: a benign attribute at the call site gives up
+        // its `#` to a `$h:tt`, and the macro writes that `#` before a bracket of its own.
+        let recombine =
+            "macro_rules! m { ($h:tt $rest:tt) => { $h [path = \"x\"] pub mod hidden; }; }";
+        assert_eq!(found(recombine).path_attribute, [1], "recombination");
+        // Indexing a real array by a plain name is not read as an attribute (the workaround the
+        // error suggests): the bracket holds no metavariable and no `path =`.
+        let index = "macro_rules! m { ($arr:expr) => {{ let i = 0; $arr [i] }}; }";
+        assert_eq!(found(index), Findings::default(), "index by a plain name");
     }
 
     /// A scratch folder for one test, removed again at the end.
