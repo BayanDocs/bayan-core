@@ -87,7 +87,7 @@ pub struct Workspace {
     /// `rust-toolchain.toml`.
     pub toolchain_toml: String,
     /// What `clippy.toml` disallows.
-    pub clippy: ClippyConfig,
+    pub clippy_config: ClippyConfig,
     /// Every crate of the workspace, as Cargo sees it.
     pub members: Vec<Member>,
 }
@@ -96,7 +96,7 @@ impl Workspace {
     /// Reads the configuration files and asks Cargo for the list of workspace members.
     pub fn load(root: &Path) -> Result<Self, String> {
         let clippy_toml = read(&root.join("clippy.toml"))?;
-        let clippy = ClippyConfig {
+        let clippy_config = ClippyConfig {
             methods: disallowed(&clippy_toml, "disallowed-methods")?,
             types: disallowed(&clippy_toml, "disallowed-types")?,
         };
@@ -116,7 +116,7 @@ impl Workspace {
         Ok(Self {
             cargo_toml: read(&root.join("Cargo.toml"))?,
             toolchain_toml: read(&root.join("rust-toolchain.toml"))?,
-            clippy,
+            clippy_config,
             members,
         })
     }
@@ -126,10 +126,11 @@ impl Workspace {
 pub fn check(workspace: &Workspace, native_only: &[&str]) -> Result<Vec<String>, String> {
     let results = [
         check_unsafe_forbidden(&workspace.cargo_toml),
+        check_float_bans_forbidden(&workspace.cargo_toml),
         check_lint_inheritance(&workspace.members, native_only),
         check_binding_copies(&workspace.cargo_toml, &workspace.members),
         check_rust_version(&workspace.cargo_toml, &workspace.toolchain_toml),
-        check_clippy_requirements(&workspace.clippy),
+        check_clippy_requirements(&workspace.clippy_config),
     ];
     let mut passed = Vec::new();
     let mut problems = Vec::new();
@@ -154,6 +155,20 @@ fn check_unsafe_forbidden(cargo_toml: &str) -> Result<String, String> {
         }
         other => Err(format!(
             "the root Cargo.toml must set `unsafe_code = \"forbid\"` in [workspace.lints.rust] (ADR-0006 §2); found {}",
+            other.unwrap_or_else(|| "nothing".to_owned())
+        )),
+    }
+}
+
+/// The workspace lint table forbids `clippy::disallowed_methods`, the lint behind the float bans of `clippy.toml` (ADR-0005 §4). At "warn" or "deny", any crate could switch the bans off again with `#[expect(clippy::disallowed_methods, …)]`, or with a group such as `#[expect(clippy::all, …)]`; `forbid` makes the compiler reject such an exception (error E0453). The binding crates' copies are compared with this table by `check_binding_copies`.
+fn check_float_bans_forbidden(cargo_toml: &str) -> Result<String, String> {
+    match toml_subset::value(cargo_toml, "workspace.lints.clippy", "disallowed_methods")? {
+        Some(level) if level == "\"forbid\"" => Ok(
+            "the workspace lints forbid exceptions to the float bans (`disallowed_methods = \"forbid\"`)"
+                .to_owned(),
+        ),
+        other => Err(format!(
+            "the root Cargo.toml must set `disallowed_methods = \"forbid\"` in [workspace.lints.clippy] (ADR-0005 §4); found {}. At any lower level, a crate could switch the float bans of clippy.toml off with `#[expect(clippy::disallowed_methods, …)]` or `#[expect(clippy::all, …)]`.",
             other.unwrap_or_else(|| "nothing".to_owned())
         )),
     }
@@ -240,18 +255,22 @@ fn check_rust_version(cargo_toml: &str, toolchain_toml: &str) -> Result<String, 
 }
 
 /// `clippy.toml` still forbids every method and type that ADR-0005 requires.
-fn check_clippy_requirements(clippy: &ClippyConfig) -> Result<String, String> {
+fn check_clippy_requirements(clippy_config: &ClippyConfig) -> Result<String, String> {
     let mut missing = Vec::new();
     for float in ["f32", "f64"] {
         for method in REQUIRED_FLOAT_METHODS {
             let path = format!("{float}::{method}");
-            if !clippy.methods.contains(&path) {
+            if !clippy_config.methods.contains(&path) {
                 missing.push(path);
             }
         }
     }
     for path in REQUIRED_TYPES {
-        if !clippy.types.iter().any(|configured| configured == path) {
+        if !clippy_config
+            .types
+            .iter()
+            .any(|configured| configured == path)
+        {
             missing.push(path.to_owned());
         }
     }
@@ -381,8 +400,8 @@ fn disallowed(clippy_toml: &str, key: &str) -> Result<Vec<String>, String> {
         .map_err(|error| format!("clippy.toml, `{key}`: {error}"))
 }
 
-/// The manifest of every workspace member, from `cargo metadata`.
-fn member_manifests(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// Cargo's description of the workspace members, `cargo metadata --no-deps`, as JSON. It reads the manifests only; nothing is built and no build script runs.
+pub fn metadata(root: &Path) -> Result<String, String> {
     let mut command = process::cargo(root);
     command.args(["metadata", "--no-deps", "--format-version", "1", "--locked"]);
     let output = process::capture(&mut command)?;
@@ -393,11 +412,171 @@ fn member_manifests(root: &Path) -> Result<Vec<PathBuf>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let manifests: Vec<PathBuf> =
-        json::string_values(&String::from_utf8_lossy(&output.stdout), "manifest_path")
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A workspace member, as `cargo metadata` describes it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Package {
+    /// The package name.
+    pub name: String,
+    /// The folder of its `Cargo.toml`.
+    pub folder: PathBuf,
+    /// Its library, binaries, tests, benchmarks, examples and build script.
+    pub targets: Vec<Target>,
+}
+
+/// A target of a workspace member.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Target {
+    /// What it is, such as `lib`, `bin`, `test` or `custom-build` (a build script).
+    pub kinds: Vec<String>,
+    /// Its name.
+    pub name: String,
+    /// The file the compiler starts from (`src_path`). Cargo's defaults put it in the package's folder, but a path in `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]`, or `build = "…"`, can move it anywhere. Cargo reports it as the package's folder joined with that path, without resolving `..`.
+    pub root_file: PathBuf,
+}
+
+/// The workspace members and their targets, from the JSON of [`metadata`].
+pub fn packages(metadata: &str) -> Result<Vec<Package>, String> {
+    let invalid = |what: &str| format!("unexpected `cargo metadata` output: {what}");
+    let value = json::parse(metadata).map_err(|error| invalid(&error))?;
+    let list = value
+        .get("packages")
+        .and_then(json::Value::as_array)
+        .ok_or_else(|| invalid("no `packages` list"))?;
+    let mut packages = Vec::new();
+    for package in list {
+        let name = package
+            .get("name")
+            .and_then(json::Value::as_str)
+            .ok_or_else(|| invalid("a package without a name"))?;
+        let folder = package
+            .get("manifest_path")
+            .and_then(json::Value::as_str)
+            .and_then(|manifest| Path::new(manifest).parent())
+            .ok_or_else(|| invalid(&format!("no `manifest_path` for {name}")))?;
+        let mut targets = Vec::new();
+        for target in package
+            .get("targets")
+            .and_then(json::Value::as_array)
+            .ok_or_else(|| invalid(&format!("no `targets` for {name}")))?
+        {
+            let kinds = target
+                .get("kind")
+                .and_then(json::Value::as_array)
+                .and_then(|kinds| {
+                    kinds
+                        .iter()
+                        .map(|kind| kind.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| invalid(&format!("a target of {name} without a `kind`")))?;
+            let target_name = target
+                .get("name")
+                .and_then(json::Value::as_str)
+                .ok_or_else(|| invalid(&format!("a target of {name} without a name")))?;
+            let root_file = target
+                .get("src_path")
+                .and_then(json::Value::as_str)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "the target `{target_name}` of {name} has no `src_path`"
+                    ))
+                })?;
+            targets.push(Target {
+                kinds,
+                name: target_name.to_owned(),
+                root_file: PathBuf::from(root_file),
+            });
+        }
+        packages.push(Package {
+            name: name.to_owned(),
+            folder: folder.to_path_buf(),
+            targets,
+        });
+    }
+    if packages.is_empty() {
+        return Err(invalid("no workspace members"));
+    }
+    Ok(packages)
+}
+
+/// A workspace member's build script, as `cargo metadata` reports it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BuildScript {
+    /// The package it belongs to.
+    pub package: String,
+    /// The path of the script.
+    pub path: String,
+}
+
+/// The build scripts of the workspace members. Cargo reports a build script as a target whose `kind` is `["custom-build"]`, whether it is the automatically found `build.rs` or a file named by `build = "…"` in the manifest.
+pub fn build_scripts(packages: &[Package]) -> Vec<BuildScript> {
+    let mut scripts = Vec::new();
+    for package in packages {
+        for target in &package.targets {
+            if target.kinds.iter().any(|kind| kind == "custom-build") {
+                scripts.push(BuildScript {
+                    package: package.name.clone(),
+                    path: target.root_file.display().to_string(),
+                });
+            }
+        }
+    }
+    scripts
+}
+
+/// No workspace member has a build script unless `allowed` (xtask's `BUILD_SCRIPTS`) lists it.
+///
+/// A build script is a program that Cargo compiles and runs before it compiles its crate. It can run any code on the machine, and it can change how its crate is compiled: `cargo::rustc-env=CLIPPY_CONF_DIR=…` makes Clippy read another configuration for that crate, which silently drops the bans of the root clippy.toml. ADR-0017 asks to keep build scripts to a minimum, so each one must be listed, with a reason, and reviewed.
+pub fn check_build_scripts(
+    members: &[String],
+    scripts: &[BuildScript],
+    allowed: &[&str],
+) -> Result<String, String> {
+    let mut problems = Vec::new();
+    for script in scripts {
+        if !allowed.contains(&script.package.as_str()) {
+            problems.push(format!(
+                "{} has a build script ({}) that xtask does not list",
+                script.package, script.path
+            ));
+        }
+    }
+    for name in allowed {
+        if !members.iter().any(|member| member == name) {
+            problems.push(format!(
+                "`{name}` is listed in BUILD_SCRIPTS but is not a workspace member; update the list"
+            ));
+        } else if !scripts.iter().any(|script| script.package == *name) {
+            problems.push(format!(
+                "`{name}` is listed in BUILD_SCRIPTS but has no build script; remove it from the list"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        return Ok(if allowed.is_empty() {
+            "no workspace member has a build script".to_owned()
+        } else {
+            format!(
+                "only the listed crates have build scripts: {}",
+                allowed.join(", ")
+            )
+        });
+    }
+    Err(format!(
+        "{}\nA build script runs code during the build and can change how its crate is compiled, for example by setting CLIPPY_CONF_DIR or other compiler variables through `cargo::rustc-env`, which switches off the bans of the root clippy.toml for that crate. Build scripts are therefore kept to a minimum (ADR-0017): remove the script (or `build = \"…\"` from the manifest), or, if the crate really needs it, add it to BUILD_SCRIPTS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the script. A build script must never set Clippy or compiler variables.",
+        problems.join("\n")
+    ))
+}
+
+/// The manifest of every workspace member, from `cargo metadata`.
+fn member_manifests(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let manifests: Vec<PathBuf> = json::string_values(&metadata(root)?, "manifest_path")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
     if manifests.is_empty() {
         return Err("`cargo metadata` listed no workspace members".to_owned());
     }
@@ -467,11 +646,170 @@ unwrap_used = "warn"
 
     const NATIVE_ONLY: [&str; 3] = ["bayan-cli", "bayan-ffi", "xtask"];
 
+    /// `cargo metadata --no-deps` output, shortened to the fields the check reads.
+    fn metadata_json(packages: &[(&str, &[&str])]) -> String {
+        let packages: Vec<String> = packages
+            .iter()
+            .map(|(name, kinds)| {
+                let targets: Vec<String> = kinds
+                    .iter()
+                    .map(|kind| {
+                        format!(
+                            r#"{{"kind":["{kind}"],"crate_types":["bin"],"name":"t","src_path":"/repo/crates/{name}/{kind}.rs","edition":"2024"}}"#
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"name":"{name}","version":"0.0.0","id":"path+file:///repo#{name}@0.0.0","dependencies":[],"targets":[{}],"features":{{}},"manifest_path":"/repo/crates/{name}/Cargo.toml"}}"#,
+                    targets.join(",")
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"packages":[{}],"workspace_members":[],"resolve":null,"version":1}}"#,
+            packages.join(",")
+        )
+    }
+
+    /// The names of `packages`, as the build-script check takes them.
+    fn member_names(packages: &[Package]) -> Vec<String> {
+        packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reads_packages_and_their_targets() {
+        let json = metadata_json(&[("bayan-units", &["lib", "test"]), ("xtask", &["bin"])]);
+        let found = packages(&json).unwrap();
+        let target = |kind: &str, file: &str| Target {
+            kinds: vec![kind.to_owned()],
+            name: "t".to_owned(),
+            root_file: PathBuf::from(file),
+        };
+        assert_eq!(
+            found,
+            [
+                Package {
+                    name: "bayan-units".to_owned(),
+                    folder: PathBuf::from("/repo/crates/bayan-units"),
+                    targets: vec![
+                        target("lib", "/repo/crates/bayan-units/lib.rs"),
+                        target("test", "/repo/crates/bayan-units/test.rs"),
+                    ],
+                },
+                Package {
+                    name: "xtask".to_owned(),
+                    folder: PathBuf::from("/repo/crates/xtask"),
+                    targets: vec![target("bin", "/repo/crates/xtask/bin.rs")],
+                },
+            ]
+        );
+        for (field, removed) in [
+            ("src_path", r#","src_path":"/repo/crates/xtask/bin.rs""#),
+            (
+                "manifest_path",
+                r#","manifest_path":"/repo/crates/xtask/Cargo.toml""#,
+            ),
+            ("kind", r#""kind":["bin"],"#),
+        ] {
+            let problem = packages(&json.replace(removed, "")).unwrap_err();
+            assert!(problem.contains(field), "{field}: {problem}");
+        }
+        assert!(packages("{\"packages\":[]}").is_err());
+        assert!(packages("not json").is_err());
+    }
+
+    #[test]
+    fn finds_build_scripts() {
+        let json = metadata_json(&[
+            ("bayan-units", &["lib"]),
+            ("bayan-cli", &["bin", "custom-build"]),
+        ]);
+        assert_eq!(
+            build_scripts(&packages(&json).unwrap()),
+            [BuildScript {
+                package: "bayan-cli".to_owned(),
+                path: "/repo/crates/bayan-cli/custom-build.rs".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_build_scripts_that_are_not_listed() {
+        let json = metadata_json(&[
+            ("bayan-units", &["lib", "custom-build"]),
+            ("bayan-model", &["lib"]),
+        ]);
+        let found = packages(&json).unwrap();
+        let (names, scripts) = (member_names(&found), build_scripts(&found));
+        let problem = check_build_scripts(&names, &scripts, &[]).unwrap_err();
+        assert!(
+            problem.contains("bayan-units has a build script (/repo/crates/bayan-units/custom-build.rs) that xtask does not list"),
+            "{problem}"
+        );
+        assert!(problem.contains("CLIPPY_CONF_DIR"), "{problem}");
+        let line = check_build_scripts(&names, &scripts, &["bayan-units"]).unwrap();
+        assert_eq!(
+            line,
+            "only the listed crates have build scripts: bayan-units"
+        );
+        let line = check_build_scripts(&names, &[], &[]).unwrap();
+        assert_eq!(line, "no workspace member has a build script");
+    }
+
+    #[test]
+    fn rejects_stale_build_script_entries() {
+        let names = vec!["bayan-model".to_owned()];
+        let problem = check_build_scripts(&names, &[], &["bayan-model", "bayan-gone"]).unwrap_err();
+        assert!(
+            problem.contains("`bayan-model` is listed in BUILD_SCRIPTS but has no build script"),
+            "{problem}"
+        );
+        assert!(
+            problem
+                .contains("`bayan-gone` is listed in BUILD_SCRIPTS but is not a workspace member"),
+            "{problem}"
+        );
+    }
+
     #[test]
     fn requires_forbid_in_the_workspace() {
         assert!(check_unsafe_forbidden(ROOT).is_ok());
         assert!(check_unsafe_forbidden(&ROOT.replace("\"forbid\"", "\"deny\"")).is_err());
         assert!(check_unsafe_forbidden("[workspace]\n").is_err());
+    }
+
+    #[test]
+    fn requires_forbidden_float_bans_in_the_workspace() {
+        let forbidden = ROOT.replace(
+            "unwrap_used = \"warn\"",
+            "disallowed_methods = \"forbid\"\nunwrap_used = \"warn\"",
+        );
+        assert!(check_float_bans_forbidden(&forbidden).is_ok());
+        for weaker in [
+            "\"warn\"",
+            "\"deny\"",
+            "{ level = \"forbid\", priority = 1 }",
+        ] {
+            let text = forbidden.replace("\"forbid\"\nunwrap", &format!("{weaker}\nunwrap"));
+            let problem = check_float_bans_forbidden(&text).unwrap_err();
+            assert!(
+                problem.contains("`disallowed_methods = \"forbid\"`"),
+                "{problem}"
+            );
+        }
+        assert!(
+            check_float_bans_forbidden(ROOT).is_err(),
+            "the entry is missing"
+        );
+    }
+
+    #[test]
+    fn the_real_workspace_forbids_the_float_bans() {
+        check_float_bans_forbidden(include_str!("../../Cargo.toml"))
+            .unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]
@@ -581,13 +919,13 @@ unwrap_used = "warn"
     fn reads_the_disallowed_lists_of_the_real_clippy_toml() {
         // The real file must parse and contain every required entry; it may contain more, which the canaries then prove. A failure shows the problem itself, not just "assertion failed".
         let text = include_str!("../../clippy.toml");
-        let clippy = ClippyConfig {
+        let clippy_config = ClippyConfig {
             methods: disallowed(text, "disallowed-methods")
                 .unwrap_or_else(|problem| panic!("{problem}")),
             types: disallowed(text, "disallowed-types")
                 .unwrap_or_else(|problem| panic!("{problem}")),
         };
-        check_clippy_requirements(&clippy).unwrap_or_else(|problem| panic!("{problem}"));
+        check_clippy_requirements(&clippy_config).unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]
