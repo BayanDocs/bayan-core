@@ -17,11 +17,13 @@
 //!
 //! A `macro_rules!` macro could write any attribute from what it is handed, such as `#[$attribute] mod sine;` handed `path = "…"`, which makes the compiler read a file that this check never sees. Outside the patterns that a macro's input must match (its matchers), a metavariable may therefore appear in an attribute only to pass on an attribute exactly as it was written where the macro is called, such as a doc comment, which this check reads there: the matcher binds it with `#[$name:meta]` and the macro writes it as `#[$name]`.
 //!
-//! An attribute is still an attribute when its `#` and its `[` are written apart, so that the reader cannot find it by looking for `#[`. Three rules close that family, so that every attribute a macro writes is read as one:
+//! An attribute is still an attribute when its `#` and its `[` are written apart, so that the reader cannot find it by looking for `#[`. Three rules catch the forms of that family found so far:
 //!
 //! - A `#` must be written directly against the `[` or `![` it opens. A `#` that any other token follows is rejected, in the code a macro writes (`# $attribute …`, which becomes `#[…]` when `$attribute` is a bracket group) and in what is handed to a macro (`m!(#, …)`, which hands it a bare `#` to place before a bracket) alike. The compiler never writes a bare `#`, so one has no other purpose.
 //! - A `[…]` written directly after a metavariable (`$name [ … ]`), a repetition (`$( … )* [ … ]`), or either with a `!` between (`$name ![ … ]`), is read as an attribute, because the substitution before it could expand to `#` or `#!`. This catches the bracket even when its `#` is supplied separately, as when a benign attribute at the call site gives up its `#` to a `$name:tt` and the macro writes `$name [path = "…"]`.
-//! - Together these mean no metavariable can hold a bare `#` and no `[…]` after one escapes the check, so a split attribute is read wherever it is assembled. The pass-on exception above still holds: `$(#[$name])*`, written against its bracket and bound by `#[$name:meta]`, passes on the caller's attribute, which this check reads where it is written.
+//! - The pass-on exception above still holds: `$(#[$name])*`, written against its bracket and bound by `#[$name:meta]`, passes on the caller's attribute, which this check reads where it is written.
+//!
+//! **Known limitation (follow-up: issue #7).** These rules model how the compiler assembles attributes; they do not prove that no other form exists, and one is known to pass. A macro can keep the `#` of an attribute written in full where it is called, drop that attribute's bracket, and write the `#` before a bracket group it was handed separately: `($hash:tt $dropped:tt, $bracket:tt) => { $hash $bracket mod hidden; }`, called as `m!(#[doc = "…"], [path = "…"])`, or the same without the comma. The macro's code holds neither a `#` nor a `[`, and where the macro is called the `[path = …]` follows a comma or a `]`, not a `#`, so no rule reads it as an attribute, and the compiler reads a file this check never sees. Issue #7 closes this for every form that makes the compiler read a file: the gate compares the files listed in the dependency files the compiler writes during the Clippy runs with the files this check read. Until then, reviewers check every macro that takes a `#` or a bracket group as a `tt`.
 //!
 //! # The files it reads
 //!
@@ -30,7 +32,7 @@
 //! - The only folder the walk skips is the workspace's build folder, `<root>/target`, and no member's folder may contain that.
 //! - Every target's root file (`src_path` in `cargo metadata`, which a path in `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]`, or `build = "…"`, can move) must be a `.rs` file inside its crate's folder. From there, `mod name;` reaches only `name.rs` or `name/mod.rs` below it.
 //! - `include!` is rejected: the identifier `include` anywhere, so that a macro cannot be handed it either. `include_str!` and `include_bytes!` read data, not code, and stay allowed.
-//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`, and, by the rule above, any attribute that a macro builds from its arguments.
+//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`, and in every attribute that the rules above find a macro building from its arguments (not yet every such attribute: see the known limitation above).
 //! - So are a symbolic link in a member's folder, and a file that the file system also finds under a name ending in `.rs` although its own name does not end so, as Windows and macOS give the compiler `sine.RS` when it asks for `sine.rs`.
 //!
 //! Procedural macros can write any code without it appearing in a source file; the preflight rejects every procedural-macro crate in the workspace that xtask does not list (`PROC_MACROS` in `verify.rs`).
