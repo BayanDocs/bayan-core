@@ -502,73 +502,100 @@ pub fn packages(metadata: &str) -> Result<Vec<Package>, String> {
     Ok(packages)
 }
 
-/// A workspace member's build script, as `cargo metadata` reports it.
+/// A kind of code that a workspace member runs during the build, which xtask must list with a reason before the gate accepts it (`BUILD_SCRIPTS` and `PROC_MACROS` in verify.rs).
+pub struct BuildTimeCode {
+    /// The `kind` that `cargo metadata` reports for such a target.
+    pub kind: &'static str,
+    /// What it is called, such as "build script".
+    pub name: &'static str,
+    /// The name of the list in xtask/src/verify.rs that names the members allowed to have one.
+    pub list: &'static str,
+    /// Why each one must be listed, and what to do instead.
+    pub why: &'static str,
+}
+
+/// Build scripts. A build script is a program that Cargo compiles and runs before it compiles its crate. It can run any code on the machine, and it can change how its crate is compiled: `cargo::rustc-env=CLIPPY_CONF_DIR=…` makes Clippy read another configuration for that crate, which silently drops the bans of the root clippy.toml. ADR-0017 asks to keep build scripts to a minimum, so each one must be listed, with a reason, and reviewed. Cargo reports a build script as a target whose `kind` is `["custom-build"]`, whether it is the automatically found `build.rs` or a file named by `build = "…"` in the manifest.
+pub const BUILD_SCRIPT: BuildTimeCode = BuildTimeCode {
+    kind: "custom-build",
+    name: "build script",
+    list: "BUILD_SCRIPTS",
+    why: "A build script runs code during the build and can change how its crate is compiled, for example by setting CLIPPY_CONF_DIR or other compiler variables through `cargo::rustc-env`, which switches off the bans of the root clippy.toml for that crate. Build scripts are therefore kept to a minimum (ADR-0017): remove the script (or `build = \"…\"` from the manifest), or, if the crate really needs it, add it to BUILD_SCRIPTS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the script. A build script must never set Clippy or compiler variables.",
+};
+
+/// Procedural-macro crates. A procedural macro is a program that the compiler runs while it compiles the crates that use the macro. It can run any code on the machine, and it can produce any code, hidden conditions included, without that code appearing in a source file: assembled from strings, `#[cfg(not(clippy))]` passes the source check unseen. So each one must be listed, with a reason, and reviewed. Cargo reports a crate with `proc-macro = true` in `[lib]` as a target whose `kind` is `["proc-macro"]`.
+pub const PROC_MACRO: BuildTimeCode = BuildTimeCode {
+    kind: "proc-macro",
+    name: "procedural-macro target",
+    list: "PROC_MACROS",
+    why: "A procedural macro runs code while the compiler compiles the crates that use it, and can produce any code, hidden conditions included, without that code appearing in a source file: assembled from strings, `#[cfg(not(clippy))]` passes the source check unseen, and Clippy never sees the code it hides. Remove the crate (or `proc-macro = true` from its manifest), or, if the project really needs it, add it to PROC_MACROS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the macro in full. Procedural macros from dependencies, such as serde's derive, are not affected.",
+};
+
+/// A target of a workspace member that runs code during the build, as `cargo metadata` reports it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct BuildScript {
+pub struct BuildTarget {
     /// The package it belongs to.
     pub package: String,
-    /// The path of the script.
+    /// The path of its root file.
     pub path: String,
 }
 
-/// The build scripts of the workspace members. Cargo reports a build script as a target whose `kind` is `["custom-build"]`, whether it is the automatically found `build.rs` or a file named by `build = "…"` in the manifest.
-pub fn build_scripts(packages: &[Package]) -> Vec<BuildScript> {
-    let mut scripts = Vec::new();
+/// The targets of the workspace members whose `kind` includes `kind`, such as `custom-build` for build scripts or `proc-macro` for procedural macros.
+pub fn targets_of_kind(packages: &[Package], kind: &str) -> Vec<BuildTarget> {
+    let mut found = Vec::new();
     for package in packages {
         for target in &package.targets {
-            if target.kinds.iter().any(|kind| kind == "custom-build") {
-                scripts.push(BuildScript {
+            if target.kinds.iter().any(|target_kind| target_kind == kind) {
+                found.push(BuildTarget {
                     package: package.name.clone(),
                     path: target.root_file.display().to_string(),
                 });
             }
         }
     }
-    scripts
+    found
 }
 
-/// No workspace member has a build script unless `allowed` (xtask's `BUILD_SCRIPTS`) lists it.
-///
-/// A build script is a program that Cargo compiles and runs before it compiles its crate. It can run any code on the machine, and it can change how its crate is compiled: `cargo::rustc-env=CLIPPY_CONF_DIR=…` makes Clippy read another configuration for that crate, which silently drops the bans of the root clippy.toml. ADR-0017 asks to keep build scripts to a minimum, so each one must be listed, with a reason, and reviewed.
-pub fn check_build_scripts(
+/// No workspace member has a target of the kind `code` describes unless `allowed` (xtask's list for it) names the member, and every name in the list is a member that has one, so that the list cannot go stale.
+pub fn check_listed(
+    code: &BuildTimeCode,
     members: &[String],
-    scripts: &[BuildScript],
+    found: &[BuildTarget],
     allowed: &[&str],
 ) -> Result<String, String> {
+    let BuildTimeCode {
+        name, list, why, ..
+    } = code;
     let mut problems = Vec::new();
-    for script in scripts {
-        if !allowed.contains(&script.package.as_str()) {
+    for target in found {
+        if !allowed.contains(&target.package.as_str()) {
             problems.push(format!(
-                "{} has a build script ({}) that xtask does not list",
-                script.package, script.path
+                "{} has a {name} ({}) that xtask does not list",
+                target.package, target.path
             ));
         }
     }
-    for name in allowed {
-        if !members.iter().any(|member| member == name) {
+    for member in allowed {
+        if !members.iter().any(|candidate| candidate == member) {
             problems.push(format!(
-                "`{name}` is listed in BUILD_SCRIPTS but is not a workspace member; update the list"
+                "`{member}` is listed in {list} but is not a workspace member; update the list"
             ));
-        } else if !scripts.iter().any(|script| script.package == *name) {
+        } else if !found.iter().any(|target| target.package == *member) {
             problems.push(format!(
-                "`{name}` is listed in BUILD_SCRIPTS but has no build script; remove it from the list"
+                "`{member}` is listed in {list} but has no {name}; remove it from the list"
             ));
         }
     }
     if problems.is_empty() {
         return Ok(if allowed.is_empty() {
-            "no workspace member has a build script".to_owned()
+            format!("no workspace member has a {name}")
         } else {
             format!(
-                "only the listed crates have build scripts: {}",
+                "only the listed crates have {name}s: {}",
                 allowed.join(", ")
             )
         });
     }
-    Err(format!(
-        "{}\nA build script runs code during the build and can change how its crate is compiled, for example by setting CLIPPY_CONF_DIR or other compiler variables through `cargo::rustc-env`, which switches off the bans of the root clippy.toml for that crate. Build scripts are therefore kept to a minimum (ADR-0017): remove the script (or `build = \"…\"` from the manifest), or, if the crate really needs it, add it to BUILD_SCRIPTS in xtask/src/verify.rs with the reason, in a pull request whose reviewers read the script. A build script must never set Clippy or compiler variables.",
-        problems.join("\n")
-    ))
+    Err(format!("{}\n{why}", problems.join("\n")))
 }
 
 /// The manifest of every workspace member, from `cargo metadata`.
@@ -722,16 +749,25 @@ unwrap_used = "warn"
     }
 
     #[test]
-    fn finds_build_scripts() {
+    fn finds_targets_that_run_code_during_the_build() {
         let json = metadata_json(&[
             ("bayan-units", &["lib"]),
             ("bayan-cli", &["bin", "custom-build"]),
+            ("bayan-hide", &["proc-macro"]),
         ]);
+        let found = packages(&json).unwrap();
         assert_eq!(
-            build_scripts(&packages(&json).unwrap()),
-            [BuildScript {
+            targets_of_kind(&found, BUILD_SCRIPT.kind),
+            [BuildTarget {
                 package: "bayan-cli".to_owned(),
                 path: "/repo/crates/bayan-cli/custom-build.rs".to_owned()
+            }]
+        );
+        assert_eq!(
+            targets_of_kind(&found, PROC_MACRO.kind),
+            [BuildTarget {
+                package: "bayan-hide".to_owned(),
+                path: "/repo/crates/bayan-hide/proc-macro.rs".to_owned()
             }]
         );
     }
@@ -743,26 +779,30 @@ unwrap_used = "warn"
             ("bayan-model", &["lib"]),
         ]);
         let found = packages(&json).unwrap();
-        let (names, scripts) = (member_names(&found), build_scripts(&found));
-        let problem = check_build_scripts(&names, &scripts, &[]).unwrap_err();
+        let (names, scripts) = (
+            member_names(&found),
+            targets_of_kind(&found, BUILD_SCRIPT.kind),
+        );
+        let problem = check_listed(&BUILD_SCRIPT, &names, &scripts, &[]).unwrap_err();
         assert!(
             problem.contains("bayan-units has a build script (/repo/crates/bayan-units/custom-build.rs) that xtask does not list"),
             "{problem}"
         );
         assert!(problem.contains("CLIPPY_CONF_DIR"), "{problem}");
-        let line = check_build_scripts(&names, &scripts, &["bayan-units"]).unwrap();
+        let line = check_listed(&BUILD_SCRIPT, &names, &scripts, &["bayan-units"]).unwrap();
         assert_eq!(
             line,
             "only the listed crates have build scripts: bayan-units"
         );
-        let line = check_build_scripts(&names, &[], &[]).unwrap();
+        let line = check_listed(&BUILD_SCRIPT, &names, &[], &[]).unwrap();
         assert_eq!(line, "no workspace member has a build script");
     }
 
     #[test]
     fn rejects_stale_build_script_entries() {
         let names = vec!["bayan-model".to_owned()];
-        let problem = check_build_scripts(&names, &[], &["bayan-model", "bayan-gone"]).unwrap_err();
+        let problem =
+            check_listed(&BUILD_SCRIPT, &names, &[], &["bayan-model", "bayan-gone"]).unwrap_err();
         assert!(
             problem.contains("`bayan-model` is listed in BUILD_SCRIPTS but has no build script"),
             "{problem}"
@@ -770,6 +810,60 @@ unwrap_used = "warn"
         assert!(
             problem
                 .contains("`bayan-gone` is listed in BUILD_SCRIPTS but is not a workspace member"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn rejects_procedural_macro_crates_that_are_not_listed() {
+        let json = metadata_json(&[("bayan-units", &["lib"]), ("bayan-hide", &["proc-macro"])]);
+        let found = packages(&json).unwrap();
+        let (names, macros) = (
+            member_names(&found),
+            targets_of_kind(&found, PROC_MACRO.kind),
+        );
+        let problem = check_listed(&PROC_MACRO, &names, &macros, &[]).unwrap_err();
+        assert!(
+            problem.contains("bayan-hide has a procedural-macro target (/repo/crates/bayan-hide/proc-macro.rs) that xtask does not list"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("without that code appearing in a source file"),
+            "{problem}"
+        );
+        assert!(problem.contains("PROC_MACROS"), "{problem}");
+        // A build script is not a procedural macro, and the reverse.
+        assert!(
+            check_listed(
+                &BUILD_SCRIPT,
+                &names,
+                &targets_of_kind(&found, BUILD_SCRIPT.kind),
+                &[]
+            )
+            .is_ok()
+        );
+        let line = check_listed(&PROC_MACRO, &names, &macros, &["bayan-hide"]).unwrap();
+        assert_eq!(
+            line,
+            "only the listed crates have procedural-macro targets: bayan-hide"
+        );
+        let line = check_listed(&PROC_MACRO, &names, &[], &[]).unwrap();
+        assert_eq!(line, "no workspace member has a procedural-macro target");
+    }
+
+    #[test]
+    fn rejects_stale_procedural_macro_entries() {
+        let names = vec!["bayan-units".to_owned()];
+        let problem =
+            check_listed(&PROC_MACRO, &names, &[], &["bayan-units", "bayan-gone"]).unwrap_err();
+        assert!(
+            problem.contains(
+                "`bayan-units` is listed in PROC_MACROS but has no procedural-macro target"
+            ),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("`bayan-gone` is listed in PROC_MACROS but is not a workspace member"),
             "{problem}"
         );
     }
