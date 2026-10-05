@@ -1,27 +1,39 @@
 //! The guardrail against code that hides from Clippy.
 //!
-//! When Clippy compiles a crate, it sets the condition `clippy`; a normal build does not. Code under `#[cfg(not(clippy))]` is therefore compiled by the tests and in every release, but Clippy never sees it, so none of the bans of `clippy.toml` apply to it: `#[cfg(not(clippy))] fn sine(x: f64) -> f64 { x.sin() }`, next to a `#[cfg(clippy)]` twin that Clippy checks instead, passes every other step of the gate.
+//! Clippy checks only the code it compiles, and code can choose with conditions (`#[cfg(…)]`, `#[cfg_attr(…)]`, `cfg!(…)`) the configurations in which it is compiled at all. Code under a condition that the Clippy step never sets, or never leaves unset, is compiled by the tests or in a release, but Clippy never sees it, so none of the bans of `clippy.toml` (ADR-0005) apply to it: `#[cfg(not(feature = "x"))] fn sine(x: f64) -> f64 { x.sin() }`, next to a `#[cfg(feature = "x")]` twin that Clippy checks instead, would pass every other step of the gate. Code may therefore use only conditions that the Clippy step checks both ways, written out in full where this check reads them.
 //!
-//! Every lint path starts with `clippy::`, so the bare identifier `clippy` (not followed by `::`) has no legitimate use in this repository's code. This check rejects it anywhere outside comments, strings and character literals: in `cfg`, `cfg_attr` and `cfg!`, as a raw identifier (`r#clippy`), as the name of an item or variable, and as an argument handed to a macro, such as `m!(clippy)`.
+//! # Conditions
+//!
+//! A condition is the argument of `cfg(…)` and `cfg!(…)`, and the first argument of `cfg_attr(…)`. It may use only the approved conditions (`APPROVED_CONDITIONS` in `verify.rs`: `test`, `debug_assertions` and `target_arch = "wasm32"`), combined with `all`, `any`, `not`, `true` and `false`; the lint canary's own crate may also use its switch, `bayan_lint_canary = "…"`. The Clippy step compiles the code under every combination of the approved conditions (`CLIPPY_RUNS` in `verify.rs`), so Clippy sees the code under any condition built from them, and this check needs no reasoning about `not`.
+//!
+//! Every condition is written out in full where this check reads it:
+//!
+//! - It may not contain a macro's metavariable (`$`): a macro handed `clippy::disallowed_methods` could otherwise keep only `clippy` and write `#[cfg(not($tool))]`.
+//! - The words `cfg` and `cfg_attr` may stand only directly before their condition, as `cfg(`, `cfg!(` and `cfg_attr(`, so that no macro can assemble a condition from pieces, such as `#[$name(not(feature = "x"))]` handed `cfg`.
+//! - Every other word that starts with `cfg` is rejected: `cfg_select!` chooses code by conditions that are not written inside `cfg(…)`, and later Rust versions may add more such macros.
+//! - The bare identifier `clippy` (not followed by `::`) is rejected anywhere outside comments, strings and character literals, also as a macro argument: Clippy sets the condition `clippy` when it compiles a crate, and a normal build does not. Every lint path starts with `clippy::`, so the bare identifier has no legitimate use.
+//!
+//! # Attributes that macros write
+//!
+//! A `macro_rules!` macro could write any attribute from what it is handed, such as `#[$attribute] mod sine;` handed `path = "…"`, which makes the compiler read a file that this check never sees. Outside the patterns that a macro's input must match (its matchers), a metavariable may therefore appear in an attribute only to pass on an attribute exactly as it was written where the macro is called, such as a doc comment, which this check reads there: the matcher binds it with `#[$name:meta]` and the macro writes it as `#[$name]`.
 //!
 //! # The files it reads
 //!
-//! The check is only as good as the files it reads. It reads every `.rs` file below every member's folder, and it rejects every way it knows to make the compiler read another Rust file for a workspace member, except the macros described under "Not covered":
+//! The check is only as good as the files it reads. It reads every `.rs` file below every member's folder, and it rejects every way it knows to make the compiler read another Rust file for a workspace member:
 //!
 //! - The only folder the walk skips is the workspace's build folder, `<root>/target`, and no member's folder may contain that.
 //! - Every target's root file (`src_path` in `cargo metadata`, which a path in `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]`, or `build = "…"`, can move) must be a `.rs` file inside its crate's folder. From there, `mod name;` reaches only `name.rs` or `name/mod.rs` below it.
 //! - `include!` is rejected: the identifier `include` anywhere, so that a macro cannot be handed it either. `include_str!` and `include_bytes!` read data, not code, and stay allowed.
-//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`.
+//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`, and, by the rule above, any attribute that a macro builds from its arguments.
 //! - So are a symbolic link in a member's folder, and a file that the file system also finds under a name ending in `.rs` although its own name does not end so, as Windows and macOS give the compiler `sine.RS` when it asks for `sine.rs`.
 //!
-//! # Not covered
+//! Procedural macros can write any code without it appearing in a source file; the preflight rejects every procedural-macro crate in the workspace that xtask does not list (`PROC_MACROS` in `verify.rs`).
 //!
-//! A macro can build the condition, or the attribute, from tokens that look harmless where it is called. `macro_rules! lint_exempt { ($tool:ident :: $lint:ident, $item:item, $twin:item) => { #[cfg(not($tool))] $item #[cfg($tool)] $twin }; }`, called as `lint_exempt!(clippy::disallowed_methods, …)`, is handed a lint path, which this check allows, and keeps only `clippy`. In the same way, a macro that writes `#[$attribute] mod name;` can be handed `path = "…"`. Both pass the gate. Closing them needs a decision on what macros may write, so until then reviewers look for macros that build attributes from their arguments (AGENTS.md, "Lint rules and exceptions").
-//!
-//! Source that the check cannot follow, such as a comment or string that is never closed, is an error, so that nothing can hide behind a misreading.
+//! Source that the check cannot follow, such as a comment, string or bracket that is never closed, or a condition or `macro_rules!` definition it cannot read, is an error, so that nothing can hide behind a misreading.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use crate::policy::Package;
@@ -35,8 +47,43 @@ const INCLUDE: &str = "include";
 /// The attribute that makes `mod` read its file from another place.
 const PATH: &str = "path";
 
+/// The start of every word that writes a condition: `cfg`, `cfg_attr`, and macros such as `cfg_select!`.
+const CONDITION_WORD: &str = "cfg";
+
 /// The workspace's build folder, relative to the root: the only folder the walk skips.
 const BUILD_FOLDER: &str = "target";
+
+/// A condition that code may use in `cfg(…)`, `cfg!(…)` and the first argument of `cfg_attr(…)`: a name, used alone or compared with a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Condition {
+    /// The name, such as `test` or `target_arch`.
+    pub name: &'static str,
+    /// The value it is compared with, as in `target_arch = "wasm32"`, or `None` for a name used alone, such as `test`.
+    pub value: Option<&'static str>,
+    /// Why it is approved.
+    pub reason: &'static str,
+}
+
+impl Condition {
+    /// The condition as code writes it, such as `target_arch = "wasm32"`.
+    pub fn written(&self) -> String {
+        match self.value {
+            Some(value) => format!("{} = \"{value}\"", self.name),
+            None => self.name.to_owned(),
+        }
+    }
+}
+
+/// The conditions that code may use: the approved ones, and the lint canary's switch, which only the canary's own crate may use, with any value.
+#[derive(Debug, Clone, Copy)]
+pub struct Allowed<'a> {
+    /// The approved conditions (`APPROVED_CONDITIONS` in `verify.rs`).
+    pub conditions: &'a [Condition],
+    /// The name of the lint canary's switch.
+    pub canary_switch: &'a str,
+    /// The package that may use the switch.
+    pub canary_package: &'a str,
+}
 
 /// How each kind of problem is reported: the heading of its list of places, and why it is a problem.
 const MISPLACED_ROOTS: (&str, &str) = (
@@ -59,17 +106,55 @@ const CLIPPY_USED: (&str, &str) = (
     "the bare identifier `clippy` (not followed by `::`) is used here",
     "Clippy sets the condition `clippy` when it compiles a crate, and a normal build does not, so code under `#[cfg(not(clippy))]` is compiled and shipped but never checked by Clippy: the bans of clippy.toml (ADR-0005) do not apply to it. The gate therefore rejects the identifier anywhere outside comments and strings, also inside `cfg_attr` and `cfg!` and as a macro argument. Lint paths such as `clippy::unwrap_used` are fine. Remove the condition, or rename an item or variable that happens to be called `clippy`.",
 );
+const UNAPPROVED_CONDITIONS: &str =
+    "a condition outside the approved list, or one this check cannot read, is used here";
+const MACRO_CONDITIONS: (&str, &str) = (
+    "a condition is built from a macro's arguments here (it contains a metavariable, `$`)",
+    "A macro can be handed anything, so a condition it builds from its arguments is not written out where this check reads it: `#[cfg(not($tool))]`, handed the lint path `clippy::disallowed_methods`, keeps only `clippy` and hides the code from Clippy. Write every condition out in full, also inside macros.",
+);
+const CONDITION_WORDS: (&str, &str) = (
+    "the word `cfg` or `cfg_attr` is used here without its condition directly after it, or another word that starts with `cfg`",
+    "`cfg` must be followed directly by `(`, as in `#[cfg(…)]`, or by `!(`, as in `cfg!(…)`, and `cfg_attr` by `(`, so that no macro can assemble a condition from pieces, such as `#[$name(not(feature = \"x\"))]` handed `cfg`. Every other word that starts with `cfg` is rejected too: `cfg_select!` chooses code by conditions that are not written inside `cfg(…)`, which this check would not read, and later Rust versions may add more such macros. Write conditions as `#[cfg(…)]`, `#[cfg_attr(…, …)]` or `cfg!(…)`, and do not give anything a name that starts with `cfg`.",
+);
+const MACRO_ATTRIBUTES: (&str, &str) = (
+    "an attribute is built from a macro's arguments here",
+    "A macro can be handed anything, so an attribute that it builds from its arguments, such as `#[$attribute] mod sine;` handed `path = \"…\"`, can make the compiler read a file or choose code that this check never sees. Write every attribute out in full inside a macro. The one exception passes on an attribute exactly as it was written where the macro is called, such as a doc comment, where this check reads it: bind it with `$(#[$name:meta])*` in the macro's pattern and write it as `$(#[$name])*`.",
+);
 
-/// A token of Rust source, as far as this check needs to tell them apart.
+/// Why conditions outside the approved list are rejected, naming the approved ones.
+fn unapproved_why(allowed: &Allowed<'_>) -> String {
+    let approved: Vec<String> = allowed
+        .conditions
+        .iter()
+        .map(|condition| format!("`{}`", condition.written()))
+        .collect();
+    format!(
+        "Code may choose the configurations in which it is compiled only with the approved conditions, {}, combined with `all`, `any`, `not`, `true` and `false` (and, in the {} crate only, its switch `{} = \"…\"`). The Clippy step compiles the code under every combination of their values, so no code under them escapes Clippy. Code under any other condition, such as `feature = \"…\"`, `windows`, `unix`, `target_os = \"…\"` or a name of your own, is compiled in configurations that Clippy does not check, where the bans of clippy.toml (ADR-0005) would not apply. Remove the condition, or write it with the approved ones. A condition can be added to APPROVED_CONDITIONS in xtask/src/verify.rs only in a reviewed pull request, together with the Clippy runs (CLIPPY_RUNS) that check the code with it both on and off.",
+        approved.join(", "),
+        allowed.canary_package,
+        allowed.canary_switch,
+    )
+}
+
+/// A token of Rust source, as far as this check needs to tell them apart, and the line on which it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Token<'a> {
-    /// An identifier, with `r#` removed from a raw identifier, and the line it is on.
-    Ident(&'a str, usize),
+struct Token<'a> {
+    kind: Kind<'a>,
+    line: usize,
+}
+
+/// The kinds of tokens this check tells apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind<'a> {
+    /// An identifier, with `r#` removed from a raw identifier.
+    Ident(&'a str),
     /// The path separator `::`.
     PathSeparator,
-    /// One other ASCII punctuation character, such as `#`, `[` or `=`.
+    /// One other ASCII punctuation character, such as `#`, `[`, `=` or `$`.
     Punct(u8),
-    /// A literal, a number, a lifetime or label, or other text.
+    /// A string literal of any kind (plain, raw, byte or C string), exactly as written, prefix and quotes included, such as `"wasm32"`.
+    Str(&'a str),
+    /// A character or byte literal, a number, a lifetime or label, or other text.
     Other,
 }
 
@@ -82,49 +167,420 @@ struct Findings {
     include_macro: Vec<usize>,
     /// `path =` inside an attribute.
     path_attribute: Vec<usize>,
+    /// Conditions outside the approved list, and conditions this check cannot read: the line and what was found.
+    conditions: Vec<(usize, String)>,
+    /// Conditions that contain a macro's metavariable (`$`).
+    macro_conditions: Vec<usize>,
+    /// The words `cfg` and `cfg_attr` without their condition directly after them, and other words that start with `cfg`: the line and the word.
+    condition_words: Vec<(usize, String)>,
+    /// Attributes that a macro builds from its arguments, other than one passed on as written where the macro is called.
+    macro_attributes: Vec<usize>,
 }
 
-/// Finds in Rust source the bare identifier `clippy` (not followed by `::`), the identifier `include`, and `path =` inside an attribute (`#[…]` or `#![…]`, at any depth, so also inside `cfg_attr`). Comments, strings (also raw, byte and C strings), character literals and lifetimes are skipped. Source the reader cannot follow, such as a comment or string that is never closed, is an error, so nothing can hide behind a misreading.
-fn findings(source: &str) -> Result<Findings, String> {
+/// Finds in Rust source everything this check rejects: the bare identifier `clippy` (not followed by `::`), the identifier `include`, `path =` inside an attribute (`#[…]` or `#![…]`, at any depth, so also inside `cfg_attr`), conditions outside the approved list (`allowed`; the canary's switch only where `in_canary` says the file belongs to the lint canary's crate), conditions that contain a metavariable, words starting with `cfg` that do not stand directly before their condition, and attributes that a macro builds from its arguments. Comments, strings (also raw, byte and C strings), character literals and lifetimes are skipped. Source the reader cannot follow is an error, so nothing can hide behind a misreading.
+fn findings(source: &str, allowed: &Allowed<'_>, in_canary: bool) -> Result<Findings, String> {
     let tokens = tokenize(source)?;
+    let closing = closing_brackets(&tokens)?;
+    let attributes = attributes(&tokens, &closing);
+    let rules = rules_of_macros(&tokens, &closing, &attributes)?;
+    let mut in_attribute = vec![false; tokens.len()];
+    for attribute in &attributes {
+        for flag in &mut in_attribute[attribute.content.clone()] {
+            *flag = true;
+        }
+    }
     let mut found = Findings::default();
-    // How deeply `[` brackets nest at this point, and, inside an attribute, the depth at which it ends.
-    let mut depth = 0_usize;
-    let mut attribute_ends = None;
+    // Which tokens belong to a condition, so that a metavariable in a condition is reported once, as a condition.
+    let mut in_condition = vec![false; tokens.len()];
     for (index, token) in tokens.iter().enumerate() {
-        let next = tokens.get(index + 1).copied();
-        match *token {
-            Token::Ident(CLIPPY, line) if next != Some(Token::PathSeparator) => {
-                found.bare_clippy.push(line);
+        let next = tokens.get(index + 1).map(|token| token.kind);
+        match token.kind {
+            Kind::Ident(CLIPPY) if next != Some(Kind::PathSeparator) => {
+                found.bare_clippy.push(token.line);
             }
-            Token::Ident(INCLUDE, line) => found.include_macro.push(line),
-            Token::Ident(PATH, line)
-                if attribute_ends.is_some() && next == Some(Token::Punct(b'=')) =>
-            {
-                found.path_attribute.push(line);
+            Kind::Ident(INCLUDE) => found.include_macro.push(token.line),
+            Kind::Ident(PATH) if in_attribute[index] && next == Some(Kind::Punct(b'=')) => {
+                found.path_attribute.push(token.line);
             }
-            Token::Punct(b'#') if attribute_ends.is_none() => {
-                // `#[` or `#![` opens an attribute.
-                let bracket = if next == Some(Token::Punct(b'!')) {
-                    index + 2
-                } else {
-                    index + 1
-                };
-                if tokens.get(bracket) == Some(&Token::Punct(b'[')) {
-                    attribute_ends = Some(depth);
-                }
-            }
-            Token::Punct(b'[') => depth += 1,
-            Token::Punct(b']') => {
-                depth = depth.saturating_sub(1);
-                if attribute_ends == Some(depth) {
-                    attribute_ends = None;
+            Kind::Ident(word) if word.starts_with(CONDITION_WORD) => {
+                if let Some(condition) =
+                    check_condition(&tokens, &closing, index, allowed, in_canary, &mut found)
+                {
+                    for flag in &mut in_condition[condition] {
+                        *flag = true;
+                    }
                 }
             }
             _ => {}
         }
     }
+    for attribute in &attributes {
+        let built = attribute
+            .content
+            .clone()
+            .any(|at| tokens[at].kind == Kind::Punct(b'$') && !in_condition[at]);
+        // A matcher is a pattern for the macro's input, never code, so its attributes are not checked.
+        let in_matcher = rules
+            .iter()
+            .any(|rule| rule.matcher.contains(&attribute.hash));
+        if built && !in_matcher && !passed_on(attribute, &tokens, &rules) {
+            found.macro_attributes.push(tokens[attribute.hash].line);
+        }
+    }
     Ok(found)
+}
+
+/// Checks the word that starts with `cfg` at `tokens[index]`: `cfg` and `cfg_attr` must stand directly before their condition, which may contain no metavariable and may use only the allowed conditions; every other such word is reported. Returns the positions of the condition's tokens, if the word has one.
+fn check_condition(
+    tokens: &[Token<'_>],
+    closing: &[Option<usize>],
+    index: usize,
+    allowed: &Allowed<'_>,
+    in_canary: bool,
+    found: &mut Findings,
+) -> Option<Range<usize>> {
+    let Token {
+        kind: Kind::Ident(word),
+        line,
+    } = tokens[index]
+    else {
+        return None;
+    };
+    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
+    // The `(` that opens the condition: `cfg(`, `cfg!(` or `cfg_attr(`.
+    let open = match word {
+        "cfg" | "cfg_attr" if kind(index + 1) == Some(Kind::Punct(b'(')) => index + 1,
+        "cfg"
+            if kind(index + 1) == Some(Kind::Punct(b'!'))
+                && kind(index + 2) == Some(Kind::Punct(b'(')) =>
+        {
+            index + 2
+        }
+        _ => {
+            found.condition_words.push((line, word.to_owned()));
+            return None;
+        }
+    };
+    let unreadable = || (line, "a condition this check cannot read".to_owned());
+    let Some(close) = closing.get(open).copied().flatten() else {
+        found.conditions.push(unreadable());
+        return None;
+    };
+    // The condition is everything between the brackets of `cfg`; for `cfg_attr`, whose other arguments are attributes, it ends at the first comma outside nested brackets.
+    let end = if word == "cfg_attr" {
+        top_level_comma(tokens, closing, open + 1, close).unwrap_or(close)
+    } else {
+        close
+    };
+    let condition = open + 1..end;
+    if tokens[condition.clone()]
+        .iter()
+        .any(|token| token.kind == Kind::Punct(b'$'))
+    {
+        found.macro_conditions.push(line);
+        return Some(condition);
+    }
+    let mut names = Vec::new();
+    if predicate(tokens, closing, condition.start, end, &mut names) != Some(end) {
+        found.conditions.push(unreadable());
+        return Some(condition);
+    }
+    for name in &names {
+        if let Some(problem) = unapproved(name, allowed, in_canary) {
+            found.conditions.push((name.line, problem));
+        }
+    }
+    Some(condition)
+}
+
+/// A name that a condition tests, with the value it compares it with, as written (prefix and quotes included), and the line it is on.
+struct Name<'a> {
+    name: &'a str,
+    value: Option<&'a str>,
+    line: usize,
+}
+
+/// Reads one condition that starts at `tokens[at]` and ends before `end`: `all(…)`, `any(…)`, `not(…)`, `true`, `false`, a name, or a name compared with a string. Collects the names it tests into `names` and returns the position after the condition, or `None` if it cannot read the condition.
+fn predicate<'a>(
+    tokens: &[Token<'a>],
+    closing: &[Option<usize>],
+    at: usize,
+    end: usize,
+    names: &mut Vec<Name<'a>>,
+) -> Option<usize> {
+    let kind = |at: usize| (at < end).then(|| tokens[at].kind);
+    let line = tokens.get(at)?.line;
+    match kind(at)? {
+        Kind::Ident(combinator @ ("all" | "any" | "not"))
+            if kind(at + 1) == Some(Kind::Punct(b'(')) =>
+        {
+            let close = closing[at + 1]?;
+            let mut position = at + 2;
+            let mut count = 0;
+            while position < close {
+                position = predicate(tokens, closing, position, close, names)?;
+                count += 1;
+                if position < close {
+                    if tokens[position].kind != Kind::Punct(b',') {
+                        return None;
+                    }
+                    position += 1;
+                }
+            }
+            (combinator != "not" || count == 1).then_some(close + 1)
+        }
+        Kind::Ident("true" | "false") => Some(at + 1),
+        Kind::Ident(name) if kind(at + 1) == Some(Kind::Punct(b'=')) => {
+            let Some(Kind::Str(value)) = kind(at + 2) else {
+                return None;
+            };
+            names.push(Name {
+                name,
+                value: Some(value),
+                line,
+            });
+            Some(at + 3)
+        }
+        Kind::Ident(name) => {
+            names.push(Name {
+                name,
+                value: None,
+                line,
+            });
+            Some(at + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Why `name` may not be tested here, or `None` if it may.
+fn unapproved(name: &Name<'_>, allowed: &Allowed<'_>, in_canary: bool) -> Option<String> {
+    let approved = allowed.conditions.iter().any(|condition| {
+        condition.name == name.name
+            && match (condition.value, name.value) {
+                (None, None) => true,
+                (Some(expected), Some(written)) => written == format!("\"{expected}\""),
+                _ => false,
+            }
+    });
+    let canary = name.name == allowed.canary_switch && name.value.is_some();
+    if approved || (canary && in_canary) {
+        return None;
+    }
+    let written = match name.value {
+        Some(value) => format!("`{} = {value}`", name.name),
+        None => format!("`{}`", name.name),
+    };
+    Some(if name.name == allowed.canary_switch {
+        format!(
+            "{written} (the lint canary's switch, which only the {} crate may use, with a value)",
+            allowed.canary_package
+        )
+    } else {
+        written
+    })
+}
+
+/// The position of the first comma between `start` and `end` that is not inside nested brackets.
+fn top_level_comma(
+    tokens: &[Token<'_>],
+    closing: &[Option<usize>],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let mut at = start;
+    while at < end {
+        match tokens[at].kind {
+            Kind::Punct(b',') => return Some(at),
+            Kind::Punct(b'(' | b'[' | b'{') => at = closing[at]? + 1,
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// An attribute, `#[…]` or `#![…]`.
+struct Attribute {
+    /// The position of its `#`.
+    hash: usize,
+    /// The positions of the tokens between its brackets.
+    content: Range<usize>,
+}
+
+/// Every attribute in `tokens`, also those nested in other attributes or in macros.
+fn attributes(tokens: &[Token<'_>], closing: &[Option<usize>]) -> Vec<Attribute> {
+    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != Kind::Punct(b'#') {
+            continue;
+        }
+        let bracket = if kind(index + 1) == Some(Kind::Punct(b'!')) {
+            index + 2
+        } else {
+            index + 1
+        };
+        if kind(bracket) == Some(Kind::Punct(b'['))
+            && let Some(close) = closing[bracket]
+        {
+            found.push(Attribute {
+                hash: index,
+                content: bracket + 1..close,
+            });
+        }
+    }
+    found
+}
+
+/// A rule of a `macro_rules!` definition.
+struct Rule<'a> {
+    /// The positions of the tokens of the pattern that the macro's input must match (the matcher), brackets excluded.
+    matcher: Range<usize>,
+    /// The positions of the tokens of the code the rule writes (the transcriber), brackets excluded.
+    transcriber: Range<usize>,
+    /// The metavariables that the matcher binds to a whole attribute written where the macro is called: `name` in `#[$name:meta]` or `#![$name:meta]`.
+    attributes: BTreeSet<&'a str>,
+}
+
+/// Every rule of every `macro_rules!` definition in `tokens`, also of definitions inside other macros. A definition that this reader cannot follow is an error, so that no attribute can hide in it. (The word `macro_rules` without `!` defines nothing, for the compiler as here. Reading too few definitions could only make the check stricter: an attribute outside every rule may not be built from a metavariable at all.)
+fn rules_of_macros<'a>(
+    tokens: &[Token<'a>],
+    closing: &[Option<usize>],
+    attributes: &[Attribute],
+) -> Result<Vec<Rule<'a>>, String> {
+    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
+    let mut rules = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind != Kind::Ident("macro_rules") || kind(index + 1) != Some(Kind::Punct(b'!')) {
+            continue;
+        }
+        let unreadable = || {
+            format!(
+                "line {}: a `macro_rules!` definition this check cannot read",
+                token.line
+            )
+        };
+        // `macro_rules! name { … }`, or with `( … );` or `[ … ];`. A macro that writes macros may name them with a metavariable, `$name`.
+        let mut at = index + 2;
+        if kind(at) == Some(Kind::Punct(b'$')) {
+            at += 1;
+        }
+        if !matches!(kind(at), Some(Kind::Ident(_))) {
+            return Err(unreadable());
+        }
+        at += 1;
+        let body_end = closing.get(at).copied().flatten().ok_or_else(unreadable)?;
+        // The rules, `(matcher) => {transcriber}`, separated by `;`.
+        at += 1;
+        while at < body_end {
+            let matcher_end = closing[at].ok_or_else(unreadable)?;
+            if kind(matcher_end + 1) != Some(Kind::Punct(b'='))
+                || kind(matcher_end + 2) != Some(Kind::Punct(b'>'))
+            {
+                return Err(unreadable());
+            }
+            let transcriber_start = matcher_end + 3;
+            let transcriber_end = closing
+                .get(transcriber_start)
+                .copied()
+                .flatten()
+                .ok_or_else(unreadable)?;
+            let matcher = at + 1..matcher_end;
+            rules.push(Rule {
+                attributes: attribute_bindings(tokens, attributes, &matcher),
+                matcher,
+                transcriber: transcriber_start + 1..transcriber_end,
+            });
+            at = transcriber_end + 1;
+            if at < body_end {
+                if kind(at) != Some(Kind::Punct(b';')) {
+                    return Err(unreadable());
+                }
+                at += 1;
+            }
+        }
+    }
+    Ok(rules)
+}
+
+/// The tokens between an attribute's brackets.
+fn content<'a>(attribute: &Attribute, tokens: &[Token<'a>]) -> Vec<Kind<'a>> {
+    tokens[attribute.content.clone()]
+        .iter()
+        .map(|token| token.kind)
+        .collect()
+}
+
+/// The names that the matcher at `matcher` binds to a whole attribute: `name` in `#[$name:meta]` or `#![$name:meta]`.
+fn attribute_bindings<'a>(
+    tokens: &[Token<'a>],
+    attributes: &[Attribute],
+    matcher: &Range<usize>,
+) -> BTreeSet<&'a str> {
+    attributes
+        .iter()
+        .filter(|attribute| matcher.contains(&attribute.hash))
+        .filter_map(|attribute| match content(attribute, tokens)[..] {
+            [
+                Kind::Punct(b'$'),
+                Kind::Ident(name),
+                Kind::Punct(b':'),
+                Kind::Ident("meta"),
+            ] => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `attribute` is `#[$name]` or `#![$name]` in the code a macro rule writes, where the rule's matcher binds `$name` to a whole attribute written where the macro is called (`#[$name:meta]`): the attribute is passed on as written there, where this check reads it.
+fn passed_on(attribute: &Attribute, tokens: &[Token<'_>], rules: &[Rule<'_>]) -> bool {
+    let [Kind::Punct(b'$'), Kind::Ident(name)] = content(attribute, tokens)[..] else {
+        return false;
+    };
+    // The innermost rule whose transcriber holds the attribute: rules nest when a macro writes a macro.
+    rules
+        .iter()
+        .filter(|rule| rule.transcriber.contains(&attribute.hash))
+        .max_by_key(|rule| rule.transcriber.start)
+        .is_some_and(|rule| rule.attributes.contains(name))
+}
+
+/// For each opening bracket (`(`, `[` or `{`) in `tokens`, the position of the bracket that closes it. Rust itself requires brackets to be balanced, so brackets that are not mean this reader has lost track of the source, which is an error.
+fn closing_brackets(tokens: &[Token<'_>]) -> Result<Vec<Option<usize>>, String> {
+    let mut closing = vec![None; tokens.len()];
+    let mut open: Vec<(usize, u8)> = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let Kind::Punct(byte) = token.kind else {
+            continue;
+        };
+        let expected = match byte {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            b')' | b']' | b'}' => {
+                match open.pop() {
+                    Some((start, expected)) if expected == byte => closing[start] = Some(index),
+                    _ => {
+                        return Err(format!(
+                            "line {}: `{}` does not match the bracket it should close",
+                            token.line,
+                            char::from(byte)
+                        ));
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        open.push((index, expected));
+    }
+    match open.last() {
+        Some((start, _)) => Err(format!(
+            "line {}: a bracket is never closed",
+            tokens[*start].line
+        )),
+        None => Ok(closing),
+    }
 }
 
 /// Splits Rust source into the tokens this check needs.
@@ -139,19 +595,21 @@ fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
         let start = position;
         let byte = bytes[position];
         let rest = &source[position..];
-        if rest.starts_with("//") {
+        let kind = if rest.starts_with("//") {
             position += rest.find('\n').unwrap_or(rest.len());
+            None
         } else if rest.starts_with("/*") {
             position = block_comment_end(source, position)
                 .ok_or_else(|| format!("line {line}: a block comment is never closed"))?;
+            None
         } else if byte == b'"' {
             position = string_end(source, position + 1)
                 .ok_or_else(|| format!("line {line}: a string is never closed"))?;
-            tokens.push(Token::Other);
+            Some(Kind::Str(&source[start..position]))
         } else if byte == b'\'' {
             position = quote_end(source, position)
                 .ok_or_else(|| format!("line {line}: a character literal is never closed"))?;
-            tokens.push(Token::Other);
+            Some(Kind::Other)
         } else if byte.is_ascii_alphabetic() || byte == b'_' {
             let word_end = ident_end(source, position);
             let word = &source[position..word_end];
@@ -166,42 +624,46 @@ fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
                     .find(&closing)
                     .ok_or_else(|| format!("line {line}: a raw string is never closed"))?;
                 position = body + found + closing.len();
-                tokens.push(Token::Other);
+                Some(Kind::Str(&source[start..position]))
             } else if matches!(word, "b" | "c") && after.starts_with('"') {
                 position = string_end(source, word_end + 1)
                     .ok_or_else(|| format!("line {line}: a string is never closed"))?;
-                tokens.push(Token::Other);
+                Some(Kind::Str(&source[start..position]))
             } else if word == "b" && after.starts_with('\'') {
                 position = quote_end(source, word_end)
                     .ok_or_else(|| format!("line {line}: a byte literal is never closed"))?;
-                tokens.push(Token::Other);
+                Some(Kind::Other)
             } else if word == "r"
                 && hashes == 1
                 && after[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             {
                 // A raw identifier, r#name.
                 let name_end = ident_end(source, word_end + 1);
-                tokens.push(Token::Ident(&source[word_end + 1..name_end], line));
                 position = name_end;
+                Some(Kind::Ident(&source[word_end + 1..name_end]))
             } else {
-                tokens.push(Token::Ident(word, line));
                 position = word_end;
+                Some(Kind::Ident(word))
             }
         } else if byte.is_ascii_digit() {
             position = ident_end(source, position);
-            tokens.push(Token::Other);
+            Some(Kind::Other)
         } else if rest.starts_with("::") {
-            tokens.push(Token::PathSeparator);
             position += 2;
+            Some(Kind::PathSeparator)
         } else if byte.is_ascii_whitespace() {
             position += 1;
+            None
         } else if byte.is_ascii() {
-            tokens.push(Token::Punct(byte));
             position += 1;
+            Some(Kind::Punct(byte))
         } else {
             // Non-ASCII text outside comments and strings; identifiers are ASCII (`non_ascii_idents` is denied).
             position += rest.chars().next().map_or(1, char::len_utf8);
-            tokens.push(Token::Other);
+            Some(Kind::Other)
+        };
+        if let Some(kind) = kind {
+            tokens.push(Token { kind, line });
         }
         line += breaks(start, position);
     }
@@ -274,8 +736,8 @@ fn quote_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read (short of the macros described above), and that none of the files it reads uses the bare identifier `clippy`. Returns one line describing what was checked, or every problem found.
-pub fn check(root: &Path, packages: &[Package]) -> Result<String, String> {
+/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read, and that none of the files it reads uses the bare identifier `clippy`, a condition outside `allowed` or not written out in full, or an attribute that a macro builds from its arguments. Returns one line describing what was checked, or every problem found.
+pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result<String, String> {
     let build_folder = root.join(BUILD_FOLDER);
     let misplaced = misplaced_roots(root, &build_folder, packages);
     let mut walk = Walk::default();
@@ -285,11 +747,17 @@ pub fn check(root: &Path, packages: &[Package]) -> Result<String, String> {
     let mut include_places = Vec::new();
     let mut path_places = Vec::new();
     let mut clippy_places = Vec::new();
+    let mut condition_places = Vec::new();
+    let mut macro_condition_places = Vec::new();
+    let mut word_places = Vec::new();
+    let mut macro_attribute_places = Vec::new();
     for file in &walk.files {
         let source = std::fs::read_to_string(file)
             .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
         let shown = shown(root, file);
-        let found = findings(&source).map_err(|error| {
+        let in_canary =
+            owner(file, packages).is_some_and(|package| package.name == allowed.canary_package);
+        let found = findings(&source, allowed, in_canary).map_err(|error| {
             format!("{shown}: {error}. The gate must be able to read every Rust file to check it.")
         })?;
         let places = |lines: &[usize]| {
@@ -298,9 +766,21 @@ pub fn check(root: &Path, packages: &[Package]) -> Result<String, String> {
                 .map(|line| format!("  {shown}:{line}"))
                 .collect::<Vec<_>>()
         };
+        let described = |found: &[(usize, String)], show: fn(&str) -> String| {
+            found
+                .iter()
+                .map(|(line, what)| format!("  {shown}:{line}: {}", show(what)))
+                .collect::<Vec<_>>()
+        };
         include_places.extend(places(&found.include_macro));
         path_places.extend(places(&found.path_attribute));
         clippy_places.extend(places(&found.bare_clippy));
+        condition_places.extend(described(&found.conditions, str::to_owned));
+        macro_condition_places.extend(places(&found.macro_conditions));
+        word_places.extend(described(&found.condition_words, |word| {
+            format!("`{word}`")
+        }));
+        macro_attribute_places.extend(places(&found.macro_attributes));
     }
     let unread: Vec<String> = walk
         .unread
@@ -308,23 +788,49 @@ pub fn check(root: &Path, packages: &[Package]) -> Result<String, String> {
         .map(|(entry, why)| format!("  {} ({why})", shown(root, entry)))
         .collect();
     let problems: Vec<String> = [
-        (misplaced, MISPLACED_ROOTS),
-        (unread, UNREAD_ENTRIES),
-        (include_places, INCLUDE_USED),
-        (path_places, PATH_USED),
-        (clippy_places, CLIPPY_USED),
+        (misplaced, MISPLACED_ROOTS.0, MISPLACED_ROOTS.1.to_owned()),
+        (unread, UNREAD_ENTRIES.0, UNREAD_ENTRIES.1.to_owned()),
+        (include_places, INCLUDE_USED.0, INCLUDE_USED.1.to_owned()),
+        (path_places, PATH_USED.0, PATH_USED.1.to_owned()),
+        (clippy_places, CLIPPY_USED.0, CLIPPY_USED.1.to_owned()),
+        (
+            condition_places,
+            UNAPPROVED_CONDITIONS,
+            unapproved_why(allowed),
+        ),
+        (
+            macro_condition_places,
+            MACRO_CONDITIONS.0,
+            MACRO_CONDITIONS.1.to_owned(),
+        ),
+        (word_places, CONDITION_WORDS.0, CONDITION_WORDS.1.to_owned()),
+        (
+            macro_attribute_places,
+            MACRO_ATTRIBUTES.0,
+            MACRO_ATTRIBUTES.1.to_owned(),
+        ),
     ]
     .into_iter()
-    .filter(|(places, _)| !places.is_empty())
-    .map(|(places, (heading, why))| format!("{heading}:\n{}\n{why}", places.join("\n")))
+    .filter(|(places, _, _)| !places.is_empty())
+    .map(|(places, heading, why)| format!("{heading}:\n{}\n{why}", places.join("\n")))
     .collect();
     if problems.is_empty() {
+        let approved: Vec<String> = allowed.conditions.iter().map(Condition::written).collect();
         return Ok(format!(
-            "Rust sources: none of the {} `.rs` files below the members' folders uses the bare identifier `clippy`, `include!` or `#[path]`; every target starts from one of them, and no member's folder holds a symbolic link",
-            walk.files.len()
+            "Rust sources: the {} `.rs` files below the members' folders use only the approved conditions ({}), written out in full, and no macro builds a condition or an attribute from its arguments; none uses the bare identifier `clippy`, `include!` or `#[path]`; every target starts from one of them, and no member's folder holds a symbolic link",
+            walk.files.len(),
+            approved.join(", ")
         ));
     }
     Err(problems.join("\n"))
+}
+
+/// The member that `file` belongs to: the one whose folder is the nearest above it, because members can lie inside each other's folders, as xtask/lint-canary lies inside xtask.
+fn owner<'a>(file: &Path, packages: &'a [Package]) -> Option<&'a Package> {
+    packages
+        .iter()
+        .filter(|package| file.starts_with(&package.folder))
+        .max_by_key(|package| package.folder.components().count())
 }
 
 /// Describes every target whose root file the walk would not read, because it lies outside its crate's folder or does not end in `.rs`, and every member whose folder contains the build folder, which the walk skips.
@@ -462,9 +968,18 @@ fn shown(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::policy::Target;
+    use crate::verify::{APPROVED_CONDITIONS, CANARY_PACKAGE, CANARY_SWITCH};
 
+    /// The conditions the gate allows.
+    const ALLOWED: Allowed<'static> = Allowed {
+        conditions: &APPROVED_CONDITIONS,
+        canary_switch: CANARY_SWITCH,
+        canary_package: CANARY_PACKAGE,
+    };
+
+    /// What the check finds in `source`, outside the lint canary's crate.
     fn found(source: &str) -> Findings {
-        findings(source).unwrap_or_else(|problem| panic!("{problem}"))
+        findings(source, &ALLOWED, false).unwrap_or_else(|problem| panic!("{problem}"))
     }
 
     /// A path relative to the root, built from separate parts, so that the expected messages match on Windows too.
@@ -521,7 +1036,7 @@ mod tests {
             "#[path = \"../../../shared/sine.rs\"] mod sine;",
             "#![path = \"sine.in\"]",
             "#[cfg_attr(all(), path = \"sine.in\")] mod sine;",
-            "#[cfg_attr(unix, cfg_attr(all(), path = \"sine.in\"))] mod sine;",
+            "#[cfg_attr(test, cfg_attr(all(), path = \"sine.in\"))] mod sine;",
             "#[cfg_attr(all(), allow(dead_code), path = \"sine.in\")] mod sine;",
             "# [ path= \"sine.in\" ] mod sine;",
             "#[r#path = \"sine.in\"] mod sine;",
@@ -565,11 +1080,11 @@ fn read(path: &Path, list: [u8; 2]) -> Config {
 #![expect(clippy::print_stdout, reason = "the clippy step prints")]
 #![doc = include_str!("../README.md")]
 #[expect(clippy :: unwrap_used, reason = "spacing around :: is still a path")]
-// A comment may say cfg(not(clippy)), include!("x") or #[path = "x"].
-/* A block comment /* nested */ may say clippy too. */
-/// So may documentation: `#[cfg(clippy)]`.
+// A comment may say cfg(not(clippy)), cfg_select!, include!("x") or #[path = "x"].
+/* A block comment /* nested */ may say clippy or #[cfg(windows)] too. */
+/// So may documentation: `#[cfg(clippy)]`, `#[$attribute]`.
 fn run() {
-    let command = "cargo clippy -- -D warnings";
+    let command = "cargo clippy -- -D warnings --cfg feature=\"x\"";
     let raw = r#"cfg(not(clippy)) #[path = "x"] include!("x")"#;
     let bytes = b"clippy";
     let raw_bytes = br"clippy";
@@ -578,12 +1093,14 @@ fn run() {
     let quote = '"';
     let escaped = '\'';
     let byte = b'\'';
+    let bracket = '(';
     let unicode = '\u{1F600}';
     let label: &'static str = "clippy";
     'outer: loop { break 'outer; }
     let clippy_config = 1; // a different identifier
     let not_clippy = clippy_config;
     let included = include_str!("data.txt");
+    let config = not_clippy; // `cfg` only at the start of a word counts
 }
 "##;
         assert_eq!(found(source), Findings::default());
@@ -603,9 +1120,289 @@ fn run() {
             "\"never closed",
             "r#\"never closed\"",
             "let c = '",
+            // Brackets that are never closed, or close nothing.
+            "fn f() {",
+            "fn f() ]",
+            "fn f() { (}",
+            // `macro_rules!` definitions this check cannot follow.
+            "macro_rules! m",
+            "macro_rules! { () => {} }",
+            "macro_rules! m = 1;",
+            "macro_rules! m { () }",
+            "macro_rules! m { () => }",
+            "macro_rules! m { () => {} () => {} }",
         ] {
-            assert!(findings(source).is_err(), "{source:?}");
+            assert!(findings(source, &ALLOWED, false).is_err(), "{source:?}");
         }
+        // Without `!`, the word defines no macro, for the compiler as for this check.
+        assert_eq!(found("let macro_rules = 1;"), Findings::default());
+    }
+
+    #[test]
+    fn accepts_the_approved_conditions_in_any_combination() {
+        let source = r#"
+#![cfg_attr(not(test), forbid(missing_docs))]
+#[cfg(test)] mod tests {}
+#[cfg(not(test))] fn a() {}
+#[cfg(debug_assertions)] fn b() {}
+#[cfg(not(debug_assertions))] fn b() {}
+#[cfg(target_arch = "wasm32")] fn c() {}
+#[cfg(all(test, not(debug_assertions), any(target_arch = "wasm32", not(target_arch = "wasm32"))))] fn d() {}
+#[cfg(any())] fn e() {}
+#[cfg(all())] fn f() {}
+#[cfg(true)] fn g() {}
+#[cfg(not(false))] fn h() {}
+#[cfg(all(test, debug_assertions,))] fn i() {}
+#[cfg_attr(test, derive(Debug))] struct S;
+#[cfg_attr(all(test, target_arch = "wasm32"), cfg_attr(debug_assertions, inline))] fn j() {}
+#[cfg_attr(not(debug_assertions), must_use, inline)] fn k() {}
+fn l() -> bool { cfg!(debug_assertions) || std::cfg!(target_arch = "wasm32") || core::cfg ! (test) }
+#[cfg (
+    test
+)] fn m() {}
+#[cfg(/* a comment */ test)] fn n() {}
+macro_rules! tests {
+    ($($name:ident),*) => { $( #[cfg(test)] #[test] fn $name() {} )* };
+}
+"#;
+        assert_eq!(found(source), Findings::default());
+    }
+
+    #[test]
+    fn rejects_every_condition_outside_the_approved_list() {
+        let cases = [
+            ("#[cfg(feature = \"x\")]", "`feature = \"x\"`"),
+            ("#[cfg(not(feature = \"x\"))]", "`feature = \"x\"`"),
+            ("#[cfg(windows)]", "`windows`"),
+            ("#[cfg(unix)]", "`unix`"),
+            ("#[cfg(target_os = \"linux\")]", "`target_os = \"linux\"`"),
+            (
+                "#[cfg(target_arch = \"x86_64\")]",
+                "`target_arch = \"x86_64\"`",
+            ),
+            (
+                "#[cfg(target_arch = \"wasm64\")]",
+                "`target_arch = \"wasm64\"`",
+            ),
+            ("#[cfg(target_arch)]", "`target_arch`"),
+            // Written differently from the approved value, even if the compiler reads the same value.
+            (
+                "#[cfg(target_arch = r\"wasm32\")]",
+                "`target_arch = r\"wasm32\"`",
+            ),
+            (
+                "#[cfg(target_arch = \"wasm\\x332\")]",
+                "`target_arch = \"wasm\\x332\"`",
+            ),
+            ("#[cfg(test = \"x\")]", "`test = \"x\"`"),
+            (
+                "#[cfg(debug_assertions = \"on\")]",
+                "`debug_assertions = \"on\"`",
+            ),
+            ("#[cfg(miri)]", "`miri`"),
+            ("#[cfg(doc)]", "`doc`"),
+            ("#[cfg(doctest)]", "`doctest`"),
+            ("#[cfg(bayan_hidden)]", "`bayan_hidden`"),
+            ("#[cfg(clippy)]", "`clippy`"),
+            ("#[cfg(all(test, not(windows)))]", "`windows`"),
+            (
+                "#[cfg(any(debug_assertions, feature = \"x\"))]",
+                "`feature = \"x\"`",
+            ),
+            ("#[cfg_attr(windows, inline)]", "`windows`"),
+            ("#[cfg_attr(test, cfg_attr(unix, inline))]", "`unix`"),
+            ("#[cfg_attr(test, cfg(windows))]", "`windows`"),
+            ("if cfg!(windows) {}", "`windows`"),
+            ("#![cfg(unix)]", "`unix`"),
+            ("m!(cfg(windows));", "`windows`"),
+            (
+                "#[cfg(bayan_lint_canary = \"disallowed_methods\")]",
+                "the lint canary's switch",
+            ),
+        ];
+        for (source, expected) in cases {
+            let conditions = found(&format!("\n{source}\n")).conditions;
+            assert_eq!(conditions.len(), 1, "{source}: {conditions:?}");
+            assert_eq!(conditions[0].0, 2, "{source}: {conditions:?}");
+            assert!(
+                conditions[0].1.contains(expected),
+                "{source}: {conditions:?}"
+            );
+        }
+        // Every condition outside the list is reported, each on its own line.
+        let several = "#[cfg(any(\n    windows,\n    unix,\n))]";
+        let lines: Vec<usize> = found(several)
+            .conditions
+            .iter()
+            .map(|(line, _)| *line)
+            .collect();
+        assert_eq!(lines, [2, 3]);
+    }
+
+    #[test]
+    fn allows_the_canary_switch_only_in_the_canary_crate() {
+        let source = "#![cfg_attr(\n    bayan_lint_canary = \"expect_disallowed_methods\",\n    expect(clippy::disallowed_methods, reason = \"canary: crate\")\n)]\n#[cfg(bayan_lint_canary = \"unsafe_block\")]\npub mod unsafe_block;\n";
+        let in_canary = findings(source, &ALLOWED, true).unwrap();
+        assert_eq!(in_canary, Findings::default());
+        let elsewhere = findings(source, &ALLOWED, false).unwrap();
+        let lines: Vec<usize> = elsewhere.conditions.iter().map(|(line, _)| *line).collect();
+        assert_eq!(lines, [2, 5]);
+        // In the canary too, the switch needs a value, and the other conditions are those of every crate.
+        let wrong = findings(
+            "#[cfg(bayan_lint_canary)]\n#[cfg(windows)]\n",
+            &ALLOWED,
+            true,
+        )
+        .unwrap();
+        assert_eq!(wrong.conditions.len(), 2, "{wrong:?}");
+    }
+
+    #[test]
+    fn rejects_conditions_that_macros_build() {
+        let cases = [
+            // The reviewer's macro: handed `clippy::disallowed_methods`, it keeps only `clippy` (row 26 of #4).
+            "macro_rules! lint_exempt { ($tool:ident :: $lint:ident, $item:item, $twin:item) => { #[cfg(not($tool))] $item #[cfg($tool)] $twin }; }",
+            "macro_rules! m { ($c:meta) => { #[cfg($c)] fn f() {} }; }",
+            "macro_rules! m { ($c:meta) => { #[cfg_attr($c, inline)] fn f() {} }; }",
+            "macro_rules! m { ($c:meta) => { if cfg!($c) {} }; }",
+            "macro_rules! m { ($a:literal) => { #[cfg(target_arch = $a)] fn f() {} }; }",
+            "macro_rules! m { ($($c:tt)*) => { #[cfg(all(test, $($c)*))] fn f() {} }; }",
+            "#[cfg($crate)] fn f() {}",
+        ];
+        for source in cases {
+            let found = found(source);
+            assert!(!found.macro_conditions.is_empty(), "{source}: {found:?}");
+            assert_eq!(found.conditions, [], "{source}");
+            // Reported once, as a condition, even where the condition stands in an attribute.
+            assert_eq!(found.macro_attributes, [], "{source}");
+        }
+        // A metavariable among the attributes of `cfg_attr` is not part of the condition; the rule for attributes rejects it.
+        let attribute =
+            found("macro_rules! m { ($a:meta) => { #[cfg_attr(test, $a)] fn f() {} }; }");
+        assert_eq!(attribute.macro_conditions, []);
+        assert_eq!(attribute.macro_attributes, [1]);
+    }
+
+    #[test]
+    fn rejects_cfg_words_without_their_condition() {
+        let cases = [
+            ("m!(cfg);", "cfg"),
+            ("m!(cfg, not(feature = \"x\"));", "cfg"),
+            ("m!(cfg_attr);", "cfg_attr"),
+            ("let cfg = 1;", "cfg"),
+            ("struct S { cfg_attr: u8 }", "cfg_attr"),
+            ("if cfg![test] {}", "cfg"),
+            ("if cfg!{test} {}", "cfg"),
+            ("#[cfg = \"test\"] fn f() {}", "cfg"),
+            ("#[cfg] fn f() {}", "cfg"),
+            ("#[r#cfg_attr] fn f() {}", "cfg_attr"),
+            (
+                "cfg_select! { windows => { fn f() {} } _ => { fn f() {} } }",
+                "cfg_select",
+            ),
+            ("std::cfg_select! { _ => {} }", "cfg_select"),
+            ("#[cfg_eval] fn f() {}", "cfg_eval"),
+            ("let cfg_value = 1;", "cfg_value"),
+        ];
+        for (source, word) in cases {
+            assert_eq!(
+                found(&format!("\n{source}\n")).condition_words,
+                [(2, word.to_owned())],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_conditions_it_cannot_read() {
+        for source in [
+            "#[cfg(test debug_assertions)]",
+            "#[cfg()]",
+            "#[cfg(1)]",
+            "#[cfg(std::test)]",
+            "#[cfg(not())]",
+            "#[cfg(not(test, debug_assertions))]",
+            "#[cfg(test, debug_assertions)]",
+            "#[cfg(all(test debug_assertions))]",
+            "#[cfg(all(, test))]",
+            "#[cfg(target_arch = wasm32)]",
+            "#[cfg_attr()]",
+            "#[cfg_attr(, inline)]",
+            // Functions named `cfg` or `cfg_attr` look like conditions to this check, and are rejected as unreadable ones.
+            "fn cfg() {}",
+            "fn cfg_attr(x: u8) {}",
+        ] {
+            assert_eq!(
+                found(source).conditions,
+                [(1, "a condition this check cannot read".to_owned())],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_attributes_that_macros_build_from_their_arguments() {
+        let cases = [
+            // Row 27 of #4: handed `path = "…"`.
+            "macro_rules! module_at { ($attribute:meta) => { #[$attribute] pub mod sine; }; }",
+            // Row 28 of #4: handed `path` and the file name.
+            "macro_rules! module_at { ($name:ident, $file:literal) => { #[$name = $file] pub mod sine; }; }",
+            "macro_rules! m { ($a:meta) => { #[cfg_attr(test, $a)] mod sine; }; }",
+            "macro_rules! m { ($d:literal) => { #[doc = $d] pub fn f() {} }; }",
+            "macro_rules! m { ($($a:tt)*) => { #[$($a)*] mod sine; }; }",
+            // Patterns that match tokens of an attribute rather than a whole attribute can recombine them.
+            "macro_rules! m { (#[$a:ident = $f:literal]) => { #[$a = $f] mod sine; }; }",
+            "macro_rules! m { (#[$a:ident]) => { #[$a] mod sine; }; }",
+            "macro_rules! m { ($(#[$($a:tt)*])*) => { $(#[$($a)*])* mod sine; }; }",
+            // Bound to a whole attribute, but by another rule.
+            "macro_rules! m { (#[$a:meta]) => {}; ($a:meta) => { #[$a] mod sine; }; }",
+            // Bound to a whole attribute by an enclosing macro's rule, not by the rule that writes the attribute.
+            "macro_rules! outer { (#[$a:meta]) => { macro_rules! inner { () => { #[$a] mod sine; } } }; }",
+            // A metavariable outside every macro definition.
+            "m! { #[$a] mod sine; }",
+            // `$` handed to a macro that writes macros.
+            "macro_rules! make { ($d:tt) => { macro_rules! inner { ($d m:meta) => { #[$d m] mod sine; } } }; }",
+            "macro_rules! m { () => { #[$crate::attribute] fn f() {} }; }",
+            "macro_rules! m { ($a:meta) => { #![$a] }; }",
+        ];
+        for source in cases {
+            let found = found(source);
+            assert_eq!(found.macro_attributes.len(), 1, "{source}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn allows_attributes_passed_on_as_written_where_the_macro_is_called() {
+        let source = r#"
+macro_rules! unit {
+    ($(#[$meta:meta])* $name:ident = $blu:expr) => {
+        $(#[$meta])*
+        pub const $name: i64 = $blu;
+    };
+    ($(#![$inner:meta])*) => { $(#![$inner])* };
+}
+unit! {
+    /// One inch.
+    #[doc(alias = "in")]
+    INCH = 1_828_800
+}
+macro_rules! outer {
+    ($(#[$m:meta])* $name:ident) => {
+        macro_rules! inner { (#[$x:meta]) => { #[$x] pub struct $name; } }
+        $(inner! { #[$m] })*
+    };
+}
+"#;
+        assert_eq!(found(source), Findings::default());
+    }
+
+    #[test]
+    fn checks_attributes_where_the_macro_is_called() {
+        // The attribute that a macro passes on is checked where it is written.
+        let source = "unit! {\n    #[path = \"../../../shared/sine.rs\"]\n    #[cfg(windows)]\n    SINE = 1\n}\n";
+        let found = found(source);
+        assert_eq!(found.path_attribute, [2]);
+        assert_eq!(found.conditions, [(3, "`windows`".to_owned())]);
     }
 
     /// A scratch folder for one test, removed again at the end.
@@ -630,9 +1427,11 @@ fn run() {
             path
         }
 
-        /// A member at `crates/<name>` whose library starts from `root_file`, a path relative to the member's folder as it would be written in `[lib]`.
-        fn member(&self, name: &str, root_file: &str) -> Package {
-            let folder = self.0.join("crates").join(name);
+        /// A member in the folder at `parts`, relative to the scratch folder, whose library starts from `root_file`, a path relative to the member's folder as it would be written in `[lib]`.
+        fn member_at(&self, name: &str, parts: &[&str], root_file: &str) -> Package {
+            let folder = parts
+                .iter()
+                .fold(self.0.clone(), |path, part| path.join(part));
             Package {
                 name: name.to_owned(),
                 targets: vec![Target {
@@ -642,6 +1441,11 @@ fn run() {
                 }],
                 folder,
             }
+        }
+
+        /// A member at `crates/<name>`.
+        fn member(&self, name: &str, root_file: &str) -> Package {
+            self.member_at(name, &["crates", name], root_file)
         }
     }
 
@@ -668,14 +1472,21 @@ fn run() {
             scratch.member("a", "src/lib.rs"),
             scratch.member("a/inner", "src/lib.rs"),
         ];
-        let line = check(&scratch.0, &packages).unwrap_or_else(|problem| panic!("{problem}"));
-        assert!(line.contains("none of the 4 `.rs` files"), "{line}");
+        let line =
+            check(&scratch.0, &packages, &ALLOWED).unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(line.contains("the 4 `.rs` files"), "{line}");
+        assert!(
+            line.contains(
+                "use only the approved conditions (test, debug_assertions, target_arch = \"wasm32\")"
+            ),
+            "{line}"
+        );
 
         scratch.write(
             &["crates", "a", "src", "target", "hidden.rs"],
             "\n#[cfg(not(clippy))]\npub fn sine(x: f64) -> f64 { x.sin() }\n",
         );
-        let problem = check(&scratch.0, &packages).unwrap_err();
+        let problem = check(&scratch.0, &packages, &ALLOWED).unwrap_err();
         let shown = format!(
             "  {}:2",
             relative(&["crates", "a", "src", "target", "hidden.rs"])
@@ -689,7 +1500,7 @@ fn run() {
         let scratch = Scratch::new("everything");
         scratch.write(
             &["crates", "a", "src", "lib.rs"],
-            "//! A.\ninclude!(\"sine.in\");\n#[path = \"../../../shared/sine.rs\"]\nmod sine;\n#[cfg(clippy)]\nfn twin() {}\n",
+            "//! A.\ninclude!(\"sine.in\");\n#[path = \"../../../shared/sine.rs\"]\nmod sine;\n#[cfg(clippy)]\nfn twin() {}\n#[cfg(windows)]\nfn w() {}\nmacro_rules! m { ($c:meta) => { #[cfg($c)] fn f() {} #[$c] fn g() {} }; }\nm!(cfg);\n",
         );
         let mut moved = scratch.member("b", "../../shared/units.rs");
         moved.targets.push(Target {
@@ -698,7 +1509,12 @@ fn run() {
             root_file: moved.folder.join("src").join("main.in"),
         });
         scratch.write(&["crates", "b", "src", "main.in"], "fn main() {}\n");
-        let problem = check(&scratch.0, &[scratch.member("a", "src/lib.rs"), moved]).unwrap_err();
+        let problem = check(
+            &scratch.0,
+            &[scratch.member("a", "src/lib.rs"), moved],
+            &ALLOWED,
+        )
+        .unwrap_err();
         let lib = relative(&["crates", "a", "src", "lib.rs"]);
         for expected in [
             format!("`include!` (the identifier `include`) is used here:\n  {lib}:2\n"),
@@ -706,6 +1522,10 @@ fn run() {
             format!(
                 "the bare identifier `clippy` (not followed by `::`) is used here:\n  {lib}:5\n"
             ),
+            format!("{UNAPPROVED_CONDITIONS}:\n  {lib}:5: `clippy`\n  {lib}:7: `windows`\n"),
+            format!("{}:\n  {lib}:9\n", MACRO_CONDITIONS.0),
+            format!("{}:\n  {lib}:10: `cfg`\n", CONDITION_WORDS.0),
+            format!("{}:\n  {lib}:9\n", MACRO_ATTRIBUTES.0),
             format!(
                 "  b, lib target `b`: {} lies outside the crate's folder, {}\n",
                 relative(&["shared", "units.rs"]),
@@ -721,6 +1541,40 @@ fn run() {
                 "expected {expected:?} in {problem}"
             );
         }
+        // Each kind of problem says why, and how a condition can be approved.
+        assert!(
+            problem.contains("only in a reviewed pull request, together with the Clippy runs"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn allows_the_canary_switch_only_below_the_canary_crate() {
+        let scratch = Scratch::new("canary");
+        let switch = "#[cfg(bayan_lint_canary = \"unsafe_block\")]\npub mod unsafe_block;\n";
+        scratch.write(&["xtask", "src", "main.rs"], "fn main() {}\n");
+        scratch.write(&["xtask", "lint-canary", "src", "lib.rs"], switch);
+        scratch.write(&["xtask", "lint-canary", "src", "unsafe_block.rs"], "");
+        let xtask = Package {
+            name: "xtask".to_owned(),
+            folder: scratch.0.join("xtask"),
+            targets: Vec::new(),
+        };
+        let canary = scratch.member_at("lint-canary", &["xtask", "lint-canary"], "src/lib.rs");
+        let packages = [xtask, canary];
+        check(&scratch.0, &packages, &ALLOWED).unwrap_or_else(|problem| panic!("{problem}"));
+        // xtask's own files lie above the canary's folder, so they belong to xtask.
+        scratch.write(&["xtask", "src", "main.rs"], switch);
+        let problem = check(&scratch.0, &packages, &ALLOWED).unwrap_err();
+        let main = relative(&["xtask", "src", "main.rs"]);
+        assert!(
+            problem.contains(&format!(
+                "  {main}:1: `bayan_lint_canary = \"unsafe_block\"` (the lint canary's switch"
+            )),
+            "{problem}"
+        );
+        let canary_lib = relative(&["xtask", "lint-canary", "src", "lib.rs"]);
+        assert!(!problem.contains(&canary_lib), "{problem}");
     }
 
     #[test]
@@ -801,7 +1655,7 @@ fn run() {
             folder: scratch.0.clone(),
             targets: Vec::new(),
         };
-        let problem = check(&scratch.0, &[package]).unwrap_err();
+        let problem = check(&scratch.0, &[package], &ALLOWED).unwrap_err();
         assert!(
             problem.contains("contains the build folder target/"),
             "{problem}"
@@ -809,13 +1663,13 @@ fn run() {
         assert!(!problem.contains("out.rs"), "{problem}");
     }
 
-    /// Creates a symbolic link, or returns false where the system does not allow it (Windows without developer mode).
+    /// Creates a symbolic link to a file, or returns false where the system does not allow it (Windows without developer mode).
+    #[expect(
+        deprecated,
+        reason = "`soft_link` is the one function that creates a symbolic link on every platform; the platform-specific ones (`std::os::unix::fs::symlink` and `std::os::windows::fs::symlink_file`, which it calls) would need the conditions `unix` and `windows`, which the gate rejects"
+    )]
     fn symlink(target: &Path, link: &Path) -> bool {
-        #[cfg(unix)]
-        let made = std::os::unix::fs::symlink(target, link);
-        #[cfg(windows)]
-        let made = std::os::windows::fs::symlink_file(target, link);
-        made.is_ok()
+        std::fs::soft_link(target, link).is_ok()
     }
 
     #[test]
@@ -836,7 +1690,8 @@ fn run() {
             eprintln!("not checked: this system does not let the test create a symbolic link");
             return;
         }
-        let problem = check(&scratch.0, &[scratch.member("a", "src/lib.rs")]).unwrap_err();
+        let problem =
+            check(&scratch.0, &[scratch.member("a", "src/lib.rs")], &ALLOWED).unwrap_err();
         let shown = format!(
             "  {} (a symbolic link)",
             relative(&["crates", "a", "src", "sine.rs"])
@@ -848,15 +1703,26 @@ fn run() {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_entries_that_are_neither_files_nor_folders() {
-        let scratch = Scratch::new("socket");
+        // Only Linux and macOS have such entries; the test asks at run time rather than with the condition `unix`, which the gate rejects.
+        if std::env::consts::FAMILY != "unix" {
+            eprintln!(
+                "not checked: only Unix systems have entries that are neither files, folders nor links"
+            );
+            return;
+        }
+        let scratch = Scratch::new("pipe");
         scratch.write(&["crates", "a", "src", "lib.rs"], "//! A.\n");
-        let _socket =
-            std::os::unix::net::UnixListener::bind(scratch.0.join("crates").join("a").join("s"))
-                .unwrap();
-        let problem = check(&scratch.0, &[scratch.member("a", "src/lib.rs")]).unwrap_err();
+        // A named pipe, made by the standard Unix program `mkfifo`.
+        let pipe = scratch.0.join("crates").join("a").join("s");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo failed: {status}");
+        let problem =
+            check(&scratch.0, &[scratch.member("a", "src/lib.rs")], &ALLOWED).unwrap_err();
         assert!(
             problem.contains("  crates/a/s (neither a file nor a folder)"),
             "{problem}"
@@ -895,7 +1761,7 @@ fn run() {
             &["crates", "a", "src", "sine.RS"],
             "#[cfg(not(clippy))] pub fn sine() {}\n",
         );
-        let result = check(&scratch.0, &[scratch.member("a", "src/lib.rs")]);
+        let result = check(&scratch.0, &[scratch.member("a", "src/lib.rs")], &ALLOWED);
         if file.with_file_name("sine.rs").is_file() {
             // Windows and macOS: the file system ignores letter case, so `mod sine;` reads sine.RS.
             let problem = result.unwrap_err();
@@ -921,6 +1787,6 @@ fn run() {
     fn the_real_workspace_passes() {
         let root = crate::workspace_root();
         let packages = crate::policy::packages(&crate::policy::metadata(&root).unwrap()).unwrap();
-        check(&root, &packages).unwrap_or_else(|problem| panic!("{problem}"));
+        check(&root, &packages, &ALLOWED).unwrap_or_else(|problem| panic!("{problem}"));
     }
 }

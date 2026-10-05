@@ -7,7 +7,8 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use crate::process::{self, cargo};
-use crate::{canary, flags, policy, sources};
+use crate::sources::{self, Condition};
+use crate::{canary, flags, policy};
 
 /// The cargo-deny version the gate uses. CI installs exactly this version, checked against SHA-256 checksums in `.github/workflows/verify.yml`; change both together, in the monthly dependency session.
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
@@ -30,6 +31,59 @@ pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 
 /// Workspace members that may be procedural-macro crates (`proc-macro = true` in `[lib]`), with the reason. A procedural macro runs code during the build and can produce any code, hidden conditions included, without that code appearing in a source file, so the source check cannot see what it writes; the preflight therefore rejects every procedural-macro crate of the workspace that is not listed here. Reviewers read every listed macro in full. Procedural macros from dependencies, such as serde's derive, are not affected.
 pub const PROC_MACROS: [(&str, &str); 0] = [];
+
+/// The conditions that code may use in `cfg(…)`, `cfg!(…)` and the first argument of `cfg_attr(…)`, combined with `all`, `any`, `not`, `true` and `false`, each with the reason it is approved. The Clippy step compiles the code under every combination of their values ([`CLIPPY_RUNS`]), so no code can choose a configuration that Clippy does not check (ADR-0005 §4 and §5, ADR-0025); the preflight rejects every other condition (`sources.rs`). A condition is added only in a reviewed pull request, together with the Clippy runs that check the code with it both on and off: the test `the_clippy_runs_check_every_combination_of_the_approved_conditions` fails otherwise.
+pub const APPROVED_CONDITIONS: [Condition; 3] = [
+    Condition {
+        name: "test",
+        value: None,
+        reason: "unit tests and the code only they use; every Clippy run compiles each crate both with and without it (`--all-targets`)",
+    },
+    Condition {
+        name: "debug_assertions",
+        value: None,
+        reason: "checks that only debug builds make, such as checked arithmetic in bayan-units (ADR-0005 §6, CORE-002); on in the dev profile, off in the release profile",
+    },
+    Condition {
+        name: "target_arch",
+        value: Some("wasm32"),
+        reason: "code for the web app's WebAssembly engine only (ADR-0014), such as the binding in bayan-wasm (CORE-007) and tests that run in WebAssembly (CORE-002); on in the wasm32 runs, off in the host runs",
+    },
+];
+
+/// The lint canary's switch, `bayan_lint_canary = "<case>"`, which only the canary's own crate ([`CANARY_PACKAGE`]) may use, with any value. No Clippy run sets it: the guardrails step compiles each case on its own (`canary.rs`).
+pub const CANARY_SWITCH: &str = "bayan_lint_canary";
+
+/// The crate that may use the lint canary's switch.
+pub const CANARY_PACKAGE: &str = "lint-canary";
+
+/// One run of Clippy in the Clippy step.
+pub struct ClippyRun {
+    /// The platform: `None` for the host that the gate runs on, otherwise a target such as `wasm32-unknown-unknown`.
+    pub target: Option<&'static str>,
+    /// Whether it uses the release profile instead of the dev profile.
+    pub release: bool,
+}
+
+/// The runs of the Clippy step: the host and WebAssembly, each in the dev and the release profile, all with `--all-targets --all-features --locked -- -D warnings`. Together they compile the code under every combination of the [`APPROVED_CONDITIONS`]: `--all-targets` compiles each crate with and without `test`, the dev profile switches `debug_assertions` on and the release profile off, and only the WebAssembly runs have `target_arch = "wasm32"`. The WebAssembly runs leave out the `NATIVE_ONLY` crates, as the wasm32 step does, and like the other runs they read the compiler flags of `.cargo/config.toml` (the wasm32 step sets `RUSTFLAGS` instead).
+pub const CLIPPY_RUNS: [ClippyRun; 4] = [
+    ClippyRun {
+        target: None,
+        release: false,
+    },
+    ClippyRun {
+        target: None,
+        release: true,
+    },
+    ClippyRun {
+        target: Some(WASM_TARGET),
+        release: false,
+    },
+    ClippyRun {
+        target: Some(WASM_TARGET),
+        release: true,
+    },
+];
 
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
@@ -58,7 +112,7 @@ pub const STEPS: [Step; 9] = [
     },
     Step {
         name: "clippy",
-        title: "Lints (Clippy; warnings are errors)",
+        title: "Lints (Clippy for the host and WebAssembly, each in the dev and the release profile; warnings are errors)",
         run: clippy_step,
     },
     Step {
@@ -131,7 +185,7 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script or procedural-macro crate, and that the Rust sources neither use the condition `clippy` nor make the compiler read a file that the source check does not (`sources.rs`), so that a pass means the same thing everywhere. Everything here is checked before anything is built.
+/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script or procedural-macro crate, and that the Rust sources use only the approved conditions, written out in full, and do not make the compiler read a file that the source check does not (`sources.rs`), so that a pass means the same thing everywhere. Everything here is checked before anything is built.
 fn preflight(root: &Path) -> Result<(), String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -197,8 +251,13 @@ fn preflight(root: &Path) -> Result<(), String> {
         println!("    {line}");
     }
 
-    // Checked before Clippy first runs, because code under `cfg(not(clippy))` would pass the Clippy step unseen.
-    let line = sources::check(root, &packages)?;
+    // Checked before Clippy first runs, because code under a condition that no Clippy run sets, or that a macro builds, would pass the Clippy step unseen.
+    let allowed = sources::Allowed {
+        conditions: &APPROVED_CONDITIONS,
+        canary_switch: CANARY_SWITCH,
+        canary_package: CANARY_PACKAGE,
+    };
+    let line = sources::check(root, &packages, &allowed)?;
     println!("    {line}");
     Ok(())
 }
@@ -207,17 +266,57 @@ fn fmt(root: &Path) -> Result<(), String> {
     process::run(cargo(root).args(["fmt", "--all", "--check"]))
 }
 
+/// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails.
 fn clippy_step(root: &Path) -> Result<(), String> {
-    process::run(cargo(root).args([
-        "clippy",
-        "--workspace",
-        "--all-targets",
-        "--all-features",
-        "--locked",
-        "--",
-        "-D",
-        "warnings",
-    ]))
+    for (index, run) in CLIPPY_RUNS.iter().enumerate() {
+        let heading = format!(
+            "Clippy run {} of {}: {}",
+            index + 1,
+            CLIPPY_RUNS.len(),
+            describe(run)
+        );
+        println!("    {heading}");
+        if run.target.is_some() {
+            for (name, reason) in NATIVE_ONLY {
+                println!("    not checked for WebAssembly: {name} ({reason})");
+            }
+        }
+        process::run(cargo(root).args(clippy_args(run)))
+            .map_err(|problem| format!("{heading}: {problem}"))?;
+    }
+    Ok(())
+}
+
+/// The platform and profile of a Clippy run, for a person.
+fn describe(run: &ClippyRun) -> String {
+    format!(
+        "{}, {}",
+        run.target.unwrap_or("the host"),
+        if run.release {
+            "release profile (debug assertions off)"
+        } else {
+            "dev profile (debug assertions on)"
+        }
+    )
+}
+
+/// The arguments after `cargo` for one Clippy run.
+fn clippy_args(run: &ClippyRun) -> Vec<String> {
+    let mut args = vec!["clippy".to_owned(), "--workspace".to_owned()];
+    if run.target.is_some() {
+        for (name, _) in NATIVE_ONLY {
+            args.extend(["--exclude".to_owned(), name.to_owned()]);
+        }
+    }
+    args.extend(["--all-targets", "--all-features", "--locked"].map(str::to_owned));
+    if run.release {
+        args.push("--release".to_owned());
+    }
+    if let Some(target) = run.target {
+        args.extend(["--target".to_owned(), target.to_owned()]);
+    }
+    args.extend(["--", "-D", "warnings"].map(str::to_owned));
+    args
 }
 
 fn test(root: &Path) -> Result<(), String> {
@@ -233,7 +332,7 @@ fn wasm32(root: &Path) -> Result<(), String> {
     for (name, _) in NATIVE_ONLY {
         command.args(["--exclude", name]);
     }
-    // Warnings are errors here too: code compiled only for WebAssembly is not seen by the Clippy step, which checks the host platform.
+    // Warnings are errors here too. Setting RUSTFLAGS makes Cargo ignore the compiler flags of .cargo/config.toml in this step (CORE-001 follow-up 4); the Clippy step's WebAssembly runs read them.
     command
         .args(["--target", WASM_TARGET, "--locked"])
         .env("RUSTFLAGS", "-D warnings")
@@ -365,6 +464,151 @@ mod tests {
                 "guardrails",
                 "supply-chain",
                 "determinism"
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_clippy_for_the_host_and_webassembly_in_both_profiles() {
+        let commands: Vec<String> = CLIPPY_RUNS
+            .iter()
+            .map(|run| clippy_args(run).join(" "))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "clippy --workspace --all-targets --all-features --locked -- -D warnings",
+                "clippy --workspace --all-targets --all-features --locked --release -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --all-targets --all-features --locked --target wasm32-unknown-unknown -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --all-targets --all-features --locked --release --target wasm32-unknown-unknown -- -D warnings",
+            ]
+        );
+        let described: Vec<String> = CLIPPY_RUNS.iter().map(describe).collect();
+        assert_eq!(
+            described,
+            [
+                "the host, dev profile (debug assertions on)",
+                "the host, release profile (debug assertions off)",
+                "wasm32-unknown-unknown, dev profile (debug assertions on)",
+                "wasm32-unknown-unknown, release profile (debug assertions off)",
+            ]
+        );
+    }
+
+    /// The values that `condition` takes in a Clippy run with `args` (the arguments after `cargo`): both, when the run compiles code with and without it; one; or none, when this function does not know how a run sets the condition. They are read from the arguments themselves, so that the tests below check the commands that the Clippy step really runs. Approving a condition means teaching this function how the runs set it, and adding runs that set it both ways.
+    fn values(condition: &Condition, args: &[String]) -> Vec<bool> {
+        let flag = |name: &str| args.iter().any(|arg| arg == name);
+        let target = args
+            .iter()
+            .position(|arg| arg == "--target")
+            .and_then(|at| args.get(at + 1));
+        match (condition.name, condition.value) {
+            // `--all-targets` compiles every library and binary both on its own and as unit tests.
+            ("test", None) => {
+                if flag("--all-targets") {
+                    vec![false, true]
+                } else {
+                    vec![false]
+                }
+            }
+            // Cargo's dev profile switches debug assertions on, and its release profile off; another profile could do either.
+            ("debug_assertions", None) if !flag("--profile") => vec![!flag("--release")],
+            // The host is never WebAssembly, and a target names its architecture first.
+            ("target_arch", Some(arch)) => {
+                vec![target.is_some_and(|target| target.split('-').next() == Some(arch))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The combinations of values of `conditions` under which none of the runs (`runs`, each as its arguments) compiles code, described for a person.
+    fn unchecked(conditions: &[Condition], runs: &[Vec<String>]) -> Vec<String> {
+        let mut missing = Vec::new();
+        for combination in 0..1_usize << conditions.len() {
+            let wanted = |index: usize| combination >> index & 1 == 1;
+            let checked = runs.iter().any(|args| {
+                conditions
+                    .iter()
+                    .enumerate()
+                    .all(|(index, condition)| values(condition, args).contains(&wanted(index)))
+            });
+            if !checked {
+                let described: Vec<String> = conditions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, condition)| {
+                        format!(
+                            "{} {}",
+                            condition.written(),
+                            if wanted(index) { "on" } else { "off" }
+                        )
+                    })
+                    .collect();
+                missing.push(described.join(", "));
+            }
+        }
+        missing
+    }
+
+    /// The arguments of the real Clippy runs.
+    fn real_runs() -> Vec<Vec<String>> {
+        CLIPPY_RUNS.iter().map(clippy_args).collect()
+    }
+
+    #[test]
+    fn every_approved_condition_is_on_and_off_in_some_clippy_run() {
+        let runs = real_runs();
+        for condition in &APPROVED_CONDITIONS {
+            for value in [false, true] {
+                assert!(
+                    runs.iter()
+                        .any(|args| values(condition, args).contains(&value)),
+                    "no Clippy run compiles code with `{}` {}. A condition can be approved only together with the Clippy runs that check the code with it both on and off: add them to CLIPPY_RUNS, and teach `values` how they set the condition.",
+                    condition.written(),
+                    if value { "on" } else { "off" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_clippy_runs_check_every_combination_of_the_approved_conditions() {
+        let missing = unchecked(&APPROVED_CONDITIONS, &real_runs());
+        assert!(
+            missing.is_empty(),
+            "no Clippy run compiles the code under these combinations of the approved conditions: {missing:?}. Code under such a combination (written with `all`, `any` and `not`) would be compiled by the tests or in a release but never checked by Clippy. Add the Clippy runs to CLIPPY_RUNS, or approve fewer conditions."
+        );
+    }
+
+    #[test]
+    fn notices_conditions_and_combinations_that_no_clippy_run_checks() {
+        let runs = real_runs();
+        // A feature approved without Clippy runs that switch it on and off: every combination with it is missing.
+        let feature = Condition {
+            name: "feature",
+            value: Some("serde"),
+            reason: "",
+        };
+        let missing = unchecked(&[APPROVED_CONDITIONS[1], feature], &runs);
+        assert_eq!(missing.len(), 4, "{missing:?}");
+        // Runs that set every condition both on and off, but not in every combination: here nothing checks debug builds for the host or release builds for WebAssembly.
+        let partial = [clippy_args(&CLIPPY_RUNS[1]), clippy_args(&CLIPPY_RUNS[2])];
+        for condition in &APPROVED_CONDITIONS {
+            for value in [false, true] {
+                assert!(
+                    partial
+                        .iter()
+                        .any(|args| values(condition, args).contains(&value))
+                );
+            }
+        }
+        assert_eq!(
+            unchecked(&APPROVED_CONDITIONS, &partial),
+            [
+                "test off, debug_assertions on, target_arch = \"wasm32\" off",
+                "test on, debug_assertions on, target_arch = \"wasm32\" off",
+                "test off, debug_assertions off, target_arch = \"wasm32\" on",
+                "test on, debug_assertions off, target_arch = \"wasm32\" on",
             ]
         );
     }
