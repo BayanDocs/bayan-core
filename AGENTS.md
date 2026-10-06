@@ -38,7 +38,7 @@ The Rust engine is a Cargo workspace. The crate map and the layering are in `doc
 
 ## Rules specific to bayan-core
 
-- **Licensing (ADR-0003):** the workspace is GPL-3.0-or-later with the BayanDocs App Store Permission (`GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission`), except `crates/bayan-protocol/`, which is Apache-2.0 so that anyone can implement BayanDocs clients and integrations. That crate must never depend on, or copy from, any GPL or AGPL code; GPL crates may depend on it. `REUSE.toml` records which license applies to which files and `LICENSES/` holds the full texts; keep `reuse lint` passing, and add a new license text only with `reuse download <SPDX-ID>`.
+- **Licensing (ADR-0003):** the workspace is GPL-3.0-or-later with the BayanDocs App Store Permission (`GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission`), except `crates/bayan-protocol/`, which is Apache-2.0 so that anyone can implement BayanDocs clients and integrations. That crate must never depend on, or copy from, any GPL or AGPL code; GPL crates may depend on it. The shared contribution tooling (`.github/`, `.editorconfig` and `.gitattributes`) is MIT-0, as in every BayanDocs repository (ADR-0003, amendment of 2026-10-06). `REUSE.toml` records which license applies to which files and `LICENSES/` holds the full texts; keep `reuse lint` passing, and add a new license text only with `reuse download <SPDX-ID>`.
 - **Layering:** a crate may depend only on crates in its own layer or below (foundation → model and formats → text → layout → output → interaction → engine → bindings and tools). Never add an upward dependency.
 - **Determinism (ADR-0004, ADR-0005):**
   - layout arithmetic uses integer BLU types from `bayan-units`, never floating point;
