@@ -65,7 +65,7 @@ Run `cargo xtask verify` before every push, from anywhere in the repository. CI 
 8. `supply-chain`: the hook where X-003 adds `check-exact-pins` and `check-lockfile-age`; no checks yet.
 9. `determinism`: the hook for determinism checks (ADR-0025 §1); no checks yet.
 
-Each step prints its command, so a failing step can be re-run by itself. Never skip, weaken or disable a step to make a change pass (`docs/AGENTS.md` §4). Two more workflows run on every pull request, as in every BayanDocs repository: the DCO check (`.github/workflows/dco.yml`; the rules are in `CONTRIBUTING.md`) and `reuse lint` (`.github/workflows/reuse.yml`).
+Each step prints its command, so a failing step can be re-run by itself. Never skip, weaken or disable a step to make a change pass (`docs/AGENTS.md` §4). Two more workflows run on every pull request, as in every BayanDocs repository: the DCO check (`.github/workflows/dco.yml`; the rules are in `CONTRIBUTING.md`) and `reuse lint` (`.github/workflows/reuse.yml`). Both run the pull request's own copy of their files, so a pull request can change the checks that judge it: treat every change under `.github/` as security-relevant in review.
 
 Every Cargo command prints `warning: ignoring registry.global-min-publish-age without -Zmin-publish-age`. That is expected until the toolchain is Rust 1.100; keep the setting.
 
@@ -106,5 +106,7 @@ Rust is pinned to 1.99.0 (released 2026-10-01) in `rust-toolchain.toml`, which i
 ## Dependency mechanisms
 
 Exact `=x.y.z` requirements in `[workspace.dependencies]`; `Cargo.lock` committed and every build runs with `--locked`; `.cargo/config.toml` sets `global-min-publish-age = "1 day"` (enforced natively from Rust 1.100). `cargo deny check` runs in the gate on every pull request and every night, with the minimal `deny.toml` from CORE-001: RustSec advisories (yanked versions included), the ADR-0017 license allowlist, and crates.io as the only source. X-003 completes `deny.toml` and adds the lockfile-age and exact-pin checks to the gate. Tools used in CI are pinned and checksum-verified: cargo-deny 0.20.2 in `.github/workflows/verify.yml`, matched by `CARGO_DENY_VERSION` in `xtask/src/verify.rs` (a test keeps them equal); GitHub Actions are pinned to full commit SHAs. xtask itself has no dependencies. Routine upgrades happen only in the monthly dependency session.
+
+REUSE for the `reuse lint` workflow is pinned in `.github/reuse/`: `requirements.txt` holds REUSE 6.2.0 and its dependencies, and `build-requirements.txt` the build backend poetry-core 2.5.0, all at exact versions with SHA-256 hashes. The workflow installs them with `pip --require-hashes`, as prebuilt wheels only, except REUSE itself, which is built from its hash-pinned source archive without build isolation, so nothing else is downloaded during the build. Both files are identical in all five BayanDocs repositories and match `req_reuse` and `req_poetry_core` in `docs/scripts/cloud-environment-setup.sh`; they change only in the monthly dependency session, in all five repositories together.
 
 In BayanDocs cloud sessions the tools are preinstalled at pinned versions by `docs/scripts/cloud-environment-setup.sh`; run `bayandocs-tools` to list them. If a tool is missing, install the version pinned there (never a newer one) and mention it in the pull request.
