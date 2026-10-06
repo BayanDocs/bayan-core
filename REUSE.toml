@@ -10,6 +10,12 @@ path = "**"
 SPDX-FileCopyrightText = "2026 BayanDocs contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission"
 
+# Shared contribution tooling, the same in every BayanDocs repository: CI workflows, the DCO check, the REUSE pins, the pull request and issue templates, CODEOWNERS (all in .github/), .editorconfig and .gitattributes. MIT-0, so anyone may reuse it and a fix can be copied between the repositories as it is (ADR-0003, amendment of 2026-10-06).
+[[annotations]]
+path = [".github/**", ".editorconfig", ".gitattributes"]
+SPDX-FileCopyrightText = "2026 BayanDocs contributors"
+SPDX-License-Identifier = "MIT-0"
+
 # Protocol definitions crate: Apache-2.0, so anyone can implement BayanDocs clients and integrations under any license.
 # It must never depend on or copy from GPL or AGPL code. Whoever adds its first file also adds LICENSES/Apache-2.0.txt (`reuse download Apache-2.0`) and a crate-level LICENSE file.
 [[annotations]]

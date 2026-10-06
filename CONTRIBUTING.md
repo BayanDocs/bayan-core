@@ -81,6 +81,7 @@ BayanDocs is free software, and contributions keep it that way ([LICENSING.md](h
 |---|---|
 | Everything not listed below | `GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission` |
 | `crates/bayan-protocol/`: the protocol definitions crate | `Apache-2.0` |
+| `.github/` (CI workflows, the DCO check, templates), `.editorconfig` and `.gitattributes`: the contribution tooling shared by all five repositories | `MIT-0` |
 | `CODE_OF_CONDUCT.md`: the Contributor Covenant, by its authors | `CC-BY-4.0` |
 
 The **BayanDocs App Store Permission** (`LICENSES/LicenseRef-BayanDocs-App-Store-Permission.txt`) is an additional permission under section 7 of the GPL. It allows BayanDocs to be distributed through app stores, such as Apple's, as long as its source code stays freely available to everyone ([ADR-0003 §4](https://github.com/BayanDocs/docs/blob/main/adr/0003-licensing-and-contribution-model.md#4-app-store-permission--in-force)). Only copyright holders can grant it, so your contributions to these files include it. `Cargo.toml` writes the same license as `GPL-3.0-or-later WITH AdditionRef-BayanDocs-App-Store-Permission`, the SPDX 3.0 spelling that Rust tools accept; both name the same text (ADR-0003 §4).
