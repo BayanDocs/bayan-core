@@ -1,0 +1,35 @@
+# callgrind, inclusive instruction counts: 20 undo steps.
+# Full 500-page model, release build with Loro's quadratic decoding fixed (README.md). Collected only inside the measured call, which a scratch copy of bench.rs wrapped in a function of its own (profile_*) so that callgrind could select it. Paths shortened.
+
+23,076,814,219 (100.0%)  PROGRAM TOTALS
+23,076,814,219 (100.0%)  ???:crdt_model::bench::bench 
+23,076,814,219 (100.0%)  ???:crdt_model::bench::profile_undo 
+23,076,814,199 (100.0%)  ???:<bayan_model::document::Document>::undo 
+23,076,812,872 (100.0%)  ???:<bayan_crdt::undo::UndoManager>::undo 
+23,076,812,592 (100.0%)  ???:<loro::UndoManager>::undo 
+23,076,812,572 (100.0%)  ???:<loro_internal::undo::UndoManager>::undo 
+23,076,812,252 (100.0%)  ???:<loro_internal::undo::UndoManager>::perform::<<loro_internal::undo::UndoManager>::undo::{closure#0}, <loro_internal::undo::UndoManager>::undo::{closure#1}> 
+23,076,387,017 (100.0%)  ???:<loro_internal::LoroDoc>::undo_internal 
+23,075,819,174 (100.0%)  ???:<loro_internal::LoroDoc>::_checkout_without_emitting 
+23,075,797,034 (100.0%)  ???:<loro_internal::LoroDoc>::_checkout_without_emitting_with_event 
+23,066,304,460 (99.95%)  ???:<loro_internal::LoroDoc>::undo_internal::{closure#0} 
+22,952,961,565 (99.46%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal 
+22,868,824,512 (99.10%)  ???:<tracing::span::Span>::in_scope::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}, ()> 
+22,714,522,692 (98.43%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::calculate_diff::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#
+22,647,876,931 (98.14%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::build_full_crdt_tracker 
+22,647,381,336 (98.14%)  ???:loro_internal::diff_calc::replay_container_ops_from_empty 
+19,134,716,510 (82.92%)  ???:<<loro_internal::diff_calc::RichtextDiffCalculator>::build_full_crdt_tracker::RichtextRebuildVisitor as loro_internal::diff_calc::RebuildOpVisitor>::visit 
+15,678,663,079 (67.94%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::apply_crdt_op_to_tracker 
+15,251,068,423 (66.09%)  ???:<loro_internal::container::richtext::tracker::Tracker>::insert 
+14,975,629,402 (64.89%)  ???:<loro_internal::container::richtext::tracker::Tracker>::_insert_inner 
+13,463,273,931 (58.34%)  ???:<loro_internal::container::richtext::tracker::crdt_rope::CrdtRope>::insert::<<loro_internal::container::richtext::tracker::Tracker>::_insert_inner::{closure#0}> 
+ 4,482,590,680 (19.42%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::iter_range::<core::ops::range::RangeFrom<generic_btree::Cursor>> 
+ 4,028,238,856 (17.46%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::insert_by_path 
+ 3,751,456,504 (16.26%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::get_path 
+ 3,355,533,854 (14.54%)  ???:<loro_internal::container::richtext::tracker::Tracker>::_checkout 
+ 2,888,916,377 (12.52%)  ???:<loro_internal::oplog::OpLog>::iter_from_replay_base_causally 
+ 2,813,818,823 (12.19%)  ???:<loro_internal::oplog::change_store::ChangeStore>::iter_changes 
+ 2,600,002,284 (11.27%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_block_loaded_in_range 
+ 2,551,505,915 (11.06%)  ???:<quick_cache::sync::Cache<usize, alloc::sync::Arc<loro_kv_store::block::Block>, loro_kv_store::sstable::BlockDataWeighter>>::get_or_insert_with::<usize, loro_common::error::LoroError, <loro_k
+ 2,521,520,236 (10.93%)  ???:<loro_kv_store::sstable::SsTable>::read_block 
+ 2,516,921,939 (10.91%)  ???:<loro_kv_store::block::Block>::try_decode 

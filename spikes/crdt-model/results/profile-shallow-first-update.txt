@@ -1,0 +1,35 @@
+# callgrind, inclusive instruction counts: applying the first 1,000-operation update after opening the 500-page document from its shallow snapshot.
+# Release build with Loro's quadratic decoding fixed (README.md). Collected only inside the measured call, which a scratch copy of bench.rs wrapped in a function of its own (profile_*) so that callgrind could select it. Paths shortened.
+
+1,451,362,570 (100.0%)  PROGRAM TOTALS
+1,451,362,570 (100.0%)  ???:crdt_model::bench::bench 
+1,451,362,570 (100.0%)  ???:crdt_model::bench::profile_apply 
+1,451,362,558 (100.0%)  ???:<bayan_model::document::Document>::import 
+1,451,362,513 (100.0%)  ???:<bayan_crdt::doc::Doc>::import 
+1,447,975,124 (99.77%)  ???:<loro_internal::LoroDoc>::_import_with 
+1,278,004,888 (88.06%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal 
+1,244,634,269 (85.76%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::seed_tracker_from_shallow_root 
+  896,276,874 (61.75%)  ???:<loro_internal::container::richtext::tracker::Tracker>::_insert_inner 
+  824,911,007 (56.84%)  ???:<loro_internal::container::richtext::tracker::crdt_rope::CrdtRope>::insert::<<loro_internal::container::richtext::tracker::Tracker>::_insert_inner::{closure#0}> 
+  722,680,165 (49.79%)  ???:<loro_internal::diff_calc::ContainerDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::apply_change 
+  722,597,864 (49.79%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::apply_change 
+  554,498,941 (38.21%)  ???:<tracing::span::Span>::in_scope::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}, ()> 
+  554,280,997 (38.19%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::calculate_diff::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9
+  536,745,007 (36.98%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::build_full_crdt_tracker 
+  322,745,920 (22.24%)  ???:core::slice::sort::unstable::quicksort::quicksort::<<loro_internal::diff_calc::RichtextDiffCalculator>::seed_tracker_from_shallow_root::SeedItem, <[<loro_internal::diff_calc::RichtextDiffCalcu
+  300,407,199 (20.70%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_state 
+  286,277,075 (19.72%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::insert_by_path 
+  261,841,980 (18.04%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::iter_range::<core::ops::range::RangeFrom<generic_btree::Cursor>> 
+  219,731,980 (15.14%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::get_path 
+  200,493,263 (13.81%)  ???:<loro_internal::history_cache::ContainerHistoryCache>::find_text_chunks_in_shallow_root_order 
+  161,930,108 (11.16%)  ???:<loro_internal::state::DocState>::apply_diff 
+  151,286,848 (10.42%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::next_sibling'2 
+  146,341,864 (10.08%)  ???:<loro_internal::state::container_store::ContainerStore>::get_container 
+  136,403,901 ( 9.40%)  ???:<loro_internal::state::richtext_state::RichtextState as loro_internal::state::FastStateSnapshot>::decode_snapshot_fast 
+  127,154,820 ( 8.76%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::next_same_level_in_node'2 
+  104,792,846 ( 7.22%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::query_with_finder_return::<loro_internal::container::richtext::tracker::crdt_rope::ActiveLenQuery
+   99,078,124 ( 6.83%)  ???:<generic_btree::iter::Iter<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait> as core::iter::traits::iterator::Iterator>::next 
+   97,279,354 ( 6.70%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::split_leaf_if_needed 
+   97,018,204 ( 6.68%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms 
+   82,721,719 ( 5.70%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::recursive_update_cache 
+   78,591,034 ( 5.41%)  ???:core::slice::sort::unstable::ipnsort::<<loro_internal::diff_calc::RichtextDiffCalculator>::seed_tracker_from_shallow_root::SeedItem, <[<loro_internal::diff_calc::RichtextDiffCalculator>::seed_

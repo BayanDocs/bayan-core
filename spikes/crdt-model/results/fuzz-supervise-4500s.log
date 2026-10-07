@@ -1,0 +1,45 @@
+# crdt-model supervise --seconds 4500 --workers 1 --out <folder>   (commit 627d4cc, started 2026-10-07 13:58 UTC, ran in parallel with the convergence run)
+# Inputs are counted from each round's running totals; a round that aborted is counted up to its last thousand inputs. The aborting inputs themselves are kept out of the repository (REPORT.md §7).
+supervise: 1 workers, 4500 s, seed 0xc0de000400f22000
+worker 0: round 0 aborted after 556 s (memory allocation of  bytes failed); input kept as abort-b9-u-s28-022028a1ea805403
+worker 0: round 1 aborted after 740 s (memory allocation of  bytes failed); input kept as abort-b8-u-s24-1bd23cc4fa083455
+worker 0: round 2 aborted after 870 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-dbd88a85dabac0dd
+worker 0: round 3 aborted after 124 s (memory allocation of  bytes failed); input kept as abort-b2-u-s7-508767a56cebc4f9
+worker 0: round 4 aborted after 921 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-0f0ddb11a7aeaa62
+worker 0: round 5 aborted after 11 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-721287070d0d1885
+worker 0: round 6 aborted after 199 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-fcd8f1d58fb8ceff
+worker 0: round 7 aborted after 409 s (memory allocation of  bytes failed); input kept as abort-b14-u-s43-eab09992af931922
+worker 0: round 8 aborted after 45 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-e0c3ed820130c1b4
+worker 0: round 9 aborted after 292 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-4cd9155027ab1078
+worker 0: round 10 aborted after 167 s (memory allocation of  bytes failed); input kept as abort-b9-u-s27-125988fbc02034ca
+summary: 2019898 inputs in 4500 s of fuzzing (12 rounds on 1 workers, 4500 s wall clock); 142841 imported (all normalized into valid views), 1872861 refused; 4196 panicked at 19 source locations (0 of them not contained by the adapter); 11 aborted the process; 0 invariant failures; slowest input 5436 ms (inputs of a round that aborted are counted up to its last thousand)
+panic site: generic-btree-0.10.7/src/lib.rs:618: 2115 inputs, during import, contained by the adapter
+panic site: loro-common-1.16.0/src/lib.rs:1001: 2 inputs, during import, contained by the adapter
+panic site: loro-delta-1.13.0/src/delta_rope/compose.rs:136: 1 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:1718: 304 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:2277: 610 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/tracker/crdt_rope.rs:106: 283 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1071: 44 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1296: 3 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1630: 45 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:2183: 3 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:921: 1 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:980: 2 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/oplog/loro_dag.rs:445: 7 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1053: 202 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1056: 578 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1210: 6 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:564: 1 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:575: 1 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:637: 3 inputs, during import, contained by the adapter
+abort: abort-b9-u-s28-022028a1ea805403: memory allocation of  bytes failed
+abort: abort-b8-u-s24-1bd23cc4fa083455: memory allocation of  bytes failed
+abort: abort-b8-u-s25-dbd88a85dabac0dd: memory allocation of  bytes failed
+abort: abort-b2-u-s7-508767a56cebc4f9: memory allocation of  bytes failed
+abort: abort-b3-u-s9-0f0ddb11a7aeaa62: memory allocation of  bytes failed
+abort: abort-b8-u-s25-721287070d0d1885: memory allocation of  bytes failed
+abort: abort-b3-u-s9-fcd8f1d58fb8ceff: memory allocation of  bytes failed
+abort: abort-b14-u-s43-eab09992af931922: memory allocation of  bytes failed
+abort: abort-b3-u-s9-e0c3ed820130c1b4: memory allocation of  bytes failed
+abort: abort-b8-u-s25-4cd9155027ab1078: memory allocation of  bytes failed
+abort: abort-b9-u-s27-125988fbc02034ca: memory allocation of  bytes failed

@@ -1,0 +1,35 @@
+# callgrind, inclusive instruction counts: first read of the full model (RawDocument::read, all calls in one benchmark run).
+# Full 500-page model, release build with Loro's quadratic decoding fixed (results/README.md); only the measured function was collected. Paths shortened.
+
+7,273,337,657 (100.0%)  PROGRAM TOTALS
+7,273,337,657 (100.0%)  ???:<bayan_model::raw::RawDocument>::read 
+7,273,337,657 (100.0%)  ???:crdt_model::bench::bench 
+5,631,964,482 (77.43%)  ???:<bayan_model::document::Document>::view 
+2,602,890,181 (35.79%)  ???:<bayan_crdt::story::Story>::runs 
+2,262,239,524 (31.10%)  ???:<loro::LoroText>::to_delta 
+2,083,701,427 (28.65%)  ???:<alloc::collections::btree::map::BTreeMap<bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>> as core::iter::traits::collect:
+2,065,262,532 (28.39%)  ???:<alloc::vec::Vec<(bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>)> as alloc::vec::spec_from_iter::SpecFromIter<(bayan_mod
+2,012,170,004 (27.67%)  ???:<bayan_crdt::map::Registry>::entries 
+2,012,169,092 (27.67%)  ???:<loro_internal::handler::MapHandler>::for_each::<<loro::LoroMap>::for_each<<bayan_crdt::map::Registry>::entries::{closure#0}>::{closure#0}> 
+2,004,446,997 (27.56%)  ???:<&mut bayan_model::raw::read_entities<alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>, <bayan_crdt::map::PropertyMap>::entries>::{closure#0} as core::
+1,994,325,356 (27.42%)  ???:crdt_model::bench::concurrent_full 
+1,834,074,820 (25.22%)  ???:<alloc::vec::into_iter::IntoIter<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map
+1,780,409,786 (24.48%)  ???:<loro_internal::state::DocState>::get_map_entries 
+1,779,789,223 (24.47%)  ???:<bayan_crdt::map::PropertyMap>::entries 
+1,776,615,235 (24.43%)  ???:<loro_internal::handler::MapHandler>::for_each::<<loro::LoroMap>::for_each<<bayan_crdt::map::PropertyMap>::entries::{closure#0}>::{closure#0}> 
+1,776,232,136 (24.42%)  ???:<loro_internal::state::container_store::inner_store::InnerStore>::with_container_for_read::<alloc::vec::Vec<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)>, <lor
+1,615,033,697 (22.20%)  ???:<loro_internal::handler::TextHandler>::get_richtext_value 
+1,441,937,277 (19.82%)  ???:<alloc::vec::Vec<(alloc::string::String, loro_internal::handler::ValueOrHandler)> as alloc::vec::spec_from_iter::SpecFromIter<(alloc::string::String, loro_internal::handler::ValueOrHandler), c
+1,258,096,908 (17.30%)  ???:__rustc::__rust_alloc 
+1,248,630,259 (17.17%)  ???:__rustc::__rdl_alloc 
+1,233,483,488 (16.96%)  ???:loro_common::translate_mergeable_marker_value 
+1,163,430,418 (16.00%)  malloc 
+1,028,865,660 (14.15%)  ???:<loro_internal::container::richtext::richtext_state::RichtextState>::get_richtext_value 
+  923,188,048 (12.69%)  ???:__rustc::__rust_dealloc 
+  915,527,225 (12.59%)  ???:__rustc::__rdl_dealloc 
+  907,866,402 (12.48%)  free 
+  902,449,780 (12.41%)  ???:loro_common::parse_mergeable_marker 
+  889,895,288 (12.24%)  ???:loro_common::mergeable_marker_crc24 
+  821,135,584 (11.29%)  ???:<loro_internal::utils::kv_wrapper::KvWrapper>::get 
+  814,006,435 (11.19%)  _int_malloc 
+  810,965,054 (11.15%)  ???:<loro_kv_store::mem_store::MemKvStore as loro_internal::kv_store::KvStore>::get 

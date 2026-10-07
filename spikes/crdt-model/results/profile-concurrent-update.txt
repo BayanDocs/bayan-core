@@ -1,0 +1,35 @@
+# callgrind, inclusive instruction counts: applying 1,000 concurrent operations.
+# Full 500-page model, release build with Loro's quadratic decoding fixed (README.md). Collected only inside the measured call, which a scratch copy of bench.rs wrapped in a function of its own (profile_*) so that callgrind could select it. Paths shortened.
+
+600,729,587 (100.0%)  PROGRAM TOTALS
+600,729,587 (100.0%)  ???:crdt_model::bench::bench 
+600,729,587 (100.0%)  ???:crdt_model::bench::concurrent_full 
+600,729,587 (100.0%)  ???:crdt_model::bench::profile_concurrent 
+600,729,570 (100.0%)  ???:<bayan_model::document::Document>::import 
+600,729,318 (100.0%)  ???:<bayan_crdt::doc::Doc>::import 
+597,395,421 (99.44%)  ???:<loro_internal::LoroDoc>::_import_with 
+578,086,755 (96.23%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal 
+564,845,555 (94.03%)  ???:<tracing::span::Span>::in_scope::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}, ()> 
+557,063,561 (92.73%)  ???:<loro_internal::diff_calc::MapDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::calculate_diff::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}::{clo
+556,573,980 (92.65%)  ???:<loro_internal::history_cache::ContainerHistoryCache>::init_cache_by_visit_all_change_slow 
+556,568,470 (92.65%)  ???:<loro_internal::oplog::change_store::ChangeStore>::visit_all_changes 
+388,418,259 (64.66%)  ???:<loro_internal::oplog::change_store::ChangesBlockBytes>::parse 
+384,214,505 (63.96%)  ???:<loro_internal::oplog::change_store::ChangesBlock>::ensure_changes 
+380,482,970 (63.34%)  ???:loro_internal::oplog::change_store::block_encode::decode_block 
+ 90,939,202 (15.14%)  ???:<loro_internal::encoding::value::Value>::decode 
+ 86,673,251 (14.43%)  ???:<loro_internal::history_cache::ContainerHistoryCache>::init_cache_by_visit_all_change_slow::{closure#0} 
+ 85,703,494 (14.27%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_block_loaded_in_range 
+ 85,370,991 (14.21%)  ???:<loro_kv_store::mem_store::MemStoreIterator<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<bytes::bytes::Bytes, bytes::bytes::Bytes>, <loro_kv_store::mem_store::MemKvStore>
+ 85,322,299 (14.20%)  ???:<loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter> as core::iter::traits::iterator::Iterator>::next 
+ 85,109,520 (14.17%)  ???:<loro_kv_store::sstable::SsTableIter as core::iter::traits::iterator::Iterator>::next 
+ 84,919,978 (14.14%)  ???:<loro_kv_store::sstable::SsTableIter>::next 
+ 84,665,197 (14.09%)  ???:<quick_cache::sync::Cache<usize, alloc::sync::Arc<loro_kv_store::block::Block>, loro_kv_store::sstable::BlockDataWeighter>>::get_or_insert_with::<usize, loro_common::error::LoroError, <loro_kv_s
+ 83,739,233 (13.94%)  ???:<loro_kv_store::sstable::SsTable>::read_block 
+ 83,582,722 (13.91%)  ???:<loro_kv_store::block::Block>::try_decode 
+ 83,465,297 (13.89%)  ???:loro_kv_store::compress::decompress 
+ 83,176,183 (13.85%)  ???:<lz4_flex::frame::decompress::FrameDecoder<&[u8]> as alloc::io::read::Read>::read_to_end 
+ 80,253,906 (13.36%)  ???:<loro_internal::history_cache::MapHistoryCache as loro_internal::history_cache::HistoryCacheTrait>::insert 
+ 74,358,208 (12.38%)  ???:<loro_internal::oplog::change_store::block_encode::IterableEncodedOp as core::iter::traits::iterator::Iterator>::next 
+ 67,490,302 (11.23%)  ???:<loro_internal::encoding::value::ValueReader>::read_value_type_and_content 
+ 63,838,293 (10.63%)  ???:loro_internal::encoding::outdated_encode_reordered::decode_op::<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<loro_internal::encoding::outdated_encode_reordered::EncodedDeleteSt
+ 53,874,663 ( 8.97%)  ???:<alloc::collections::btree::map::BTreeMap<loro_internal::history_cache::MapHistoryCacheEntry, alloc::collections::btree::set_val::SetValZST>>::insert 

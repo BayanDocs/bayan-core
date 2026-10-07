@@ -1,0 +1,14 @@
+# BAYAN_NORMALIZATION_CASES=100000 cargo test --release --locked -p bayan-model --test normalization -- --nocapture
+# commit 249545f, 2026-10-07T14:33:52Z
+   Compiling bayan-model v0.0.0 (/home/user/bayan-core/crates/bayan-model)
+    Finished `release` profile [optimized] target(s) in 2.43s
+     Running tests/normalization.rs (target/release/deps/normalization-691e5228ab72f496)
+
+running 4 tests
+test a_table_inside_its_own_cell_is_cut ... ok
+test a_small_document_normalizes_as_expected ... ok
+test deeply_nested_tables_are_dropped_at_the_limit ... ok
+test normalization_yields_invariant_views_and_is_deterministic_and_idempotent ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.32s
+
