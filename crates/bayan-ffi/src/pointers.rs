@@ -81,7 +81,7 @@ pub(crate) fn tile_buffer_len(width: u32, height: u32, stride: usize) -> Option<
 ///
 /// # Safety
 ///
-/// Unless `out` is null, it must point to `capacity` writable bytes that nothing else reads or writes during the call.
+/// Unless `out` is null, it must point to `capacity` writable bytes that nothing else reads or writes during the call; they need not be initialized.
 #[expect(
     unsafe_code,
     reason = "reads or writes memory that C passes in, as the C interface requires (ADR-0006 §2)"
@@ -107,15 +107,12 @@ pub(crate) unsafe fn write_rows(
     if needed.is_none_or(|needed| needed > capacity) {
         return false;
     }
-    // SAFETY: `out` is not null and, as the caller guarantees, points to `capacity` writable bytes that nothing else uses during the call, so it may be viewed as a unique slice for the duration of this function. A `u8` needs no alignment, and the caller's buffer exists, so `capacity` cannot exceed `isize::MAX`.
-    let buffer = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+    // The caller's buffer may be uninitialized (a new `QImage`'s pixels are), so no Rust reference to it is ever made: each row is copied through raw pointers.
     for (index, source) in pixels.chunks_exact(row).enumerate() {
-        let start = index * stride;
-        // The checks above make every row fit; `get_mut` keeps it so even if they were wrong.
-        let Some(target) = buffer.get_mut(start..start + row) else {
-            return false;
-        };
-        target.copy_from_slice(source);
+        // SAFETY: `index` is less than `rows`, so `index × stride` is at most `stride × (rows − 1)`, which the check above showed to fit in `capacity` together with a row; the offset therefore stays inside the caller's buffer, and it cannot overflow.
+        let target = unsafe { out.add(index * stride) };
+        // SAFETY: `target` points to at least `row` writable bytes inside the caller's buffer (see above), which nothing else uses during the call; `source` is Rust memory, so the two cannot overlap, and a `u8` needs no alignment.
+        unsafe { ptr::copy_nonoverlapping(source.as_ptr(), target, row) };
     }
     true
 }
@@ -188,6 +185,21 @@ mod tests {
         assert_eq!(tile_buffer_len(0, 3, 8), None);
         assert_eq!(tile_buffer_len(2, 0, 8), None);
         assert_eq!(tile_buffer_len(4096, 4096, usize::MAX), None);
+    }
+
+    #[test]
+    fn writes_rows_into_uninitialized_buffers() {
+        // C may pass memory that was never written, such as a new QImage's pixels; only the rows may be written and read back.
+        let pixels = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut out = Box::<[u8]>::new_uninit_slice(10);
+        // SAFETY: `out` is 10 writable bytes, enough for two rows of four bytes six bytes apart; they need not be initialized.
+        let rows_written = unsafe { write_rows(&pixels, 4, out.as_mut_ptr().cast::<u8>(), 10, 6) };
+        assert!(rows_written);
+        for (index, start) in [0, 1, 2, 3, 6, 7, 8, 9].into_iter().enumerate() {
+            // SAFETY: byte `start` belongs to one of the two rows that `write_rows` wrote.
+            let byte = unsafe { out[start].assume_init() };
+            assert_eq!(byte, pixels[index]);
+        }
     }
 
     #[test]

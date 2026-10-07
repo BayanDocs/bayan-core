@@ -20,10 +20,12 @@ header = """/*
  * - Pointers passed to the engine are borrowed only for the duration of the call.
  * - The engine runs on its own thread and calls the message callback on that thread, one message at a time.
  * - The json pointer given to the callback is valid only during the call: copy the bytes and hand them to your own thread.
- * - Never call back into the engine synchronously from inside the callback (spec §8): bayan_render_tile returns
- *   BAYAN_STATUS_WRONG_THREAD there, because it would wait for the thread it runs on. Posting from the callback is allowed.
+ * - Never call an engine synchronously from inside a callback (spec §8): bayan_render_tile returns
+ *   BAYAN_STATUS_WRONG_THREAD inside any engine's callback, because it would wait for the thread it runs on, or for
+ *   another engine that may be waiting for this one. Posting from the callback is allowed.
  * - Every function may be called from any thread, also from several threads at once, except bayan_engine_free:
- *   it must be the last call on an engine, made when no other thread is inside a call on that engine.
+ *   it must be the last call on an engine, made when no thread other than the engine's own callback is inside a
+ *   call on that engine.
  *   It stops the engine; after it returns, the callback is never called again.
  * - No function lets a Rust panic escape; failures are reported through return values and engine.error messages.
  *   The callback must not let a C++ exception escape either.

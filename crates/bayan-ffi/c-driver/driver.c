@@ -208,7 +208,9 @@ static void post(BayanEngine *engine, const char *json) {
 
 /* Copies a blob out of the engine: first asks for its size, then copies it. Returns the bytes; free them after. */
 static uint8_t *take_blob(BayanEngine *engine, BayanBlobId blob, size_t *length) {
-  check(bayan_blob_get(engine, blob, NULL, 0, length) == BAYAN_STATUS_BUFFER_TOO_SMALL,
+  /* Asking with no buffer gives the size; an empty blob already fits, so then the answer is OK. */
+  BayanStatus status = bayan_blob_get(engine, blob, NULL, 0, length);
+  check(status == BAYAN_STATUS_BUFFER_TOO_SMALL || (status == BAYAN_STATUS_OK && *length == 0),
         "bayan_blob_get without a buffer reports the size");
   uint8_t *bytes = (uint8_t *)allocate(*length);
   size_t copied = 0;

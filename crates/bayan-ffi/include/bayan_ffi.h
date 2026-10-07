@@ -6,10 +6,12 @@
  * - Pointers passed to the engine are borrowed only for the duration of the call.
  * - The engine runs on its own thread and calls the message callback on that thread, one message at a time.
  * - The json pointer given to the callback is valid only during the call: copy the bytes and hand them to your own thread.
- * - Never call back into the engine synchronously from inside the callback (spec §8): bayan_render_tile returns
- *   BAYAN_STATUS_WRONG_THREAD there, because it would wait for the thread it runs on. Posting from the callback is allowed.
+ * - Never call an engine synchronously from inside a callback (spec §8): bayan_render_tile returns
+ *   BAYAN_STATUS_WRONG_THREAD inside any engine's callback, because it would wait for the thread it runs on, or for
+ *   another engine that may be waiting for this one. Posting from the callback is allowed.
  * - Every function may be called from any thread, also from several threads at once, except bayan_engine_free:
- *   it must be the last call on an engine, made when no other thread is inside a call on that engine.
+ *   it must be the last call on an engine, made when no thread other than the engine's own callback is inside a
+ *   call on that engine.
  *   It stops the engine; after it returns, the callback is never called again.
  * - No function lets a Rust panic escape; failures are reported through return values and engine.error messages.
  *   The callback must not let a C++ exception escape either.
@@ -99,16 +101,16 @@ BayanEngine *bayan_engine_new(const uint8_t *config_json,
                               size_t config_len);
 
 /*
- Stops and destroys an engine; accepts NULL. Called from any other thread, it waits until the engine thread has stopped. Called from inside the callback, it returns at once and the engine thread finishes by itself. Either way, the callback is never called again after this returns.
+ Stops and destroys an engine; accepts NULL. Called from any other thread, it waits until the engine thread has stopped; meanwhile the callback may still be running, and if it calls `bayan_engine_post` that call fails with `BAYAN_STATUS_INTERNAL_ERROR`. Called from inside the engine's own callback, it returns at once and the engine thread finishes by itself. Either way, the callback is never called again after this returns.
 
  # Safety
 
- `engine` must be NULL or a pointer that `bayan_engine_new` returned and that was not freed yet. This must be the last call on the engine: no other thread may be inside a call on it (a callback that frees the engine must first make sure of that), and the engine must not be used afterwards.
+ `engine` must be NULL or a pointer that `bayan_engine_new` returned and that was not freed yet. This must be the last call on the engine: apart from the engine's own callback, no other thread may be inside a call on it (a callback that frees the engine must first make sure of that), and the engine must not be used afterwards.
  */
 void bayan_engine_free(BayanEngine *engine);
 
 /*
- Registers the message callback. Call it once, before the first `bayan_engine_post`; later calls return `BAYAN_STATUS_INVALID_ARGUMENT`. `user_data` is passed back unchanged and must be usable from the engine thread.
+ Registers the message callback, before the first `bayan_engine_post`: a later registration replaces an earlier one until then, and once a message has been posted every call returns `BAYAN_STATUS_INVALID_ARGUMENT`. `user_data` is passed back unchanged and must be usable from the engine thread.
 
  # Safety
 
@@ -130,7 +132,7 @@ BayanStatus bayan_engine_post(BayanEngine *engine,
                               size_t json_len);
 
 /*
- Copies `len` bytes into a new blob (an empty blob is allowed) and returns its identifier, or 0 if a pointer is null, the blob is larger than 64 MiB, or there are too many blobs (spec §13).
+ Copies `len` bytes into a new blob and returns its identifier, or 0 if `engine` is NULL, `bytes` is NULL while `len` is not 0, the blob is larger than 64 MiB, or there are too many blobs (spec §13). An empty blob is allowed; then `bytes` may be NULL.
 
  # Safety
 
@@ -141,7 +143,7 @@ BayanBlobId bayan_blob_put(BayanEngine *engine,
                            size_t len);
 
 /*
- Copies a blob's bytes into `out`, which has room for `out_capacity` bytes, and always sets `*out_len` to the blob's size. If `out` is NULL or too small, returns `BAYAN_STATUS_BUFFER_TOO_SMALL` and still sets `*out_len`, so callers can ask for the size first. Returns `BAYAN_STATUS_NOT_FOUND` for an unknown blob.
+ Copies a blob's bytes into `out`, which has room for `out_capacity` bytes, and sets `*out_len` to the blob's size. If the blob does not fit (a NULL `out` has room for nothing), returns `BAYAN_STATUS_BUFFER_TOO_SMALL` and still sets `*out_len`, so callers can ask for the size first with `out` NULL; an empty blob always fits, so asking for its size returns `BAYAN_STATUS_OK`. Returns `BAYAN_STATUS_NOT_FOUND` for an unknown blob.
 
  # Safety
 
@@ -170,7 +172,7 @@ BayanStatus bayan_blob_release(BayanEngine *engine, BayanBlobId blob);
  - `stride`: the distance between the starts of two rows, in bytes; at least 4 × `width`. The bytes between rows are left untouched.
  - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` × (`height` − 1) + 4 × `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
 
- The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside the callback it returns `BAYAN_STATUS_WRONG_THREAD`.
+ The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock.
 
  # Safety
 

@@ -174,9 +174,12 @@ impl Inner {
         Ok(())
     }
 
+    /// Stores a blob. A blob with the same identifier is replaced, and stops counting towards the limits: that happens only during a replay, when the engine creates again a blob whose recorded copy the recording carried.
     fn insert(&mut self, id: BlobId, bytes: Arc<[u8]>) {
         self.total_bytes += bytes.len();
-        self.blobs.insert(id, bytes);
+        if let Some(replaced) = self.blobs.insert(id, bytes) {
+            self.total_bytes -= replaced.len();
+        }
     }
 }
 
@@ -232,6 +235,19 @@ mod tests {
         assert_eq!(store.put_engine(b"z".to_vec()), Err(BlobError::TooMany));
         assert!(store.release(id));
         assert!(store.put_engine(b"z".to_vec()).is_ok());
+    }
+
+    #[test]
+    fn a_blob_created_again_during_a_replay_is_counted_once() {
+        let store = BlobStore::new();
+        // A recording carried blob 2, which the replayed engine then creates again.
+        assert!(store.insert_recorded(2, vec![0; 1000]));
+        assert!(store.set_next_engine_id(2));
+        assert_eq!(store.put_engine(vec![1; 1000]), Ok(2));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.lock().total_bytes, 1000);
+        assert!(store.release(2));
+        assert_eq!(store.lock().total_bytes, 0);
     }
 
     #[test]

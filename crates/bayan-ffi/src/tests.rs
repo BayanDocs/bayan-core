@@ -2,6 +2,7 @@
 
 use std::ffi::{CStr, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -478,4 +479,135 @@ fn freeing_the_engine_from_the_callback_returns_and_stops_further_callbacks() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(reentrant.statuses.lock().unwrap().len(), 1);
     assert!(reentrant.engine.lock().unwrap().0.is_null());
+}
+
+#[test]
+fn calling_another_engine_synchronously_from_a_callback_is_refused_too() {
+    // Two engines whose callbacks rendered on each other's engine would wait for each other forever.
+    let reentrant = Reentrant {
+        engine: Mutex::new(EnginePointer(ptr::null_mut())),
+        statuses: Mutex::new(Vec::new()),
+        done: Condvar::new(),
+    };
+    // SAFETY: a null configuration of length 0 means the defaults.
+    let first = unsafe { bayan_engine_new(ptr::null(), 0) };
+    // SAFETY: as above.
+    let second = unsafe { bayan_engine_new(ptr::null(), 0) };
+    *reentrant.engine.lock().unwrap() = EnginePointer(second);
+    let data = ptr::from_ref(&reentrant).cast_mut().cast::<c_void>();
+    // SAFETY: `first` is live and `reentrant` outlives it.
+    let registered = unsafe { bayan_engine_set_callback(first, Some(render_from_callback), data) };
+    assert_eq!(registered, BAYAN_STATUS_OK);
+    assert_eq!(post(first, "[]"), BAYAN_STATUS_OK);
+    let mut statuses = reentrant.statuses.lock().unwrap();
+    while statuses.is_empty() {
+        let (next, timeout) = reentrant
+            .done
+            .wait_timeout(statuses, Duration::from_secs(20))
+            .unwrap();
+        assert!(!timeout.timed_out(), "the callback never ran");
+        statuses = next;
+    }
+    assert_eq!(statuses[0], BAYAN_STATUS_WRONG_THREAD);
+    drop(statuses);
+    free(first);
+    free(second);
+}
+
+/// What `post_from_callback` shares with its test.
+struct Poster {
+    engine: AtomicPtr<BayanEngine>,
+    statuses: Mutex<Vec<BayanStatus>>,
+    posted: Condvar,
+}
+
+/// A callback that answers every message by posting another one, so the engine thread keeps calling it.
+unsafe extern "C" fn post_from_callback(
+    user_data: *mut c_void,
+    _json: *const u8,
+    _json_len: usize,
+) {
+    // SAFETY: the test registers this callback with a pointer to a `Poster` that outlives the engine.
+    let poster = unsafe { &*user_data.cast::<Poster>() };
+    let status = post(poster.engine.load(Ordering::SeqCst), "[]");
+    poster.statuses.lock().unwrap().push(status);
+    poster.posted.notify_all();
+}
+
+#[test]
+fn freeing_while_the_callback_posts_is_safe_and_the_late_posts_fail() {
+    let poster = Poster {
+        engine: AtomicPtr::new(ptr::null_mut()),
+        statuses: Mutex::new(Vec::new()),
+        posted: Condvar::new(),
+    };
+    // SAFETY: a null configuration of length 0 means the defaults.
+    let engine = unsafe { bayan_engine_new(ptr::null(), 0) };
+    poster.engine.store(engine, Ordering::SeqCst);
+    let data = ptr::from_ref(&poster).cast_mut().cast::<c_void>();
+    // SAFETY: `engine` is live and `poster` outlives it.
+    let registered = unsafe { bayan_engine_set_callback(engine, Some(post_from_callback), data) };
+    assert_eq!(registered, BAYAN_STATUS_OK);
+    assert_eq!(post(engine, "[]"), BAYAN_STATUS_OK);
+    // Wait until the callback is busy posting, then free the engine from this thread while it does.
+    let mut statuses = poster.statuses.lock().unwrap();
+    while statuses.len() < 3 {
+        let (next, timeout) = poster
+            .posted
+            .wait_timeout(statuses, Duration::from_secs(20))
+            .unwrap();
+        assert!(!timeout.timed_out(), "the callback did not keep posting");
+        statuses = next;
+    }
+    drop(statuses);
+    free(engine);
+    let after_free = poster.statuses.lock().unwrap().clone();
+    // A post made while the engine was stopping failed instead of reaching a freed engine.
+    assert!(
+        after_free
+            .iter()
+            .all(|status| *status == BAYAN_STATUS_OK || *status == BAYAN_STATUS_INTERNAL_ERROR),
+        "{after_free:?}"
+    );
+    // And the callback is never called again.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(poster.statuses.lock().unwrap().len(), after_free.len());
+}
+
+#[test]
+fn empty_blobs_and_callback_registration_behave_as_the_header_says() {
+    // SAFETY: a null configuration of length 0 means the defaults.
+    let engine = unsafe { bayan_engine_new(ptr::null(), 0) };
+    // An empty blob may come from a null pointer, and asking for its size returns OK with 0.
+    // SAFETY: a null pointer with length 0 is an empty blob.
+    let empty = unsafe { bayan_blob_put(engine, ptr::null(), 0) };
+    assert_ne!(empty, 0);
+    let mut length = 1_usize;
+    // SAFETY: `engine` is live; a null buffer without room asks for the size.
+    let status = unsafe { bayan_blob_get(engine, empty, ptr::null_mut(), 0, &raw mut length) };
+    assert_eq!((status, length), (BAYAN_STATUS_OK, 0));
+    // SAFETY: a null pointer with a length is refused before it is used.
+    let refused = unsafe { bayan_blob_put(engine, ptr::null(), 4) };
+    assert_eq!(refused, 0);
+    // Until the first post, registering again replaces the callback; after it, registering is refused.
+    let replaced = Collector::default();
+    let current = Collector::default();
+    // SAFETY: `engine` is live, and both collectors outlive it.
+    let first = unsafe { bayan_engine_set_callback(engine, Some(collect), user_data(&replaced)) };
+    // SAFETY: as above.
+    let second = unsafe { bayan_engine_set_callback(engine, Some(collect), user_data(&current)) };
+    assert_eq!((first, second), (BAYAN_STATUS_OK, BAYAN_STATUS_OK));
+    assert_eq!(
+        post(
+            engine,
+            r#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#
+        ),
+        BAYAN_STATUS_OK
+    );
+    assert_eq!(current.reply(1)["type"], "welcome");
+    // SAFETY: as above.
+    let late = unsafe { bayan_engine_set_callback(engine, Some(collect), user_data(&replaced)) };
+    assert_eq!(late, BAYAN_STATUS_INVALID_ARGUMENT);
+    free(engine);
+    assert!(replaced.messages.lock().unwrap().is_empty());
 }

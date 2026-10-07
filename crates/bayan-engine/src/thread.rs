@@ -54,6 +54,8 @@ enum Job {
         received_ms: u64,
         answer: SyncSender<Result<Vec<u8>, TileError>>,
     },
+    /// Wakes the engine thread so it notices that it is stopping.
+    Stop,
 }
 
 /// What the shell's threads and the engine thread share.
@@ -85,9 +87,10 @@ impl Shared {
 
 /// The engine running on its own thread.
 pub struct EngineThread {
-    jobs: Option<Sender<Job>>,
+    jobs: Sender<Job>,
     shared: Arc<Shared>,
-    thread: Option<JoinHandle<()>>,
+    /// Taken by the first [`EngineThread::stop`]; behind a lock so that stopping needs only a shared reference.
+    thread: Mutex<Option<JoinHandle<()>>>,
     thread_id: ThreadId,
 }
 
@@ -123,6 +126,7 @@ fn run(mut engine: Engine, jobs: &Receiver<Job>, shared: &Shared) {
                 let _ignored = answer.send(outcome.pixels);
                 shared.deliver(outcome.messages);
             }
+            Job::Stop => return,
         }
     }
 }
@@ -147,9 +151,9 @@ impl EngineThread {
             .spawn(move || run(engine, &receiver, &thread_shared))?;
         let thread_id = thread.thread().id();
         Ok(Self {
-            jobs: Some(sender),
+            jobs: sender,
             shared,
-            thread: Some(thread),
+            thread: Mutex::new(Some(thread)),
             thread_id,
         })
     }
@@ -190,8 +194,8 @@ impl EngineThread {
                 .unwrap_or_else(PoisonError::into_inner);
             self.shared.posted.store(true, Ordering::SeqCst);
         }
-        let jobs = self.jobs.as_ref().ok_or(Stopped)?;
-        jobs.send(Job::Message { bytes, received_ms })
+        self.jobs
+            .send(Job::Message { bytes, received_ms })
             .map_err(|_| Stopped)
     }
 
@@ -199,7 +203,7 @@ impl EngineThread {
     ///
     /// # Errors
     ///
-    /// [`TileError::WrongThread`] when called on the engine thread (from inside the sink), where it would wait for itself; otherwise the engine's error, or [`TileError::Internal`] if the engine is stopping.
+    /// [`TileError::WrongThread`] when called on an engine thread, this one's or another's (from inside a sink), where waiting could deadlock: on its own thread it would wait for itself, and two engines' sinks could wait for each other; otherwise the engine's error, or [`TileError::Internal`] if the engine is stopping.
     pub fn render_tile(
         &self,
         request: Vec<u8>,
@@ -207,22 +211,23 @@ impl EngineThread {
         height: u32,
         received_ms: u64,
     ) -> Result<Vec<u8>, TileError> {
-        if self.is_engine_thread() {
+        if on_engine_thread() {
             return Err(TileError::WrongThread);
         }
         if self.shared.stopping.load(Ordering::SeqCst) {
             return Err(TileError::Internal);
         }
-        let jobs = self.jobs.as_ref().ok_or(TileError::Internal)?;
         let (answer, pixels) = mpsc::sync_channel(1);
-        jobs.send(Job::Tile {
-            request,
-            width,
-            height,
-            received_ms,
-            answer,
-        })
-        .map_err(|_| TileError::Internal)?;
+        // If the engine stops before it gets to the request, the queue and `answer` are dropped, and `recv` fails.
+        self.jobs
+            .send(Job::Tile {
+                request,
+                width,
+                height,
+                received_ms,
+                answer,
+            })
+            .map_err(|_| TileError::Internal)?;
         pixels.recv().unwrap_or(Err(TileError::Internal))
     }
 
@@ -233,15 +238,19 @@ impl EngineThread {
     }
 
     /// Stops the engine. Called from any other thread, it waits until the engine thread has finished; called from inside the sink, it returns at once and the engine thread finishes by itself after the sink returns. Either way, the sink receives nothing after this returns.
-    pub fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
+    ///
+    /// It needs only a shared reference, so the sink may still call [`EngineThread::post`] while this waits, for example while a host frees the engine from another thread: from the moment this is called, posting fails with [`Stopped`].
+    pub fn stop(&self) {
         self.shared.stopping.store(true, Ordering::SeqCst);
-        // Closing the queue ends the engine thread's loop.
-        self.jobs = None;
-        if let Some(thread) = self.thread.take() {
+        // Wakes the loop if it is waiting for work; it fails only if the engine thread has already ended.
+        let _ignored = self.jobs.send(Job::Stop);
+        // The handle is taken out of the lock before joining, so the lock is not held while waiting.
+        let thread = self
+            .thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(thread) = thread {
             if std::thread::current().id() == self.thread_id {
                 // Dropping the handle detaches the thread, which is finishing the sink call that asked to stop.
                 drop(thread);
@@ -255,7 +264,7 @@ impl EngineThread {
 
 impl Drop for EngineThread {
     fn drop(&mut self) {
-        self.shutdown();
+        self.stop();
     }
 }
 
@@ -326,6 +335,27 @@ mod tests {
     }
 
     #[test]
+    fn rendering_from_any_engine_s_sink_is_refused() {
+        // Two engines whose sinks rendered on each other would wait for each other forever.
+        let other =
+            Arc::new(EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap());
+        let thread = EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        let target = Arc::clone(&other);
+        thread
+            .set_sink(Arc::new(move |_message: &str| {
+                let result = target.render_tile(b"{}".to_vec(), 1, 1, 0);
+                let _ignored = sender.lock().unwrap().send(result);
+            }))
+            .unwrap();
+        thread.post(b"{}".to_vec(), 0).unwrap();
+        assert_eq!(receiver.recv_timeout(WAIT), Ok(Err(TileError::WrongThread)));
+        thread.stop();
+        other.stop();
+    }
+
+    #[test]
     fn the_sink_cannot_change_after_the_first_post() {
         let (thread, _messages) = started();
         thread.post(b"{}".to_vec(), 0).unwrap();
@@ -361,8 +391,14 @@ mod tests {
             thread.post(b"[]".to_vec(), 0).unwrap();
         }
         thread.stop();
-        // Drain whatever arrived before stop returned; then the channel's sender is gone with the engine.
+        // Drain whatever arrived before stop returned; nothing arrives after it.
         while messages.try_recv().is_ok() {}
+        assert_eq!(
+            messages.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        // Dropping the stopped engine drops the sink, and with it the channel's sender.
+        drop(thread);
         assert_eq!(
             messages.recv_timeout(Duration::from_millis(50)),
             Err(RecvTimeoutError::Disconnected)
