@@ -4,7 +4,7 @@
 //!
 //! - `cargo xtask verify` runs the verification gate: every check a change must pass before it is pushed, the same locally and in CI. See `verify.rs` and the "Verification gate" section of AGENTS.md.
 //!
-//! Work package X-003 adds the `check-exact-pins` and `check-lockfile-age` commands and plugs them into the gate (see `SUPPLY_CHAIN_CHECKS` in `verify.rs`).
+//! - `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age [--base <revision>]` run the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003; see `supply_chain/`). The gate runs both in its supply-chain step.
 //!
 //! xtask never builds its own executable while it runs (Windows cannot replace a running program), so the gate's commands check, test or document xtask but do not build its binary.
 
@@ -21,6 +21,7 @@ mod json;
 mod policy;
 mod process;
 mod sources;
+mod supply_chain;
 mod toml_subset;
 mod verify;
 
@@ -32,8 +33,18 @@ Usage: cargo xtask <command>
 
 Commands:
   verify   Run the verification gate: formatting, lints, tests, WebAssembly build,
-           documentation, dependency policy, and the lint guardrails.
-           Run it before every push; CI runs the same command.
+           documentation, dependency policy, the lint guardrails and the
+           supply-chain checks. Run it before every push; CI runs the same command.
+  check-exact-pins
+           Check that every dependency is pinned exactly (=x.y.z), in
+           [workspace.dependencies] and in every crate (ADR-0017 rule 5).
+  check-lockfile-age [--base <revision>]
+           Check that every package version added to Cargo.lock since the merge
+           base with <revision> (default: origin/<GITHUB_BASE_REF> in a pull request
+           on GitHub Actions, otherwise origin/main) was published on crates.io at
+           least 24 hours before the commit that added it, and before now
+           (ADR-0017 rule 4). Needs git and curl; uses the network only when
+           Cargo.lock changed.
   help     Show this message.";
 
 fn main() -> ExitCode {
@@ -41,6 +52,15 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap_or("")).collect();
     match args.as_slice() {
         ["verify"] => verify::run(),
+        ["check-exact-pins"] => {
+            standalone(|report| supply_chain::exact_pins::check(&workspace_root(), report))
+        }
+        ["check-lockfile-age"] => {
+            standalone(|report| supply_chain::lockfile_age::check(&workspace_root(), None, report))
+        }
+        ["check-lockfile-age", "--base", base] => standalone(|report| {
+            supply_chain::lockfile_age::check(&workspace_root(), Some(base), report)
+        }),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -48,6 +68,20 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Runs one check on its own, printing what it reports, and turns its result into the exit status.
+fn standalone(check: impl FnOnce(&mut dyn FnMut(&str)) -> Result<(), String>) -> ExitCode {
+    match check(&mut |line| println!("{line}")) {
+        Ok(()) => {
+            println!("ok");
+            ExitCode::SUCCESS
+        }
+        Err(problem) => {
+            eprintln!("{problem}");
+            ExitCode::FAILURE
         }
     }
 }

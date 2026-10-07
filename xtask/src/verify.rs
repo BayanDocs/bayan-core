@@ -88,8 +88,17 @@ pub const CLIPPY_RUNS: [ClippyRun; 4] = [
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
 
-/// Hook for the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not cover. Work package X-003 adds `check-exact-pins` (every entry of `[workspace.dependencies]` is an exact `=x.y.z` requirement) and `check-lockfile-age` (no package version in `Cargo.lock` is younger than 24 hours) here, and as `cargo xtask` commands.
-const SUPPLY_CHAIN_CHECKS: &[Check] = &[];
+/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to `Cargo.lock` is at least 24 hours old. The second compares with the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when `Cargo.lock` changed.
+const SUPPLY_CHAIN_CHECKS: &[Check] = &[
+    (
+        "check-exact-pins: every dependency is pinned exactly (ADR-0017 rule 5)",
+        exact_pins,
+    ),
+    (
+        "check-lockfile-age: every package version added to Cargo.lock was published at least 24 hours before it was added (ADR-0017 rule 4)",
+        lockfile_age,
+    ),
+];
 
 /// Hook for determinism checks (ADR-0004, ADR-0025 §1): checks that the same input produces identical layout and pixel hashes on every platform plug in here, from CORE-002 and CORE-003 onward.
 const DETERMINISM_CHECKS: &[Check] = &[];
@@ -142,7 +151,7 @@ pub const STEPS: [Step; 9] = [
     },
     Step {
         name: "supply-chain",
-        title: "Supply-chain checks (X-003)",
+        title: "Supply-chain checks (exact pins, age of new package versions)",
         run: supply_chain,
     },
     Step {
@@ -363,7 +372,15 @@ fn guardrails(root: &Path) -> Result<(), String> {
 }
 
 fn supply_chain(root: &Path) -> Result<(), String> {
-    run_hook(SUPPLY_CHAIN_CHECKS, root, "work package X-003 adds them")
+    run_hook(SUPPLY_CHAIN_CHECKS, root, "none are configured")
+}
+
+fn exact_pins(root: &Path) -> Result<(), String> {
+    crate::supply_chain::exact_pins::check(root, &mut |line| println!("      {line}"))
+}
+
+fn lockfile_age(root: &Path) -> Result<(), String> {
+    crate::supply_chain::lockfile_age::check(root, None, &mut |line| println!("      {line}"))
 }
 
 fn determinism(root: &Path) -> Result<(), String> {
