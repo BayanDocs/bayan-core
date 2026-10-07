@@ -192,6 +192,25 @@ impl Document {
         self.story(story).ok().map(|story| story.len())
     }
 
+    /// The stored characters of a story, placeholders included, if it exists.
+    #[must_use]
+    pub fn story_text(&self, story: EntityId) -> Option<String> {
+        self.story(story).ok().map(|story| story.text())
+    }
+
+    /// The paragraphs whose ends a story stores, in order.
+    #[must_use]
+    pub fn paragraphs_in(&self, story: EntityId) -> Vec<EntityId> {
+        self.story(story)
+            .ok()
+            .and_then(|handle| {
+                let len = handle.len();
+                self.atoms_in(&handle, &(0..len), AtomKind::ParagraphEnd)
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
     /// The identifiers of every stored story, the main story first.
     #[must_use]
     pub fn stories(&self) -> Vec<EntityId> {
@@ -199,8 +218,8 @@ impl Document {
         ids.extend(
             self.crdt
                 .stories()
-                .entries()
-                .keys()
+                .ids()
+                .iter()
                 .filter_map(|key| EntityId::parse(key)),
         );
         ids
@@ -211,8 +230,8 @@ impl Document {
     pub fn tables(&self) -> Vec<EntityId> {
         self.crdt
             .registry(registry::TABLES)
-            .entries()
-            .keys()
+            .ids()
+            .iter()
             .filter_map(|key| EntityId::parse(key))
             .collect()
     }
@@ -1119,8 +1138,13 @@ impl Document {
                 .map(|(_, id)| id)
                 .collect()
         };
+        let comments = bound(AtomKind::CommentReference);
+        let tables = bound(AtomKind::TableBlock);
+        if comments.is_empty() && tables.is_empty() {
+            return Ok(());
+        }
         let raw = self.raw();
-        if !bound(AtomKind::CommentReference).is_empty()
+        if !comments.is_empty()
             && raw.comments.values().any(|comment| {
                 comment
                     .get(registry::STORY)
@@ -1132,7 +1156,7 @@ impl Document {
             return Err(EditError::WouldCreateCycle);
         }
         // Every story inside the moved tables, at any depth.
-        let mut pending = bound(AtomKind::TableBlock);
+        let mut pending = tables;
         let mut inside: BTreeSet<EntityId> = BTreeSet::new();
         let mut visited: BTreeSet<EntityId> = BTreeSet::new();
         while let Some(table) = pending.pop() {

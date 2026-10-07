@@ -215,6 +215,14 @@ impl Registry {
         entries
     }
 
+    /// The identifiers of every entity, in identifier order. Much cheaper than [`Registry::entries`]: the library does not have to decode each entry's container reference.
+    #[must_use]
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.map.keys().map(|key| key.to_string()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// The number of entries.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -258,6 +266,14 @@ impl Stories {
             .ensure_mergeable_text(id)
             .map(Story::new)
             .map_err(CrdtError::library)
+    }
+
+    /// The identifiers of every story, in identifier order (cheap, as for [`Registry::ids`]).
+    #[must_use]
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.map.keys().map(|key| key.to_string()).collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Every story, in identifier order.

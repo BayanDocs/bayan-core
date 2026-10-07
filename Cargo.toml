@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
-members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload"]
+members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model"]
 # fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
 exclude = ["fuzz"]
 

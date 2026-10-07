@@ -167,6 +167,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crdt-model"
+version = "0.0.0"
+dependencies = [
+ "bayan-crdt",
+ "bayan-model",
+ "crdt-workload",
+]
+
+[[package]]
 name = "crdt-workload"
 version = "0.0.0"
 
