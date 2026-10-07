@@ -451,6 +451,20 @@ impl Engine {
         outbox.messages
     }
 
+    /// The answer to a message that the host did not hand to the engine because it is longer than the message limit (spec §13), as the web worker host does for JSON text over 16 MiB rather than copy it into the module's memory: `limit_exceeded` (`args.limit`: `message_size`), as the reply if the host could read the message's identifier `id`, otherwise as `engine.error`, as for a message the engine refuses itself. A recording cannot hold a message the engine never saw, so when the answer is an event (which counts towards `seq`), a running recording stops there and is marked truncated.
+    pub fn refuse_oversized(&mut self, id: Option<u64>) -> Vec<String> {
+        let id = id.filter(|id| (1..=MAX_ID).contains(id));
+        let mut outbox = Outbox::new(self.next_seq);
+        outbox.fail(id, limit_exceeded("message_size"));
+        self.next_seq = outbox.next_seq;
+        if id.is_none()
+            && let Some(recorder) = &mut self.recorder
+        {
+            recorder.stop_early();
+        }
+        outbox.messages
+    }
+
     /// Renders a tile for `bayan_render_tile`: `request` is a `render.tile` payload (spec §6.4) whose `width` and `height`, if present, must equal the parameters.
     pub fn render_tile(
         &mut self,

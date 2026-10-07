@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use bayan_engine::blobs::{BlobId, BlobStore};
 use bayan_engine::config::Config;
-use bayan_engine::limits::{MAX_BLOB_BYTES, MAX_ID};
+use bayan_engine::limits::{MAX_BLOB_BYTES, MAX_ID, MAX_MESSAGE_BYTES};
 use bayan_engine::{ENGINE_VERSION, Engine};
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -45,6 +45,13 @@ pub fn engine_version() -> String {
 #[must_use]
 pub fn max_blob_bytes() -> u32 {
     u32::try_from(MAX_BLOB_BYTES).unwrap_or(u32::MAX)
+}
+
+/// The longest message in bytes of UTF-8 JSON (spec §13). The worker host answers a longer message with [`WasmEngine::refuse_oversized`] instead of copying it into the module's memory.
+#[wasm_bindgen(js_name = maxMessageBytes)]
+#[must_use]
+pub fn max_message_bytes() -> u32 {
+    u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(u32::MAX)
 }
 
 /// An engine inside the worker.
@@ -93,6 +100,13 @@ impl WasmEngine {
     #[must_use]
     pub fn report_host_failure(&mut self, message_json: &str) -> String {
         json_array(&self.engine.report_host_failure(message_json.as_bytes()))
+    }
+
+    /// The answer to a message the worker host did not hand to the engine because it is longer than [`max_message_bytes`]: `limit_exceeded` as the reply to request `id`, or, if `id` is not a request identifier (pass `NaN` when the message has none), as `engine.error` (spec §3.2, §13). Returns the text of a JSON array.
+    #[wasm_bindgen(js_name = refuseOversized)]
+    #[must_use]
+    pub fn refuse_oversized(&mut self, id: f64) -> String {
+        json_array(&self.engine.refuse_oversized(identifier(id)))
     }
 
     /// Stores bytes from the shell in a new blob and returns its identifier, or 0 if a limit refuses them (spec §13). The engine answers a message that names blob 0 with `limit_exceeded`.
@@ -275,6 +289,12 @@ mod tests {
         assert_eq!(panic[0]["re"], 5);
         assert_eq!(panic[0]["error"]["code"], "panic");
         assert_eq!(panic[1]["payload"]["recoverable"], false);
+        let oversized = parse(&engine.refuse_oversized(9.0));
+        assert_eq!(oversized[0]["re"], 9);
+        assert_eq!(oversized[0]["error"]["args"]["limit"], "message_size");
+        let anonymous = parse(&engine.refuse_oversized(f64::NAN));
+        assert_eq!(anonymous[0]["type"], "engine.error");
+        assert_eq!(max_message_bytes(), 16 * 1024 * 1024);
         let failure = parse(&engine.report_host_failure(r#"{"v":0,"id":6,"type":"render.tile"}"#));
         assert_eq!(failure.len(), 1);
         assert_eq!(failure[0]["error"]["code"], "internal");

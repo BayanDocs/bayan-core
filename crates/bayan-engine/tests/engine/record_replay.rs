@@ -270,3 +270,41 @@ fn a_recording_keeps_the_blobs_it_used() {
     assert_eq!(file["blobs"][0]["base64"], json!("ZG9jdW1lbnQgYnl0ZXM="));
     assert!(replay(Config::default(), &recording).unwrap().identical);
 }
+
+#[test]
+fn a_message_the_host_refused_as_oversized_truncates_a_recording_only_without_an_identifier() {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    let parse = |answers: Vec<String>| -> Vec<Value> {
+        answers
+            .iter()
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect()
+    };
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    // With an identifier, the host's refusal is a reply, which a replay never compares: the recording goes on.
+    let answers = parse(engine.refuse_oversized(Some(4)));
+    assert_eq!(error_code(&answers, 4), "limit_exceeded");
+    assert_eq!(answers[0]["error"]["args"]["limit"], json!("message_size"));
+    send(
+        &mut engine,
+        &request(5, "query.a11y", json!({ "doc_id": doc_id })),
+    );
+    // Without one, the refusal is an event, which counts towards `seq`; the recording cannot hold it and stops there.
+    let answers = parse(engine.refuse_oversized(None));
+    assert_eq!(answers[0]["type"], json!("engine.error"));
+    assert_eq!(answers[0]["payload"]["recoverable"], json!(true));
+    send(
+        &mut engine,
+        &request(6, "query.a11y", json!({ "doc_id": doc_id })),
+    );
+    let stopped = send(&mut engine, &request(7, "diag.record.stop", json!({})));
+    let stopped = ok_payload(&stopped, 7);
+    assert_eq!(stopped["truncated"], json!(true));
+    // Only the message before the refusal was kept, and it replays identically.
+    assert_eq!(stopped["entries"], json!(1));
+    let blob = stopped["blob"].as_u64().unwrap();
+    let recording = engine.blobs().take(blob).unwrap();
+    let report = replay(Config::default(), &recording).unwrap();
+    assert!(report.identical);
+}

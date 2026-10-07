@@ -173,13 +173,21 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            ~/.cargo/bin/wasm-bindgen
             target/
-          key: artifacts-wasm-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/dev-setup.sh') }}
+          key: artifacts-wasm-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             artifacts-wasm-${{ hashFiles('rust-toolchain.toml') }}-
 
-      # Builds wasm-bindgen-cli at the pinned version from crates.io, unless the cache restored exactly that version.
+      # The wasm-bindgen binary has a cache of its own, with an exact key that changes with its pin in scripts/dev-setup.sh and
+      # no fallback, so an older version is never restored (dev-setup.sh refuses to replace a different version).
+      - name: Restore wasm-bindgen-cli
+        id: wasm-bindgen
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ runner.os }}-${{ hashFiles('scripts/dev-setup.sh') }}
+
+      # Builds wasm-bindgen-cli at the pinned version from crates.io, unless the cache restored it.
       - name: Install wasm-bindgen-cli (scripts/dev-setup.sh)
         run: scripts/dev-setup.sh --no-miri
 
@@ -210,9 +218,15 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            ~/.cargo/bin/wasm-bindgen
             target/
           key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Save wasm-bindgen-cli
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.wasm-bindgen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: ${{ steps.wasm-bindgen.outputs.cache-primary-key }}
 
   node-driver:
     name: Node.js driver (${{ matrix.os }})

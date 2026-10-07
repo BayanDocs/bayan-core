@@ -211,6 +211,15 @@ async function main() {
       assert.equal(ok(await shell.request(14, "render.tile", tileRequest(1))).hash, tileHash);
     });
 
+    await check("a message over 16 MiB is answered with limit_exceeded without reaching the engine", async () => {
+      const text = "x".repeat(17 * 1024 * 1024);
+      const error = errorOf(await shell.request(16, "input.text", { doc_id: 1, text }));
+      assert.equal(error.code, "limit_exceeded");
+      assert.equal(error.args.limit, "message_size");
+      // The engine is unaffected.
+      assert.equal(ok(await shell.request(17, "render.tile", tileRequest(1))).hash, tileHash);
+    });
+
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
       shell.send({ v: 0, id: 15, type: "hello", payload: { protocol_versions: [0n] } });
       const event = await shell.event("engine.error");
@@ -238,9 +247,12 @@ async function main() {
     await shell.close();
   }
 
-  await check("without init, the worker starts with the defaults on the first message", async () => {
+  await check("without init as the very first message, the worker starts with the defaults", async () => {
     const plain = new Shell();
     try {
+      // Only the very first message may be init: this one comes after another control message and is ignored.
+      plain.send({ worker: "ping" });
+      plain.send({ worker: "init", config: { test: { allow_panic: true } } });
       plain.send({ v: 0, id: 1, type: "hello", payload: { protocol_versions: [0] } });
       assert.equal((await plain.take(() => true, "any message")).worker, "ready");
       ok(await plain.reply(1));

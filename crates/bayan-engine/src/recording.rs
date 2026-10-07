@@ -151,6 +151,11 @@ impl Recorder {
         })
     }
 
+    /// Stops the recording early and marks it truncated, when something happened that it cannot hold, such as a message the host answered without handing it to the engine.
+    pub(crate) fn stop_early(&mut self) {
+        self.truncated = true;
+    }
+
     /// Adds an entry and the blobs it used, unless that would exceed a limit; then the recording stops early and is marked truncated.
     fn push(&mut self, mut entry: Entry, received_ms: u64, blobs: Vec<(BlobId, Arc<[u8]>)>) {
         if self.truncated {

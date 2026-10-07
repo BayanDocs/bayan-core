@@ -8,14 +8,16 @@
 // SPDX-FileCopyrightText: 2026 BayanDocs contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
 
-import init, { WasmEngine, __wbg_reset_state, engineVersion, maxBlobBytes } from "./bayan_wasm.js";
+import init, { WasmEngine, __wbg_reset_state, engineVersion, maxBlobBytes, maxMessageBytes } from "./bayan_wasm.js";
 
 /** The engine, once it is loaded. */
 let engine = null;
 /** The configuration as JSON text, kept to create a replacement engine after a panic. */
 let configText = "";
-/** "new" until the first message, then "starting", "ready" or "failed". After "failed" every message is ignored. */
+/** "new" until the engine starts loading, then "starting", "ready" or "failed". After "failed" every message is ignored. */
 let state = "new";
+/** Whether a message has arrived: only the very first message may be init (§3.2). */
+let firstSeen = false;
 /** Work runs as a chain of promises, so messages are handled one at a time and answered in order. No link rejects. */
 let queue = Promise.resolve();
 
@@ -23,9 +25,11 @@ self.addEventListener("message", (event) => {
   // The time the message arrived, for recordings (§10); the engine itself reads no clock.
   const receivedMs = performance.now();
   const data = event.data;
+  const first = !firstSeen;
+  firstSeen = true;
   if (isControl(data)) {
-    // Only the first message may be init; any other control message is ignored.
-    if (state === "new" && data.worker === "init") {
+    // Only the very first message may be init; any other control message is ignored.
+    if (first && data.worker === "init") {
       state = "starting";
       queue = queue.then(() => start(data));
     }
@@ -83,6 +87,15 @@ async function relay(message, receivedMs) {
   // The message as it arrived, to report a panic while its blob is stored (an ArrayBuffer becomes {} in JSON).
   let text = toJson(message);
   try {
+    // UTF-8 is never shorter than JavaScript's UTF-16 length, so a longer text is over the engine's limit (§13). It is
+    // answered without copying it into the engine's memory, which would grow to hold it and never shrink again.
+    if (text.length > maxMessageBytes()) {
+      const id = isObject(message) && typeof message.id === "number" ? message.id : Number.NaN;
+      for (const answer of JSON.parse(engine.refuseOversized(id))) {
+        deliver(answer);
+      }
+      return;
+    }
     const blob = storeBlob(message);
     if (blob !== null) {
       text = toJson(message);
