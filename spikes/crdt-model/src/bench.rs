@@ -245,8 +245,35 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
         .export_shallow_snapshot(&a.version())
         .map_err(|error| error.to_string())?;
     metric("shallow_snapshot_after_edits_bytes", shallow.len(), "bytes");
+
+    // Later updates of the same size. The first update after loading also pays for decoding the containers it touches and loading the history it needs; these show the cost once the document has been open for a while.
+    let mut later = std::time::Duration::ZERO;
+    for round in 1..=LATER_UPDATES {
+        let before = a.version_vector();
+        for edit in &edit_script(EDIT_SEED ^ (u64::from(round) << 8), edits) {
+            let len = b.story_len(MAIN).unwrap_or(1);
+            let _ = match edit.resolve(len) {
+                Resolved::Insert { at, text } => b.insert_text(MAIN, at, text),
+                Resolved::Delete { range } => b.delete(MAIN, range),
+                Resolved::Bold { range } => b.format(MAIN, range, marks::BOLD, &Value::Bool(true)),
+                Resolved::Split { at } => b.split_paragraph(MAIN, at).map(|_| ()),
+            };
+        }
+        let update = b.export_updates(&before).map_err(err)?;
+        let started = Instant::now();
+        a.import(&update, &ImportLimits::UPDATE).map_err(err)?;
+        later += started.elapsed();
+    }
+    metric(
+        "apply_later_update_ms_avg",
+        millis(later / LATER_UPDATES),
+        "ms",
+    );
     concurrent_full(&mut a, &mut b)
 }
+
+/// How many later updates the benchmarks apply after the first (see `apply_later_update_ms_avg`).
+const LATER_UPDATES: u32 = 3;
 
 /// Collaboration, where both replicas edit before they exchange changes: a keystroke on each replica, imported by the other, eleven times (the first import is reported separately, because the library builds a cache on the first concurrent change); then a session of 1,000 edits on one replica while the other makes 50, imported at once.
 fn concurrent_full(a: &mut Document, b: &mut Document) -> Result<(), String> {
@@ -430,6 +457,42 @@ fn bench_subset(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(),
     metric(
         "undo_ms_avg",
         millis(started.elapsed() / undone.max(1)),
+        "ms",
+    );
+
+    // Later updates of the same size, as in bench_full.
+    let mut later = std::time::Duration::ZERO;
+    for round in 1..=LATER_UPDATES {
+        let before = a.version_vector();
+        let mut len = main.len();
+        for edit in &edit_script(EDIT_SEED ^ (u64::from(round) << 8), edits) {
+            let resolved = edit.resolve(len);
+            match &resolved {
+                Resolved::Insert { at, text } => main.insert(*at, text).map_err(err)?,
+                Resolved::Delete { range } => main.delete(range.clone()).map_err(err)?,
+                Resolved::Bold { range } => main
+                    .mark(range.clone(), marks::BOLD, &Value::Bool(true))
+                    .map_err(err)?,
+                Resolved::Split { at } => main
+                    .insert_atom(
+                        *at,
+                        AtomKind::ParagraphEnd.placeholder(),
+                        "p:00000000000000000000000000000002",
+                    )
+                    .map_err(err)?,
+            }
+            b.commit();
+            len = Edit::new_len(&resolved, len);
+        }
+        let update = b.export_updates(&before).map_err(err)?;
+        let started = Instant::now();
+        a.import(&update, &ImportLimits::UPDATE)
+            .map_err(|error| error.to_string())?;
+        later += started.elapsed();
+    }
+    metric(
+        "apply_later_update_ms_avg",
+        millis(later / LATER_UPDATES),
         "ms",
     );
     concurrent_subset(&a, &b)
