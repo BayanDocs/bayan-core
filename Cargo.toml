@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
-members = ["crates/*", "xtask", "xtask/lint-canary"]
+members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload"]
 # fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
 exclude = ["fuzz"]
 
@@ -18,8 +18,10 @@ repository = "https://github.com/BayanDocs/bayan-core"
 # Nothing is published to crates.io until the release work packages set up trusted publishing (ADR-0017, ADR-0026).
 publish = false
 
-# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017). There are none yet.
+# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017).
 [workspace.dependencies]
+# The CRDT library of ADR-0008 (MIT, published 2026-09-21). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
+loro = "=1.16.2"
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.

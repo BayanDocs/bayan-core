@@ -8,7 +8,13 @@ all-features = true
 [advisories]
 # Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version. An exception needs the advisory ID in `ignore`, with a comment explaining why we are not affected.
 yanked = "deny"
-ignore = []
+# Exceptions added by the CORE-004 spike for crates that Loro 1.16.2 (ADR-0008) pulls in. All four advisories are informational "unmaintained" notices: none reports a vulnerability, and none has a patched version, because the repositories were archived. They are recorded as a risk of ADR-0008 in spikes/crdt-model/REPORT.md, which recommends asking the Loro maintainers to move to the maintained forks; remove each entry as soon as Loro no longer depends on the crate.
+ignore = [
+  { id = "RUSTSEC-2026-0248", reason = "im (unmaintained since 2026-05-03): a persistent-collections crate used inside loro-internal; no known vulnerability. Its maintained fork is imbl." },
+  { id = "RUSTSEC-2026-0247", reason = "bitmaps (unmaintained since 2026-05-03): used only by im (see RUSTSEC-2026-0248); no known vulnerability." },
+  { id = "RUSTSEC-2026-0251", reason = "sized-chunks (unmaintained since 2026-05-03): used only by im (see RUSTSEC-2026-0248); no known vulnerability. Its maintained fork is imbl-sized-chunks." },
+  { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill (unmaintained since 2023): heapless 0.7, which postcard uses inside Loro, depends on it only for avr, riscv32, thumbv6m and xtensa microcontroller targets, so it is never compiled for any BayanDocs platform (`cargo tree -i atomic-polyfill --target <triple>` is empty for Linux, macOS, Windows and wasm32); cargo-deny lists it because it checks every target." },
+]
 
 [licenses]
 # The license allowlist of ADR-0017 §8. A dual-licensed crate qualifies if one of its options is on the list. Anything else needs an ADR amendment.

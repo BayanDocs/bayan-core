@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+# The only crate that uses Loro (ADR-0008 §1); no Loro type appears in this crate's public interface.
+loro.workspace = true
+
 [lints]
 workspace = true
