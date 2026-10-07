@@ -95,7 +95,7 @@ const SUPPLY_CHAIN_CHECKS: &[Check] = &[
         exact_pins,
     ),
     (
-        "check-lockfile-age: every package version added to Cargo.lock was published at least 24 hours before it was added (ADR-0017 rule 4)",
+        "check-lockfile-age: Cargo builds exactly what Cargo.lock lists, and every package version added to it was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
         lockfile_age,
     ),
 ];
@@ -112,8 +112,13 @@ pub struct Step {
     run: fn(&Path) -> Result<(), String>,
 }
 
-/// The steps, in order. The first six are the ones work package CORE-001 lists, in its order.
+/// The steps, in order. The supply-chain checks come first, so that no code of a dependency they reject is compiled or run (build scripts, procedural macros, tests) before they fail; they build nothing themselves. The next six are the ones work package CORE-001 lists, in its order.
 pub const STEPS: [Step; 9] = [
+    Step {
+        name: "supply-chain",
+        title: "Supply-chain checks (exact pins, what Cargo builds, age and checksum of new package versions)",
+        run: supply_chain,
+    },
     Step {
         name: "fmt",
         title: "Formatting (rustfmt)",
@@ -148,11 +153,6 @@ pub const STEPS: [Step; 9] = [
         name: "guardrails",
         title: "Guardrails: lint configuration and lint canaries",
         run: guardrails,
-    },
-    Step {
-        name: "supply-chain",
-        title: "Supply-chain checks (exact pins, age of new package versions)",
-        run: supply_chain,
     },
     Step {
         name: "determinism",
@@ -466,12 +466,14 @@ fn duration(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// The supply-chain checks run before anything is compiled, so that a dependency they reject never runs its build script, procedural macros or tests; then the steps that work package CORE-001 lists, in its order.
     #[test]
-    fn runs_the_briefs_steps_first_and_in_its_order() {
+    fn runs_the_supply_chain_checks_first_then_the_briefs_steps_in_its_order() {
         let names: Vec<&str> = STEPS.iter().map(|step| step.name).collect();
         assert_eq!(
             names,
             [
+                "supply-chain",
                 "fmt",
                 "clippy",
                 "test",
@@ -479,7 +481,6 @@ mod tests {
                 "doc",
                 "deny",
                 "guardrails",
-                "supply-chain",
                 "determinism"
             ]
         );
