@@ -88,6 +88,9 @@ version = "0.0.0"
 [[package]]
 name = "bayan-model"
 version = "0.0.0"
+dependencies = [
+ "bayan-crdt",
+]
 
 [[package]]
 name = "bayan-opc"

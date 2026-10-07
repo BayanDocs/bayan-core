@@ -1,0 +1,165 @@
+//! The raw state of a document as stored in the CRDT, before normalization.
+
+use std::collections::BTreeMap;
+
+use bayan_crdt::{Doc, Registry, Run, Value};
+
+use crate::EntityId;
+
+/// Properties of an entity: property name to value, in name order.
+pub type Props = BTreeMap<String, Value>;
+
+/// Registry names, one root map per entity kind (document model §16).
+pub mod registry {
+    /// Paragraph properties, by paragraph identifier.
+    pub const PARAGRAPHS: &str = "paragraphs";
+    /// Tables: properties and the movable list of row identifiers (key [`ROWS`]).
+    pub const TABLES: &str = "tables";
+    /// Rows: properties and the movable list of cell identifiers (key [`CELLS`]).
+    pub const ROWS: &str = "rows";
+    /// Cells: properties and the identifier of the cell's story (key [`STORY`]).
+    pub const CELLS: &str = "cells";
+    /// Objects anchored by object-anchor atoms.
+    pub const OBJECTS: &str = "objects";
+    /// Fields delimited by field atoms.
+    pub const FIELDS: &str = "fields";
+    /// Comments: properties and the identifier of the comment's story (key [`STORY`]).
+    pub const COMMENTS: &str = "comments";
+    /// Ranges (bookmarks and the like) delimited by range atoms.
+    pub const RANGES: &str = "ranges";
+    /// The root map of document-wide properties; the final section's properties are its keys (document model §6).
+    pub const BODY: &str = "body";
+    /// The key of a table's row list.
+    pub const ROWS_KEY: &str = "rows";
+    /// The key of a row's cell list.
+    pub const CELLS_KEY: &str = "cells";
+    /// The key of the story identifier in a cell or comment.
+    pub const STORY: &str = "story";
+}
+
+/// A table as stored: its properties and its row list as stored (items are normally row identifiers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawTable {
+    /// The table's properties.
+    pub props: Props,
+    /// The row list.
+    pub rows: Vec<Value>,
+}
+
+/// A row as stored: its properties and its cell list as stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawRow {
+    /// The row's properties.
+    pub props: Props,
+    /// The cell list.
+    pub cells: Vec<Value>,
+}
+
+/// Everything the normalization reads: every story as runs, and every entity registry, exactly as stored (which concurrent edits or a misbehaving replica may have left inconsistent). Entries whose key is not an identifier are left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawDocument {
+    /// The main story.
+    pub main: Vec<Run>,
+    /// Every other story.
+    pub stories: BTreeMap<EntityId, Vec<Run>>,
+    /// Paragraph properties.
+    pub paragraphs: BTreeMap<EntityId, Props>,
+    /// Tables.
+    pub tables: BTreeMap<EntityId, RawTable>,
+    /// Rows.
+    pub rows: BTreeMap<EntityId, RawRow>,
+    /// Cells (their properties include the story identifier).
+    pub cells: BTreeMap<EntityId, Props>,
+    /// Objects.
+    pub objects: BTreeMap<EntityId, Props>,
+    /// Fields.
+    pub fields: BTreeMap<EntityId, Props>,
+    /// Comments (their properties include the story identifier).
+    pub comments: BTreeMap<EntityId, Props>,
+    /// Ranges.
+    pub ranges: BTreeMap<EntityId, Props>,
+    /// Document-wide properties, including the final section's.
+    pub body: Props,
+}
+
+impl RawDocument {
+    /// Reads the raw state of `doc`.
+    #[must_use]
+    pub fn read(doc: &Doc) -> Self {
+        let stories = doc
+            .stories()
+            .entries()
+            .into_iter()
+            .filter_map(|(key, story)| Some((EntityId::parse(&key)?, story.runs())))
+            .collect();
+        let tables = read_entities(&doc.registry(registry::TABLES), |map| RawTable {
+            props: map.entries(),
+            rows: map
+                .get_id_list(registry::ROWS_KEY)
+                .map(|list| list.items())
+                .unwrap_or_default(),
+        });
+        let rows = read_entities(&doc.registry(registry::ROWS), |map| RawRow {
+            props: map.entries(),
+            cells: map
+                .get_id_list(registry::CELLS_KEY)
+                .map(|list| list.items())
+                .unwrap_or_default(),
+        });
+        Self {
+            main: doc.main_story().runs(),
+            stories,
+            paragraphs: read_props(&doc.registry(registry::PARAGRAPHS)),
+            tables,
+            rows,
+            cells: read_props(&doc.registry(registry::CELLS)),
+            objects: read_props(&doc.registry(registry::OBJECTS)),
+            fields: read_props(&doc.registry(registry::FIELDS)),
+            comments: read_props(&doc.registry(registry::COMMENTS)),
+            ranges: read_props(&doc.registry(registry::RANGES)),
+            body: doc.root_map(registry::BODY).entries(),
+        }
+    }
+
+    /// The runs of story `id` (the main story for [`EntityId::MAIN_STORY`]).
+    #[must_use]
+    pub fn story(&self, id: EntityId) -> Option<&[Run]> {
+        if id == EntityId::MAIN_STORY {
+            Some(&self.main)
+        } else {
+            self.stories.get(&id).map(Vec::as_slice)
+        }
+    }
+
+    /// The registry of entities that atoms of `kind` reference, if any.
+    #[must_use]
+    pub fn has_entity(&self, kind: crate::AtomKind, id: EntityId) -> bool {
+        use crate::AtomKind;
+        match kind {
+            AtomKind::ParagraphEnd => self.paragraphs.contains_key(&id),
+            AtomKind::Tab => false,
+            AtomKind::FieldBegin | AtomKind::FieldSeparator | AtomKind::FieldEnd => {
+                self.fields.contains_key(&id)
+            }
+            AtomKind::ObjectAnchor => self.objects.contains_key(&id),
+            AtomKind::RangeStart | AtomKind::RangeEnd => self.ranges.contains_key(&id),
+            AtomKind::TableBlock => self.tables.contains_key(&id),
+            AtomKind::CommentReference => self.comments.contains_key(&id),
+        }
+    }
+}
+
+fn read_props(registry: &Registry) -> BTreeMap<EntityId, Props> {
+    read_entities(registry, bayan_crdt::PropertyMap::entries)
+}
+
+fn read_entities<T>(
+    registry: &Registry,
+    read: impl Fn(&bayan_crdt::PropertyMap) -> T,
+) -> BTreeMap<EntityId, T> {
+    registry
+        .entries()
+        .into_iter()
+        .filter_map(|(key, map)| Some((EntityId::parse(&key)?, read(&map))))
+        .collect()
+}
