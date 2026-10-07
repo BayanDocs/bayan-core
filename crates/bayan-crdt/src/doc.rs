@@ -17,6 +17,9 @@ const MAIN_STORY: &str = "main";
 /// The name of the root map that holds every other story.
 const STORIES: &str = "stories";
 
+/// The commit origin of changes that are not undo steps ([`Doc::commit_without_undo`]).
+pub(crate) const NO_UNDO_ORIGIN: &str = "bayan:no-undo";
+
 /// The identifier of one replica (one editing session). Two replicas that edit concurrently must never share a peer identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerId(pub u64);
@@ -138,6 +141,16 @@ impl Doc {
     /// Ends the current change: everything edited since the last commit becomes one change and one undo step.
     pub fn commit(&self) {
         self.loro.commit();
+    }
+
+    /// Ends the current change without making it an undo step: [`crate::UndoManager`] treats it like a change from another replica, never undoing it but transforming later undo steps against it.
+    ///
+    /// For changes that create entities before an undoable change references them. Undo then removes only the reference, and the entity stays stored but invisible, as the document model intends (normalization rule N5). Undoing the creation itself is harmful with Loro 1.16.2: redoing the creation of a child container duplicates its content, including edits other replicas made to it in between (CORE-004 report).
+    pub fn commit_without_undo(&self) {
+        self.loro.set_next_commit_origin(NO_UNDO_ORIGIN);
+        self.loro.commit();
+        // An empty commit leaves the origin waiting for the next commit, which must stay undoable.
+        self.loro.clear_next_commit_options();
     }
 
     /// The main story.

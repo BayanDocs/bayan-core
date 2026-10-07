@@ -415,3 +415,77 @@ fn shallow_nested_values_are_accepted() {
     let value = target.registry("paragraphs").len();
     assert_eq!(value, 1);
 }
+
+/// Pins a bug of Loro 1.16.2 (reported in the CORE-004 report): undoing the creation of a child container and redoing it duplicates the container's content, including what other replicas wrote into it in between. If this test starts failing, Loro has fixed the bug and the workaround below may be reconsidered.
+#[test]
+fn redoing_the_creation_of_a_child_container_duplicates_its_content() {
+    let a = doc(1);
+    let b = doc(2);
+    let mut undo = UndoManager::new(&a);
+    a.stories().create("s").unwrap().insert(0, "P").unwrap();
+    a.commit();
+    sync(&a, &b);
+    b.stories().get("s").unwrap().insert(0, "typed").unwrap();
+    b.commit();
+    sync(&b, &a);
+    assert!(undo.undo().unwrap());
+    assert!(a.stories().get("s").is_none());
+    assert!(undo.redo().unwrap());
+    assert_eq!(a.stories().get("s").unwrap().text(), "typedPtypedP");
+}
+
+/// The workaround the model uses: create entities in a change that is not an undo step, then reference them in one that is. Undo hides the reference, redo shows it again, and the entity's content, including other replicas' edits, is intact.
+#[test]
+fn entities_created_without_undo_survive_undo_and_redo_intact() {
+    let a = doc(1);
+    let b = doc(2);
+    let mut undo = UndoManager::new(&a);
+    a.stories().create("s").unwrap().insert(0, "P").unwrap();
+    a.commit_without_undo();
+    a.main_story().insert(0, "R").unwrap();
+    a.commit();
+    sync(&a, &b);
+    b.stories().get("s").unwrap().insert(0, "typed").unwrap();
+    b.commit();
+    sync(&b, &a);
+    assert_eq!(undo.undo_count(), 1);
+    assert!(undo.undo().unwrap());
+    assert_eq!(a.main_story().text(), "");
+    assert_eq!(a.stories().get("s").unwrap().text(), "typedP");
+    assert!(undo.redo().unwrap());
+    assert_eq!(a.main_story().text(), "R");
+    assert_eq!(a.stories().get("s").unwrap().text(), "typedP");
+    // An empty change without undo leaves the next change undoable.
+    a.commit_without_undo();
+    a.main_story().insert(1, "S").unwrap();
+    a.commit();
+    assert_eq!(undo.undo_count(), 2);
+}
+
+/// Pins a limitation of Loro 1.16.2's undo (CORE-004 report): undoing a mark reverts it on the characters it was applied to, but not on characters another replica inserted strictly inside the range concurrently, which took the mark.
+#[test]
+fn undoing_a_mark_leaves_it_on_text_inserted_inside_concurrently() {
+    let a = doc(1);
+    let b = doc(2);
+    let mut undo = UndoManager::new(&a);
+    a.main_story().insert(0, "abcdef").unwrap();
+    a.commit();
+    sync(&a, &b);
+    a.main_story()
+        .mark(0..6, "r:b", &Value::Bool(true))
+        .unwrap();
+    a.commit();
+    b.main_story().insert(3, "XY").unwrap();
+    b.commit();
+    sync(&a, &b);
+    sync(&b, &a);
+    assert!(undo.undo().unwrap());
+    sync(&a, &b);
+    let runs = b.main_story().runs();
+    assert_eq!(runs, a.main_story().runs());
+    let bold: Vec<(&str, bool)> = runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.marks.contains_key("r:b")))
+        .collect();
+    assert_eq!(bold, [("abc", false), ("XY", true), ("def", false)]);
+}

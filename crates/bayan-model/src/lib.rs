@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod atoms;
+mod document;
 mod ids;
 mod invariants;
 pub mod marks;
@@ -37,6 +38,7 @@ pub mod simulation;
 mod view;
 
 pub use atoms::{AtomKind, decode_binding, encode_binding, is_text_character};
+pub use document::{Document, EditError};
 pub use ids::{EntityId, IdGenerator};
 pub use invariants::{Violation, check_invariants};
 pub use normalize::{

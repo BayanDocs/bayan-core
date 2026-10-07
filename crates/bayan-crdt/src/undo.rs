@@ -1,10 +1,11 @@
 //! Local undo and redo.
 
+use crate::doc::NO_UNDO_ORIGIN;
 use crate::{CrdtError, Doc};
 
 /// Undo and redo for one replica's own changes (ADR-0008 §5).
 ///
-/// Every commit of the document ([`Doc::commit`]) is one undo step. Undo reverts only changes this replica made; changes received from other replicas are never undone, and the inverse of a local change is transformed against remote changes that arrived since, so undo composes with concurrent editing.
+/// Every commit of the document ([`Doc::commit`]) is one undo step, except commits made with [`Doc::commit_without_undo`]. Undo reverts only changes this replica made; changes received from other replicas are never undone, and the inverse of a local change is transformed against remote changes that arrived since, so undo composes with concurrent editing.
 #[derive(Debug)]
 pub struct UndoManager {
     manager: loro::UndoManager,
@@ -21,6 +22,7 @@ impl UndoManager {
         // Merging uses wall-clock time; 0 keeps every commit its own step, independent of timing.
         manager.set_merge_interval(0);
         manager.set_max_undo_steps(MAX_UNDO_STEPS);
+        manager.add_exclude_origin_prefix(NO_UNDO_ORIGIN);
         Self { manager }
     }
 
