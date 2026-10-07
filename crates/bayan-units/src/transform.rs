@@ -10,7 +10,7 @@ use crate::{Angle, Blu, Fixed, Point, Rounding};
 /// y′ = yx·x + yy·y + ty
 /// ```
 ///
-/// The four coefficients are [`Fixed`] numbers and the translation is in BLU. Mapping a point computes this sum exactly and rounds once, as the caller says, so the result is the same on every platform. Composing two transforms rounds the new coefficients to multiples of 2⁻³², which moves a point within 22 inches of the origin by less than 0.01 BLU.
+/// The four coefficients are [`Fixed`] numbers and the translation is in BLU. Mapping a point computes this sum exactly and rounds once, as the caller says, so the result is the same on every platform. Composing two transforms rounds each new coefficient to a multiple of 2⁻³² and the new translation to a whole BLU, as the caller says. Compared with the exact composition, that moves the image of a point at most 22 inches from the origin on each axis by at most about 0.51 BLU when rounding to the nearest (0.01 BLU from the coefficients, 0.5 from the translation), or by less than 1.02 BLU when rounding down, up or toward zero.
 ///
 /// With the page's y axis pointing down, [`Transform::rotation`] turns clockwise for positive angles, as DrawingML's `rot` does. A drawing object is rotated about its centre by moving the centre to the origin, rotating, and moving it back:
 ///

@@ -1,6 +1,6 @@
 //! Points, sizes, rectangles and insets in BLU.
 //!
-//! Coordinates follow the page: x grows to the right and y grows downward, as in OOXML. Like [`Blu`]'s operators, the methods here panic on overflow in builds with overflow checks and wrap otherwise; lengths a document can hold (at most about 757 km, the largest DrawingML coordinate) never come near that.
+//! Coordinates follow the page: x grows to the right and y grows downward, as in OOXML. Like [`Blu`]'s operators, the methods here panic on overflow in builds with overflow checks and wrap otherwise. Realistic layouts stay far from the limits, but the parsers in [`ooxml`](crate::ooxml) accept any length that fits in a [`Blu`] (the schema sets no upper limit for WordprocessingML's measurements in twips), so code that builds geometry from document values first brings them into the range Word itself accepts, or computes with [`Blu`]'s `checked_` methods. These types have no checked methods of their own yet.
 
 use crate::Blu;
 

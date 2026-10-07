@@ -6,7 +6,7 @@ use crate::Fixed;
 
 /// An angle in sixty-thousandths of a degree, the unit of DrawingML (`ST_Angle`): `Angle(60_000)` is one degree. Positive angles turn clockwise on the page, as in DrawingML, where the y axis points down.
 ///
-/// The operators (`+`, `-`, unary `-`) overflow like those of [`Blu`](crate::Blu); no angle a document can write comes near the limits.
+/// The operators (`+`, `-`, unary `-`) overflow like those of [`Blu`](crate::Blu). DrawingML's angles are 32-bit integers, far from the limits of an `i64`, but [`parse_angle`](crate::ooxml::parse_angle) accepts any value that fits in an `i64`, so check an angle from a document against its schema type's range before computing with it.
 ///
 /// [`Angle::sin`], [`Angle::cos`] and [`Angle::sin_cos`] replace the platform's floating-point `sin` and `cos`, which give different results on different platforms and are forbidden in bayan-core (ADR-0005 §4). They use integer arithmetic only, so they return the same bits everywhere, and each result is the exact sine or cosine rounded to the nearest multiple of 2⁻³². Special angles come out exact: the sine of 30° is exactly ½, and the sine and cosine of every multiple of 90° are exactly 0, 1 or −1.
 ///
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(-Angle::HALF_TURN, Angle(-10_800_000));
     }
 
-    /// Expected values from a 80-digit decimal computation in Python (Machin's formula for π, Taylor series), independent of this crate: the exact value times 2^32, rounded to the nearest integer.
+    /// Expected values from an 80-digit decimal computation in Python (Machin's formula for π, Taylor series), independent of this crate: the exact value times 2^32, rounded to the nearest integer.
     #[test]
     fn matches_high_precision_values() {
         let table = [

@@ -358,7 +358,7 @@ fn math_fingerprints(root: &Path) -> Result<(), String> {
             .args(vector)
             .args(["--locked", "--", "--show-output"]),
     )?;
-    process::run(cargo(root).args(wasm_test_args(root, &vector, &["--show-output"])?))
+    process::run(cargo(root).args(wasm_test_args(root, &vector, &[])?))
 }
 
 fn wasm32(root: &Path) -> Result<(), String> {
@@ -432,7 +432,7 @@ fn workspace_without_native_only() -> Vec<&'static str> {
     selection
 }
 
-/// The arguments after `cargo` that run the tests of `selection` (such as `--workspace`) in WebAssembly, with Node.js and the runner script as Cargo's runner for the target, followed by `harness` for the test harness itself.
+/// The arguments after `cargo` that run the tests of `selection` (such as `--workspace`) in WebAssembly, with Node.js and the runner script as Cargo's runner for the target, followed by `--no-capture` and `harness` for the test harness itself.
 ///
 /// The runner is passed as a TOML array through `--config`, not as an environment variable, because Cargo splits the variable's value at spaces and the repository's path may contain some.
 fn wasm_test_args(
@@ -455,10 +455,9 @@ fn wasm_test_args(
     args.extend(selection.iter().map(|&arg| arg.to_owned()));
     args.extend(["--locked", "--target", WASM_TEST_TARGET, "--config"].map(str::to_owned));
     args.push(runner);
-    if !harness.is_empty() {
-        args.push("--".to_owned());
-        args.extend(harness.iter().map(|&arg| arg.to_owned()));
-    }
+    // In WebAssembly a panic aborts the whole test program, before the test harness could print the output it captured, and with it the failure's message (or proptest's smallest failing input). So nothing is captured: everything is printed as it happens. The tests run one after the other there, so their output does not interleave.
+    args.extend(["--", "--no-capture"].map(str::to_owned));
+    args.extend(harness.iter().map(|&arg| arg.to_owned()));
     Ok(args)
 }
 
@@ -755,9 +754,9 @@ mod tests {
     fn runs_the_tests_in_webassembly_with_node_and_the_runner_script() {
         let root = Path::new("/repo");
         let args = wasm_test_args(root, &workspace_without_native_only(), &[]).unwrap();
-        let (config, before) = args.split_last().unwrap();
+        let config = args.iter().position(|arg| arg == "--config").unwrap();
         assert_eq!(
-            before,
+            args[..=config],
             [
                 "test",
                 "--workspace",
@@ -773,11 +772,14 @@ mod tests {
                 "--config",
             ]
         );
+        let runner = &args[config + 1];
         assert!(
-            config.starts_with(r#"target.wasm32-wasip1.runner = ["node", "--disable-warning=ExperimentalWarning", "/repo"#),
-            "{config}"
+            runner.starts_with(r#"target.wasm32-wasip1.runner = ["node", "--disable-warning=ExperimentalWarning", "/repo"#),
+            "{runner}"
         );
-        assert!(config.ends_with(r#"wasi-runner.mjs"]"#), "{config}");
+        assert!(runner.ends_with(r#"wasi-runner.mjs"]"#), "{runner}");
+        // Nothing is captured: in WebAssembly a failing test aborts the program before the harness could print what it captured.
+        assert_eq!(args[config + 2..], ["--", "--no-capture"]);
         // The runner script is the file in this repository.
         assert!(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -791,14 +793,17 @@ mod tests {
         let args = wasm_test_args(
             Path::new("/repo"),
             &["--package", "bayan-units", "--test", "determinism"],
-            &["--show-output"],
+            &["--exact", "a_test"],
         )
         .unwrap();
         assert_eq!(
             &args[..5],
             ["test", "--package", "bayan-units", "--test", "determinism"]
         );
-        assert_eq!(&args[args.len() - 2..], ["--", "--show-output"]);
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["--", "--no-capture", "--exact", "a_test"]
+        );
     }
 
     #[test]

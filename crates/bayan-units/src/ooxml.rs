@@ -379,7 +379,8 @@ mod tests {
         assert_eq!(parse_twips("720"), Ok(Blu(914_400)));
         assert_eq!(parse_twips("-720"), Ok(Blu(-914_400)));
         assert_eq!(parse_emus("914400"), Ok(Blu::INCH));
-        assert_eq!(parse_emus("27273042329600"), Ok(Blu(54_546_084_659_200))); // the largest ST_Coordinate
+        // 27,273,042,329,600 EMU is the magnitude of the smallest ST_Coordinate (about 757 km).
+        assert_eq!(parse_emus("27273042329600"), Ok(Blu(54_546_084_659_200)));
         assert_eq!(parse_half_points("22"), Ok(Blu(279_400))); // 11 pt
         assert_eq!(parse_eighth_points("4"), Ok(Blu(12_700))); // ½ pt
         assert_eq!(parse_twips("0"), Ok(Blu::ZERO));

@@ -19,13 +19,14 @@ fn rust_files(folder: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Whether `line` contains `f32` or `f64` as a word of its own.
+/// Whether `line` names `f32` or `f64`: as a word of its own, or as the type suffix of a number such as `0.5f64` or `1_f32`. A name that merely contains the letters, such as `to_f64_lossy` or `buf64`, does not count.
 fn names_a_float_type(line: &str) -> bool {
-    let part_of_a_word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let continues_a_name = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let ends_a_word = |c: Option<char>| c.is_some_and(char::is_alphabetic);
     ["f32", "f64"].iter().any(|name| {
         line.match_indices(name).any(|(start, _)| {
-            !part_of_a_word(line[..start].chars().next_back())
-                && !part_of_a_word(line[start + name.len()..].chars().next())
+            !ends_a_word(line[..start].chars().next_back())
+                && !continues_a_name(line[start + name.len()..].chars().next())
         })
     })
 }
@@ -35,8 +36,27 @@ fn recognizes_the_float_type_names_as_words() {
     assert!(names_a_float_type("pub fn to_f64_lossy(self) -> f64 {"));
     assert!(names_a_float_type("let x: f32 = 1.0;"));
     assert!(names_a_float_type("(f64)"));
+    // A literal with a type suffix makes a float without naming the type separately.
+    assert!(names_a_float_type("let x = 0.5f64;"));
+    assert!(names_a_float_type("let y = 1_f32;"));
     assert!(!names_a_float_type("let buf64 = 0; // a hex value 0xff64"));
     assert!(!names_a_float_type("fn to_f64_lossy(self)"));
+}
+
+#[test]
+fn the_lossy_module_holds_nothing_but_the_lossy_conversion() {
+    let lossy = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lossy.rs"))
+        .expect("readable src/lossy.rs");
+    let public: Vec<&str> = lossy
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("pub ") || line.starts_with("pub("))
+        .collect();
+    assert_eq!(
+        public,
+        ["pub fn to_f64_lossy(self, unit: LengthUnit) -> f64 {"],
+        "src/lossy.rs may define only Blu::to_f64_lossy (CORE-002, AC-3)"
+    );
 }
 
 #[test]

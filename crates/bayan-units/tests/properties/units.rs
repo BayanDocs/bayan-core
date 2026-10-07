@@ -36,7 +36,7 @@ fn roundings() -> impl Strategy<Value = Rounding> {
     proptest::sample::select(Rounding::ALL.to_vec())
 }
 
-/// The largest coordinate OOXML can write (ST_Coordinate: 27,273,042,329,600 EMU, about 757 km), in BLU. Every length a document holds is within ± this.
+/// The largest magnitude of a DrawingML coordinate (ST_Coordinate runs from −27,273,042,329,600 to 27,273,042,316,900 EMU, about 757 km), in BLU: a generous bound for realistic document lengths. The schema sets no upper limit for WordprocessingML's measurements in twips, and the parsers accept any length that fits; bringing such values into a realistic range is the document model's job.
 const LARGEST_COORDINATE: i64 = 27_273_042_329_600 * 2;
 
 /// Pairs of units where the first is a whole number of the second, with that number.

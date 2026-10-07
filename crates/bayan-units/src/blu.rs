@@ -15,7 +15,7 @@ use crate::{Dpi, LengthUnit, Rounding};
 ///
 /// # Overflow
 ///
-/// The operators (`+`, `-`, unary `-`, and `*` with an `i64`) behave exactly like the same operators on `i64`: when the result does not fit, they panic in builds with overflow checks (debug builds, by default) and wrap around otherwise. No realistic document comes near the limits, but values read from a file can be anything, so code that handles them uses the `checked_` or `saturating_` methods.
+/// The operators (`+`, `-`, unary `-`, and `*` with an `i64`) behave exactly like the same operators on `i64`: when the result does not fit, they panic in builds with overflow checks (debug builds, by default) and wrap around otherwise. Realistic documents stay far from the limits, but a value read from a file can be anything that fits (the schema sets no upper limit for WordprocessingML's measurements in twips), so code that handles such values uses the `checked_` or `saturating_` methods, or first brings them into the range Word itself accepts.
 ///
 /// There is deliberately no `/` operator: dividing a length almost never gives a whole number of BLU, and integer division would round toward zero without saying so. Use [`Blu::scale`] with an explicit [`Rounding`] instead, as in `length.scale(1, 2, Rounding::HalfEven)` for half a length (ADR-0005 §2).
 ///

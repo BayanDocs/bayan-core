@@ -2,7 +2,7 @@
 //!
 //! Each test computes a fixed set of results, folds their bits into a fingerprint, prints it and compares it with the fingerprint committed below. `cargo xtask verify` runs these tests on the host and, under Node.js, in WebAssembly, and its `determinism` step prints the fingerprints of both; CI runs the gate on Linux x86-64, Windows x86-64 and macOS arm64. Every run that passes produced exactly the committed bits.
 //!
-//! The fingerprints were recorded from this crate's own output; whether those results are *right* is what the other tests check, against independent high-precision references. A fingerprint that changes after a deliberate change to the math must be updated here, and the pull request must say so: layouts that use the math change with it (ADR-0004 §4, layout epochs).
+//! The fingerprints were recorded from this crate's own output; whether those results are *right* is what the other tests check, against independent high-precision references. A fingerprint that changes after a deliberate change to the math must be updated here, and the pull request must say so: layouts that use the math change with it (ADR-0004 §4, layout epochs). If the sine and cosine fingerprint changes, also run the exhaustive check that every sine and cosine is still correctly rounded, `cargo test -p bayan-units --release --test properties -- --ignored` (about 20 seconds), and report its result.
 
 use bayan_units::{Angle, Blu, Fixed, Point, Rounding, Transform, scale};
 

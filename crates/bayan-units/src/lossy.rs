@@ -7,7 +7,7 @@ use crate::{Blu, LengthUnit};
 impl Blu {
     /// This length as a floating-point number of `unit`, **for display and debugging only**, for example to show "1.25 in" on a ruler.
     ///
-    /// The result is lossy: most lengths are not a finite binary fraction of a unit (1 BLU is 1/25,400 of a point), and lengths beyond 2⁵³ BLU lose whole BLU. Never use it in layout, which must stay exact (ADR-0005 §3). The computation itself is deterministic: one conversion and one division, both exactly specified by IEEE 754.
+    /// The result is lossy: most lengths are not a finite binary fraction of a unit (1 BLU is 1/25,400 of a point), and lengths beyond 2⁵³ BLU lose whole BLU. Never use it in layout, which must stay exact (ADR-0005 §3). The computation itself is deterministic: two conversions to floating point and one division, all exactly specified by IEEE 754.
     ///
     /// ```
     /// use bayan_units::{Blu, LengthUnit};

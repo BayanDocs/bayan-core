@@ -16,7 +16,7 @@
 //! | dot at 300 / 600 / 1,200 dpi | 6,096 / 3,048 / 1,524 | dot at 144 dpi | 12,700 |
 //! | pica (12 points) | 304,800 | | |
 //!
-//! An `i64` of BLU reaches about ±128 million kilometres; the largest coordinate OOXML can write is about 757 km.
+//! An `i64` of BLU reaches about ±128 million kilometres. DrawingML limits its coordinates to about ±757 km, but the schema sets no upper limit for WordprocessingML's measurements in twips or for universal measures, so a hostile document can hold lengths near the limits of the type (see [Overflow](#overflow)).
 //!
 //! ## Rounding is always explicit
 //!
@@ -59,7 +59,7 @@
 //!
 //! ## Overflow
 //!
-//! Operators such as `+` behave like those of `i64`: they panic on overflow in builds with overflow checks (debug builds, by default) and wrap around otherwise. Values that come from a document can be anything, so code that handles them uses the `checked_` and `saturating_` methods, and the parsers in [`ooxml`] refuse values that do not fit. The methods that round return `None` when a result does not fit.
+//! Operators such as `+` behave like those of `i64`: they panic on overflow in builds with overflow checks (debug builds, by default) and wrap around otherwise. Values that come from a document can be anything that fits, so code that handles them uses the `checked_` and `saturating_` methods of [`Blu`], or first brings them into the range Word itself accepts; the geometry types compute with the operators and have no checked methods of their own yet. The parsers in [`ooxml`] refuse values that do not fit, and the methods that round return `None` when a result does not fit.
 //!
 //! ## Layer
 //!
