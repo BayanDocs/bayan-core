@@ -31,8 +31,9 @@ const USAGE: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  verify   Run the verification gate: formatting, lints, tests, WebAssembly build,
-           documentation, dependency policy, and the lint guardrails.
+  verify   Run the verification gate: formatting, lints, tests (on the host and in
+           WebAssembly), WebAssembly build, documentation, dependency policy, the lint
+           guardrails, and the determinism checks.
            Run it before every push; CI runs the same command.
   help     Show this message.";
 
