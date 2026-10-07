@@ -141,7 +141,8 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
     let err = |error: bayan_model::EditError| error.to_string();
     let started = Instant::now();
     let mut a = Document::load(bytes, 2, 2, &ImportLimits::LOCAL_SNAPSHOT).map_err(err)?;
-    metric("load_ms", millis(started.elapsed()), "ms");
+    let load_ms = started.elapsed();
+    metric("load_ms", millis(load_ms), "ms");
     let started = Instant::now();
     let raw = RawDocument::read(a.crdt());
     let raw_ms = started.elapsed();
@@ -151,6 +152,12 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
     metric("raw_read_ms", millis(raw_ms), "ms");
     metric("normalize_ms", millis(normalize_ms), "ms");
     metric("read_ms", millis(raw_ms + normalize_ms), "ms");
+    // Loro decodes a snapshot's containers when they are first read, so a document is ready to show only after the first read: this is the time the targets for loading apply to.
+    metric(
+        "load_and_read_ms",
+        millis(load_ms + raw_ms + normalize_ms),
+        "ms",
+    );
     drop(raw);
     metric("view_main_items", view.main().len(), "count");
     metric("view_violations", check_invariants(&view).len(), "count");
@@ -158,6 +165,8 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
     drop(view);
 
     let mut b = Document::load(bytes, 3, 3, &ImportLimits::LOCAL_SNAPSHOT).map_err(err)?;
+    // The second replica is shown once before it is edited, as an editor would, so that the edits are not charged with decoding the snapshot (already measured as read_ms).
+    drop(b.view());
     let script = edit_script(EDIT_SEED, edits);
     let mut local = std::time::Duration::ZERO;
     let mut per_edit_bytes = 0;
@@ -319,10 +328,13 @@ fn bench_subset(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(),
         &ImportLimits::LOCAL_SNAPSHOT,
     )
     .map_err(err)?;
-    metric("load_ms", millis(started.elapsed()), "ms");
+    let load_ms = started.elapsed();
+    metric("load_ms", millis(load_ms), "ms");
     let started = Instant::now();
     let (text, marks_read, blocks, entities) = read_subset(&a);
-    metric("read_ms", millis(started.elapsed()), "ms");
+    let read_ms = started.elapsed();
+    metric("read_ms", millis(read_ms), "ms");
+    metric("load_and_read_ms", millis(load_ms + read_ms), "ms");
     metric(
         "text_fnv1a64",
         format!("{:016x}", fnv1a64(text.as_bytes())),
@@ -340,6 +352,8 @@ fn bench_subset(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(),
         &ImportLimits::LOCAL_SNAPSHOT,
     )
     .map_err(err)?;
+    // Shown once before it is edited, as in bench_full.
+    drop(read_subset(&b));
     let mut undo = UndoManager::new(&b);
     let main = b.main_story();
     let paragraphs_registry = b.registry(registry::PARAGRAPHS);

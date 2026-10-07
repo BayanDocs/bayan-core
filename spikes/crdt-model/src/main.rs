@@ -6,7 +6,10 @@
 //! crdt-model generate --mode full|subset --out FILE [--small]
 //! crdt-model bench    --mode full|subset --snapshot FILE [--edits N]
 //! crdt-model converge [--runs N] [--operations N] [--threads N] [--seed N] [--check-every N]
-//! crdt-model fuzz     [--seconds N] [--threads N] [--seed N] [--out DIR]
+//! crdt-model fuzz      [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--out DIR]
+//! crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--out DIR]
+//! crdt-model replay    --input FILE [--seed N]
+//! crdt-model minimize  --input FILE [--seed N] [--isolated]
 //! ```
 //!
 //! `bench` also runs as WebAssembly: build with `--target wasm32-wasip1` and run under Node.js with `run-wasi.mjs` (the snapshot directory appears as `/data`).
@@ -30,7 +33,13 @@ use bench::Mode;
 const USAGE: &str = "usage: crdt-model generate --mode full|subset --out FILE [--small]
        crdt-model bench --mode full|subset --snapshot FILE [--edits N]
        crdt-model converge [--runs N] [--operations N] [--threads N] [--seed N] [--check-every N]
-       crdt-model fuzz [--seconds N] [--threads N] [--seed N] [--out DIR]";
+       crdt-model fuzz [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--out DIR]
+       crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--out DIR]
+       crdt-model replay --input FILE [--seed N]
+       crdt-model minimize --input FILE [--seed N] [--isolated]";
+
+/// The default seed of `fuzz`, which `minimize` needs to rebuild the same base documents.
+const FUZZ_SEED: u64 = 0xC0DE_0004_00F2_2000;
 
 /// `--name value` options.
 struct Options(BTreeMap<String, String>);
@@ -43,7 +52,7 @@ impl Options {
             let name = arg
                 .strip_prefix("--")
                 .ok_or_else(|| format!("unexpected argument `{arg}`"))?;
-            let value = if name == "small" {
+            let value = if matches!(name, "small" | "isolated") {
                 "true".to_owned()
             } else {
                 iter.next()
@@ -90,11 +99,11 @@ impl Options {
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
+fn run(args: &[String]) -> Result<ExitCode, String> {
     let (command, rest) = args.split_first().ok_or_else(|| USAGE.to_owned())?;
     let options = Options::parse(rest)?;
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    match command.as_str() {
+    let done = match command.as_str() {
         "generate" => {
             let shape = if options.text("small").is_some() {
                 crdt_workload::TEN_PAGES
@@ -124,13 +133,34 @@ fn run(args: &[String]) -> Result<(), String> {
         "fuzz" => fuzz::fuzz(
             options.number("seconds", 60)?,
             options.count("threads", threads)?,
-            options.number("seed", 0xC0DE_0004_00F2_2000)?,
+            options.number("seed", FUZZ_SEED)?,
+            options.text("small").is_some(),
+            options.number("stream", 0)?,
             &options
                 .text("out")
                 .map_or_else(fuzz::default_output, PathBuf::from),
         ),
+        "supervise" => fuzz::supervise(
+            options.number("seconds", 60)?,
+            options.count("workers", threads)?,
+            options.number("seed", FUZZ_SEED)?,
+            options.text("small").is_some(),
+            &options
+                .text("out")
+                .map_or_else(fuzz::default_output, PathBuf::from),
+        ),
+        "minimize" => fuzz::minimize(
+            &options.path("input")?,
+            options.number("seed", FUZZ_SEED)?,
+            options.text("isolated").is_some(),
+        ),
+        "replay" => {
+            return fuzz::replay(&options.path("input")?, options.number("seed", FUZZ_SEED)?)
+                .map(ExitCode::from);
+        }
         _ => Err(USAGE.to_owned()),
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }
 
 #[expect(
@@ -140,7 +170,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(problem) => {
             eprintln!("crdt-model: {problem}");
             ExitCode::FAILURE
