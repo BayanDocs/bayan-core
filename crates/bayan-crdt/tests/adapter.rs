@@ -489,3 +489,49 @@ fn undoing_a_mark_leaves_it_on_text_inserted_inside_concurrently() {
         .collect();
     assert_eq!(bold, [("abc", false), ("XY", true), ("def", false)]);
 }
+
+/// Found by the CORE-004 fuzzer and minimized with `crdt-model minimize`: a valid update for the document in the base snapshot, and the same update with one byte changed (and its checksum recomputed, which anyone can do: it is not a signature). Loro 1.16.2 panics while importing the crafted one.
+const PANIC_BASE: &[u8] = include_bytes!("fixtures/loro-panic-base.bin");
+const PANIC_UPDATE: &[u8] = include_bytes!("fixtures/loro-panic-update.bin");
+const PANIC_CRAFTED: &[u8] = include_bytes!("fixtures/loro-panic-crafted.bin");
+
+#[test]
+fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
+    let load = || {
+        Doc::load(
+            PANIC_BASE,
+            PeerId(9),
+            &FAMILIES,
+            &ImportLimits::LOCAL_SNAPSHOT,
+        )
+        .expect("the base document")
+    };
+    let valid = load();
+    valid
+        .import(PANIC_UPDATE, &ImportLimits::UPDATE)
+        .expect("the valid update");
+    let changed: Vec<usize> = (0..PANIC_UPDATE.len())
+        .filter(|at| !(16..20).contains(at) && PANIC_UPDATE.get(*at) != PANIC_CRAFTED.get(*at))
+        .collect();
+    assert_eq!(
+        (PANIC_CRAFTED.len(), changed),
+        (PANIC_UPDATE.len(), vec![74])
+    );
+
+    let doc = load();
+    let undo = UndoManager::new(&doc);
+    // When Loro stops panicking on this blob, replace the fixtures with a case that still panics (the fuzzer finds them), so that this test keeps exercising the containment.
+    assert_eq!(
+        doc.import(PANIC_CRAFTED, &ImportLimits::UPDATE),
+        Err(ImportError::Panicked)
+    );
+    assert!(doc.is_poisoned());
+    assert_eq!(
+        doc.import(PANIC_UPDATE, &ImportLimits::UPDATE),
+        Err(ImportError::Poisoned)
+    );
+    assert_eq!(doc.export_snapshot(), Err(CrdtError::Poisoned));
+    // Freeing the document or its undo manager after such a panic can panic again, which during unwinding aborts the process; both are leaked instead, so dropping them returns normally.
+    drop(undo);
+    drop(doc);
+}

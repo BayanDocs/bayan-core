@@ -58,7 +58,7 @@ pub enum CrdtError {
     InvalidFamily(String),
     /// An import was refused.
     Import(ImportError),
-    /// The document was poisoned by a hostile import (see [`ImportError::ValueTooDeep`]).
+    /// The document was poisoned by a hostile import (see [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`]).
     Poisoned,
     /// The CRDT library refused the operation, with its explanation.
     Library(String),

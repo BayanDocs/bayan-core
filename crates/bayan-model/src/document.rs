@@ -986,7 +986,10 @@ impl Document {
     }
 
     fn check_attached(&self) -> Result<(), EditError> {
-        if self.crdt.is_detached() {
+        if self.crdt.is_poisoned() {
+            // A hostile import poisoned the replica; it must be discarded (see `ImportError::Panicked`).
+            Err(EditError::Crdt(CrdtError::Poisoned))
+        } else if self.crdt.is_detached() {
             Err(EditError::Detached)
         } else {
             Ok(())

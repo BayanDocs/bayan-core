@@ -1,5 +1,7 @@
 //! The replicated document.
 
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use loro::{ExpandType, ExportMode, Frontiers, LoroDoc, StyleConfig, StyleConfigMap};
@@ -97,7 +99,8 @@ pub struct DocStats {
 #[derive(Debug)]
 pub struct Doc {
     loro: LoroDoc,
-    poisoned: AtomicBool,
+    /// Shared with the undo managers of this document, which must not be freed either once it is poisoned.
+    poisoned: Arc<AtomicBool>,
 }
 
 impl Doc {
@@ -112,7 +115,7 @@ impl Doc {
         configure(&loro, families)?;
         Ok(Self {
             loro,
-            poisoned: AtomicBool::new(false),
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -229,11 +232,24 @@ impl Doc {
     ///
     /// # Errors
     ///
-    /// [`ImportError`] when the blob is refused; with [`ImportError::ValueTooDeep`] the document is poisoned and must be discarded.
+    /// [`ImportError`] when the blob is refused; with [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`] the document is poisoned and must be discarded.
     pub fn import(&self, bytes: &[u8], limits: &ImportLimits) -> Result<ImportReport, ImportError> {
         if self.is_poisoned() {
             return Err(ImportError::Poisoned);
         }
+        // Loro 1.16.2 panics on many crafted blobs whose checksum is correct (CORE-004 report). Such a panic is contained here, where the document is known: its state may be half updated, so it is poisoned, which also means it is never freed, because freeing it can panic again. Where panics abort instead of unwinding (WebAssembly builds), the host must restart the engine and reload the last good state.
+        std::panic::catch_unwind(AssertUnwindSafe(|| self.import_unguarded(bytes, limits)))
+            .unwrap_or_else(|_| {
+                self.poisoned.store(true, Ordering::Relaxed);
+                Err(ImportError::Panicked)
+            })
+    }
+
+    fn import_unguarded(
+        &self,
+        bytes: &[u8],
+        limits: &ImportLimits,
+    ) -> Result<ImportReport, ImportError> {
         let mut report = check_header(bytes, limits)?;
         let status = self
             .loro
@@ -267,7 +283,7 @@ impl Doc {
         self.loro.is_detached()
     }
 
-    /// Whether an import found a value too deep to free safely (see [`ImportError::ValueTooDeep`]).
+    /// Whether a hostile import poisoned the document (see [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`]).
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Relaxed)
@@ -286,6 +302,10 @@ impl Doc {
         &self.loro
     }
 
+    pub(crate) fn poison_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.poisoned)
+    }
+
     fn check_poisoned(&self) -> Result<(), CrdtError> {
         if self.is_poisoned() {
             Err(CrdtError::Poisoned)
@@ -298,7 +318,7 @@ impl Doc {
 impl Drop for Doc {
     fn drop(&mut self) {
         if self.is_poisoned() {
-            // A poisoned document holds a value whose release would recurse once per nesting level and could exhaust the stack. Keeping one reference forever means its memory is never released, which is the lesser harm; it happens only after hostile input.
+            // A poisoned document holds a value whose release would recurse once per nesting level and could exhaust the stack, or a state that a panic left half updated, whose release can panic again (and a panic while another unwinds aborts the process). Keeping one reference forever means its memory is never released, which is the lesser harm; it happens only after hostile input.
             std::mem::forget(self.loro.clone());
         }
     }
