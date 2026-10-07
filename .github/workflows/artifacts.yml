@@ -78,6 +78,10 @@ jobs:
           restore-keys: |
             artifacts-sdk-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-
 
+      # Before the MSVC developer environment: without it, rustc finds Microsoft's linker by itself, as in verify.yml.
+      - name: Build the C SDK
+        run: cargo xtask sdk --target "$TARGET"
+
       - name: Set up the MSVC developer environment (x64), for the C driver
         if: runner.os == 'Windows'
         shell: pwsh
@@ -91,11 +95,13 @@ jobs:
             if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
           }
 
-      - name: Build the C SDK
-        run: cargo xtask sdk --target "$TARGET"
-
       - name: Run the C driver, linked statically and dynamically
         run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git Bash puts its own `link` (a coreutils program) before Microsoft's linker on PATH, and inside the developer
+            # environment rustc takes the first link.exe on PATH. The compiler's folder holds Microsoft's linker, so put it first.
+            PATH="$(dirname "$(command -v cl)"):$PATH"
+          fi
           cargo xtask c-driver | tee "$RUNNER_TEMP/c-driver.txt"
           mkdir -p "$RUNNER_TEMP/tile"
           tiles=$(grep -o 'tile fnv1a64:[0-9a-f]\{16\}' "$RUNNER_TEMP/c-driver.txt" | sort -u)

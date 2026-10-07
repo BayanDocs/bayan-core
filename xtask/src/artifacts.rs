@@ -212,7 +212,8 @@ fn build_sdk(args: &[&str]) -> Result<(), String> {
     // The static library, and the system libraries that a program linking it needs, which rustc names on request.
     let mut command = cargo(&root);
     command.args(library_build_args("bayan-ffi", &target, "staticlib"));
-    command.args(["--", "--print", "native-static-libs"]);
+    // Plain text, because the note is read from Cargo's output, which CI colours (CARGO_TERM_COLOR=always).
+    command.args(["--color", "never", "--", "--print", "native-static-libs"]);
     // Cargo replays the note from its cache when the library is already built.
     let (_, messages) = run_and_capture_both(&mut command)?;
     let native_libs = native_static_libs(&messages).ok_or_else(|| {
@@ -291,11 +292,29 @@ fn library_build_args(package: &str, target: &str, crate_type: &str) -> Vec<Stri
 
 /// Reads the note `native-static-libs: …` that rustc prints for a static library.
 fn native_static_libs(output: &str) -> Option<String> {
-    output
+    without_colours(output)
         .lines()
         .find_map(|line| line.split_once("native-static-libs:"))
         .map(|(_, libs)| libs.trim().to_owned())
         .filter(|libs| !libs.is_empty())
+}
+
+/// Removes the escape sequences that colour terminal output (`ESC [ … letter`), in case a coloured note slips through.
+fn without_colours(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
 }
 
 fn sdk_readme(version: &str, target: &str, family: Family, native_libs: &str) -> String {
@@ -423,12 +442,15 @@ fn run_c_driver(args: &[&str]) -> Result<(), String> {
         },
         PathBuf::from,
     );
-    let sdk = std::fs::canonicalize(&sdk).map_err(|error| {
-        format!(
-            "no C SDK at {}: {error}. Build it first with `cargo xtask sdk`.",
+    // Absolute, but not canonicalized: on Windows that would give a `\\?\` path, which the MSVC tools do not all accept.
+    let sdk = std::path::absolute(&sdk)
+        .map_err(|error| format!("no C SDK at {}: {error}", sdk.display()))?;
+    if !sdk.join("include").join("bayan_ffi.h").is_file() {
+        return Err(format!(
+            "no C SDK at {}. Build it first with `cargo xtask sdk`.",
             sdk.display()
-        )
-    })?;
+        ));
+    }
     let source = root
         .join("crates")
         .join("bayan-ffi")
@@ -831,6 +853,12 @@ mod tests {
             Some("-lgcc_s -lutil -lc")
         );
         assert_eq!(native_static_libs("note: native-static-libs: \n"), None);
+        // As Cargo prints it when it colours its output.
+        let coloured = "\u{1b}[0m\u{1b}[1m\u{1b}[92mnote\u{1b}[0m: native-static-libs: -lSystem -lc -lm\u{1b}[0m\n";
+        assert_eq!(
+            native_static_libs(coloured).as_deref(),
+            Some("-lSystem -lc -lm")
+        );
         assert_eq!(native_static_libs("Finished"), None);
     }
 
