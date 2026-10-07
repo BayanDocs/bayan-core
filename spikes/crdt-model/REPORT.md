@@ -6,7 +6,7 @@
 
 ## 1. Summary and recommendation
 
-**The model shape (ADR-0007) works.** Stories of atoms, with paragraph ends, field delimiters, anchors and table blocks as characters, merge correctly under heavy concurrent editing: in the full randomized run of the brief (1,000 runs of 10,000 operations on three replicas, with partitions, out-of-order delivery, undo and redo) every run so far ended with identical views satisfying I1–I7 (the run is in progress; §3). Normalization is deterministic and idempotent and always yields a valid view (I1–I7) in 100,000 randomized broken documents. Nothing found suggests that the model shape is wrong. The spike adds two normalization rules the spec lacks (N8, N9), clarifies two (N3, N7), and settles the mapping details (§9), which the docs pull request proposes.
+**The model shape (ADR-0007) works.** Stories of atoms, with paragraph ends, field delimiters, anchors and table blocks as characters, merge correctly under heavy concurrent editing: in the full randomized run of the brief (1,000 runs of 10,000 operations on three replicas, with partitions, out-of-order delivery, undo and redo) every run ended with identical views satisfying I1–I7, although normalization had to repair about 270,000 inconsistencies that concurrent edits left in the final views. Normalization is deterministic and idempotent and always yields a valid view (I1–I7) in 100,000 randomized broken documents. Nothing found suggests that the model shape is wrong. The spike adds two normalization rules the spec lacks (N8, N9), clarifies two (N3, N7), and settles the mapping details (§9), which the docs pull request proposes.
 
 **Loro (ADR-0008) is the right library, but not yet a safe one.** I recommend confirming ADR-0008 with three conditions, because the alternative is worse on almost every measure (§5.3: compared with Loro carrying the small fix below, Automerge 3 loads and reads 6 times slower, needs 5 times the memory and merges an update 50 times slower; only its snapshots are smaller):
 
@@ -29,13 +29,13 @@
 
 **Operations** (all from the brief, plus moving a range, inserting objects and bookmarks): insert text, delete a range, format and clear formatting, split and merge paragraphs, set paragraph properties, insert a table, insert, delete and move rows, insert and delete columns, add a comment over a range, insert a field, insert an object, insert a bookmark, move a range (cut and paste). Each operation is one transaction: one commit, one undo step, one change that other replicas receive. Operations refuse what Word refuses (typing after the final paragraph end, a table in the middle of a paragraph, a table inside itself).
 
-**Tests:** 16 adapter tests, 26 model tests (operations, undo, mark expansion), 4 normalization property tests, the convergence test (6 runs of 400 operations in CI), and unit tests; `cargo xtask verify` runs them all.
+**Tests:** 16 adapter tests, 26 model tests (operations, undo, mark expansion), 4 normalization tests (one of them the property test over random broken documents), the convergence test (6 runs of 400 operations in CI), and unit tests; `cargo xtask verify` runs them all.
 
 ## 3. Results against the acceptance criteria
 
 | | Criterion | Result |
 |---|---|---|
-| AC-1 | 100% of randomized runs converge to identical, invariant-satisfying views | **In progress.** The CI-sized test passes (6 runs of 400 operations). The full run (1,000 runs of 10,000 operations) has completed runs 0 to 274, all converged (`results/converge-1000x10000.log`), and continues on four threads; this line is updated when it finishes. |
+| AC-1 | 100% of randomized runs converge to identical, invariant-satisfying views | **Met.** 1,000 of 1,000 runs of 10,000 operations on three replicas converged to identical views satisfying I1–I7, with normalization deterministic and idempotent on every replica (`results/converge-1000x10000.log`): 8.9 million operations applied (1.1 million refused by the model's checks, as designed: for example typing after the final paragraph end, or editing a row that another replica had deleted), 1.7 million messages delivered in random order with partitions, 441,087 undo and redo steps. The final views needed 270,000 repairs (N1 3, N2 142,484, N3 71,454, N4 12,332, N6 445, N7 43,481), so the runs did produce the inconsistencies normalization exists for. 16 CPU-hours; each run takes about 48 s. The CI-sized test (6 runs of 400 operations) runs in the gate. |
 | AC-2 | Normalization deterministic and idempotent | **Met.** Property test over randomly broken raw documents (every inconsistency concurrent editing can create, and more): 1,500 cases in CI and 100,000 in a release build (18 s, `results/normalization-100000.txt`), each case also normalized again from its own view's raw form and from the same content split into runs differently. The convergence runs check the same properties on every final view and every 1,000 operations. |
 | AC-3 | Undo and mark-expansion tests pass | **Met**, with two Loro limitations pinned by tests (§7, F6 and F7) and worked around where it matters. |
 | AC-4 | Performance against the targets, natively and in WebAssembly, every miss explained | **Reported** (§5). Misses: load and read (Loro bug F1; with the fix only native misses, by 1.8×), and the first 1,000-operation update after opening (62 ms native, 99 ms WebAssembly, target 50 ms), a one-time cost: later updates take 9 ms and 13 ms. Met: WebAssembly memory (141 MB after loading and reading, target 300 MB). |
@@ -240,12 +240,16 @@ target/release/crdt-model bench --mode subset --snapshot /tmp/subset-500.bin
 cargo build --release -p crdt-model --target wasm32-wasip1
 node spikes/crdt-model/run-wasi.mjs target/wasm32-wasip1/release/crdt-model.wasm /tmp bench --mode full --snapshot /data/full-500.bin
 
-# The full convergence run of the brief (about 6 hours on 3 cores of the machine above)
-target/release/crdt-model converge --runs 1000 --operations 10000 --threads 3
+# The full convergence run of the brief (about 4 to 5 hours on the 4 cores of the machine above).
+# Runs are numbered from the seed, so a run can be split: this report's ran 0-274, then 275-999.
+target/release/crdt-model converge --runs 1000 --operations 10000 --threads 4
+target/release/crdt-model converge --runs 725 --operations 10000 --threads 4 --seed 0xc0de000400010113
 
-# Fuzzing: 75 minutes in child processes that are restarted after an abort; then minimize a finding
+# Fuzzing: 75 minutes in child processes that are restarted after an abort; --small fuzzes tiny documents
 target/release/crdt-model supervise --seconds 4500 --workers 1 --out /tmp/fuzz
-target/release/crdt-model minimize --input /tmp/fuzz/<finding> [--isolated]
+# Replay or minimize a finding (its file name says which base document it belongs to); --isolated for aborts
+target/release/crdt-model replay --input /tmp/fuzz/<round>/<finding>
+target/release/crdt-model minimize --input /tmp/fuzz/<round>/<finding> [--isolated]
 
 # The Automerge comparison
 cargo build --release -p crdt-model-automerge
