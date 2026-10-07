@@ -141,14 +141,11 @@ impl Document {
     ///
     /// As for [`Document::new`].
     pub fn replica(peer: u64, seed: u64) -> Result<Self, EditError> {
-        let crdt = Doc::new(PeerId(peer), &marks::FAMILIES)?;
-        let undo = UndoManager::new(&crdt);
-        Ok(Self {
-            crdt,
-            ids: IdGenerator::new(seed ^ peer.rotate_left(32) ^ 0xD0C0_0004_D0C0_0004),
-            undo,
-            clean: BTreeSet::new(),
-        })
+        Ok(Self::around(
+            Doc::new(PeerId(peer), &marks::FAMILIES)?,
+            peer,
+            seed,
+        ))
     }
 
     /// A replica loaded from a snapshot or update blob, within `limits`.
@@ -162,10 +159,26 @@ impl Document {
         seed: u64,
         limits: &ImportLimits,
     ) -> Result<Self, EditError> {
-        let mut document = Self::replica(peer, seed)?;
-        document.import(bytes, limits)?;
-        document.undo = UndoManager::new(&document.crdt);
-        Ok(document)
+        // The blob is imported before the undo manager subscribes to the replica. Loro decodes the containers of a snapshot only when they are first read, but a subscriber present during the import makes it compute the whole document as one change event, which takes seconds for a 500-page document (CORE-004 report).
+        let crdt =
+            Doc::load(bytes, PeerId(peer), &marks::FAMILIES, limits).map_err(
+                |error| match error {
+                    CrdtError::Import(error) => EditError::Import(error),
+                    other => EditError::Crdt(other),
+                },
+            )?;
+        Ok(Self::around(crdt, peer, seed))
+    }
+
+    /// A document around a replica, with an empty undo history.
+    fn around(crdt: Doc, peer: u64, seed: u64) -> Self {
+        let undo = UndoManager::new(&crdt);
+        Self {
+            crdt,
+            ids: IdGenerator::new(seed ^ peer.rotate_left(32) ^ 0xD0C0_0004_D0C0_0004),
+            undo,
+            clean: BTreeSet::new(),
+        }
     }
 
     /// The underlying replica.
