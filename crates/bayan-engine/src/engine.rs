@@ -46,7 +46,7 @@ pub enum TileError {
     NotFound,
     /// The engine failed, panicked or is stopping.
     Internal,
-    /// The call came from inside the engine's callback, where waiting for the engine thread would wait for itself (spec §8).
+    /// The call came from inside any engine's callback, where waiting could deadlock: on the engine's own thread it would wait for itself, and two engines' callbacks could wait for each other (spec §8).
     WrongThread,
 }
 

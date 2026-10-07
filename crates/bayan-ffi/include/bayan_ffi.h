@@ -77,7 +77,7 @@ typedef uint64_t BayanBlobId;
 #define BAYAN_STATUS_INTERNAL_ERROR 4
 
 /*
- Called from inside the engine's callback, where the function would wait for the engine thread it runs on (spec §8).
+ Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec §8).
  */
 #define BAYAN_STATUS_WRONG_THREAD 5
 

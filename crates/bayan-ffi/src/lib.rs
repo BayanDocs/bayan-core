@@ -71,7 +71,7 @@ pub const BAYAN_STATUS_NOT_FOUND: BayanStatus = 2;
 pub const BAYAN_STATUS_BUFFER_TOO_SMALL: BayanStatus = 3;
 /// The engine failed or is stopping; it also reports an engine.error message when it can.
 pub const BAYAN_STATUS_INTERNAL_ERROR: BayanStatus = 4;
-/// Called from inside the engine's callback, where the function would wait for the engine thread it runs on (spec §8).
+/// Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec §8).
 pub const BAYAN_STATUS_WRONG_THREAD: BayanStatus = 5;
 
 /// Receives one message from the engine (a reply or an event, as UTF-8 JSON of `json_len` bytes), on the engine thread. `json` is valid only during the call.
