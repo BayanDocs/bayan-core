@@ -18,8 +18,18 @@ repository = "https://github.com/BayanDocs/bayan-core"
 # Nothing is published to crates.io until the release work packages set up trusted publishing (ADR-0017, ADR-0026).
 publish = false
 
-# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017). There are none yet.
+# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017). Our own crates depend on each other by path, in their own manifests.
 [workspace.dependencies]
+# Rust types to and from JSON: the engine protocol's messages are serde types (ADR-0012 §1). Published 2026-07-18; MIT OR Apache-2.0.
+serde = { version = "=1.0.229", features = ["derive"] }
+# The JSON encoding of the engine protocol (ADR-0012 §1). `float_roundtrip` parses numbers exactly as JavaScript and Qt do, so a zoom factor means the same on both sides. Published 2026-07-20; MIT OR Apache-2.0.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+# Generates the protocol's JSON Schema from the same Rust types (ADR-0012 §1, CORE-007). Published 2026-07-27; MIT.
+schemars = "=1.2.2"
+# The WebAssembly binding of the engine for the web shell (ADR-0012 §4). Must equal the wasm-bindgen CLI pinned in scripts/dev-setup.sh. Published 2026-09-25; MIT OR Apache-2.0.
+wasm-bindgen = "=0.2.129"
+# Generates the C header of bayan-ffi (ADR-0012 §3); a test dependency only, which checks that the committed header is current. Without default features, so without its command-line parser. Published 2026-06-09; MPL-2.0.
+cbindgen = { version = "=0.29.4", default-features = false }
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.
