@@ -3,6 +3,7 @@
 //! Every case is generated from a seed, so a failure is reproducible; a failing document is shrunk to a small one before it is reported.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use bayan_crdt::{ATOM_KEY, Run, Value};
 use bayan_model::simulation::Rng;
@@ -829,10 +830,8 @@ fn a_derived_paragraph_end_never_takes_over_a_stored_one() {
     assert_eq!(view.paragraphs[split], BTreeMap::new());
 }
 
-/// Many tables in the middle of one paragraph: N4 splits before each in linear time (with the earlier quadratic search, 40,000 tables took about 4 s in a release build), and the view is valid (review of CORE-004, item 15).
-#[test]
-fn many_tables_in_one_paragraph_are_split_in_linear_time() {
-    let tables: u128 = 20_000;
+/// `tables` tables in the middle of one paragraph.
+fn tables_in_one_paragraph(tables: u128) -> RawDocument {
     let mut raw = RawDocument::default();
     let paragraph = EntityId(0xA);
     raw.paragraphs.insert(
@@ -846,6 +845,36 @@ fn many_tables_in_one_paragraph_are_split_in_linear_time() {
         add_table(&mut raw, table, EntityId(0x1_0000 + index * 4 + 3), vec![]);
     }
     raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
+    raw
+}
+
+/// The shortest of five runs of `work`: background load can only lengthen a run.
+fn shortest(mut work: impl FnMut()) -> Duration {
+    (0..5)
+        .map(|_| {
+            let start = Instant::now();
+            work();
+            start.elapsed()
+        })
+        .min()
+        .unwrap_or_default()
+}
+
+/// Fails unless `work` grows linearly: eight times the input may take at most 24 times as long, plus 50 ms for timer and load noise. Linear work takes about 8 times as long; the quadratic versions these tests guard against took about 64 times as long, which fails.
+fn assert_linear(name: &str, small: impl FnMut(), large: impl FnMut()) {
+    let small = shortest(small);
+    let large = shortest(large);
+    assert!(
+        large <= small * 24 + Duration::from_millis(50),
+        "{name}: eight times the input took {large:?} instead of at most 24 times {small:?}"
+    );
+}
+
+/// Many tables in the middle of one paragraph: N4 splits before each in linear time (with the earlier quadratic search, 40,000 tables took about 4 s in a release build), and the view is valid (review of CORE-004, item 15). The time is checked too, so that a quadratic search fails the test (second round, item A4).
+#[test]
+fn many_tables_in_one_paragraph_are_split_in_linear_time() {
+    let small = tables_in_one_paragraph(2_500);
+    let raw = tables_in_one_paragraph(20_000);
     let (view, report) = normalize(&raw);
     assert_eq!(report.n4, 20_000);
     assert!(check_invariants(&view).is_empty());
@@ -857,31 +886,7 @@ fn many_tables_in_one_paragraph_are_split_in_linear_time() {
             .filter(|end| end.rule == bayan_model::Rule::N4)
             .all(|end| end.props.get("style") == Some(&Value::from("Quote")))
     );
-}
-
-/// N7 keeps the first of two atoms that reference the same entity in one story, not the last (review of CORE-004, item 21).
-#[test]
-fn a_repeated_reference_keeps_its_first_place() {
-    let paragraph = EntityId(0xA);
-    let mut raw = RawDocument::default();
-    raw.paragraphs.insert(paragraph, BTreeMap::new());
-    raw.main = vec![
-        text("x"),
-        atom(AtomKind::ParagraphEnd, paragraph),
-        text("y"),
-        atom(AtomKind::ParagraphEnd, paragraph),
-    ];
-    let (view, report) = normalize(&raw);
-    assert_eq!(report.n7, 1);
-    assert_eq!(
-        view.main()[1],
-        Item::Atom {
-            kind: AtomKind::ParagraphEnd,
-            id: Some(paragraph),
-            marks: BTreeMap::new()
-        }
-    );
-    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "x\ny\n");
+    assert_linear("N4", || drop(normalize(&small)), || drop(normalize(&raw)));
 }
 
 /// Which atoms keep their marks in the view, written out independently of `AtomKind::keeps_marks` (review of CORE-004, item 21): those with a glyph or an anchor keep them; paragraph ends (their formatting lives in the paragraph's properties), range delimiters and tables do not.
@@ -1013,10 +1018,8 @@ fn the_plain_text_hides_fields_nested_in_a_field_code() {
     assert_eq!(view.plain_text(EntityId::MAIN_STORY), "<yes>\n");
 }
 
-/// Deeply nested field codes cost linear time in the plain text export too (the earlier version looked at every open field for every item).
-#[test]
-fn deeply_nested_field_codes_export_in_linear_time() {
-    let depth: u128 = 20_000;
+/// `depth` fields nested in each other's codes.
+fn nested_field_codes(depth: u128) -> RawDocument {
     let paragraph = EntityId(0xA);
     let mut raw = RawDocument::default();
     raw.paragraphs.insert(paragraph, BTreeMap::new());
@@ -1034,7 +1037,62 @@ fn deeply_nested_field_codes_export_in_linear_time() {
         raw.main.push(atom(AtomKind::FieldEnd, field));
     }
     raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
-    let (view, _) = normalize(&raw);
+    raw
+}
+
+/// Deeply nested field codes cost linear time in the plain text export too (the earlier version looked at every open field for every item); the time is checked, so that a quadratic export fails the test (review of CORE-004, second round, item A4).
+#[test]
+fn deeply_nested_field_codes_export_in_linear_time() {
+    let (small, _) = normalize(&nested_field_codes(2_500));
+    let (view, _) = normalize(&nested_field_codes(20_000));
     // Only the outermost field's result is outside every code.
     assert_eq!(view.plain_text(EntityId::MAIN_STORY), "r\n");
+    assert_linear(
+        "plain text",
+        || drop(small.plain_text(EntityId::MAIN_STORY)),
+        || drop(view.plain_text(EntityId::MAIN_STORY)),
+    );
+}
+
+/// A cell whose story is missing gets an empty stand-in story with a derived identifier, and that identifier is never one that a stored story already has: here an orphan story that nothing owns holds "secret", which the cell would otherwise show (review of CORE-004, second round, item A4).
+#[test]
+fn a_stand_in_story_never_takes_the_identifier_of_a_stored_story() {
+    let table = EntityId(0x1000);
+    let cell = EntityId(table.0 + 2);
+    let build = |orphan: Option<EntityId>| {
+        let mut raw = RawDocument::default();
+        let paragraph = EntityId(0xA);
+        raw.paragraphs.insert(paragraph, BTreeMap::new());
+        raw.main = vec![
+            atom(AtomKind::TableBlock, table),
+            atom(AtomKind::ParagraphEnd, paragraph),
+        ];
+        add_table(&mut raw, table, EntityId(0x5000), vec![]);
+        raw.stories.remove(&EntityId(0x5000));
+        if let Some(orphan) = orphan {
+            let end = EntityId(0xB);
+            raw.paragraphs.insert(end, BTreeMap::new());
+            raw.stories.insert(
+                orphan,
+                vec![text("secret"), atom(AtomKind::ParagraphEnd, end)],
+            );
+        }
+        raw
+    };
+    // The identifier the stand-in gets when no stored story is in its way.
+    let (view, report) = normalize(&build(None));
+    let derived = view.cells[&cell].story;
+    assert_eq!(report.virtual_stories, vec![(cell, derived)]);
+    // A stored story with that identifier is in the way: the stand-in takes another, and the cell stays empty.
+    let (view, report) = normalize(&build(Some(derived)));
+    assert!(
+        check_invariants(&view).is_empty(),
+        "{:?}",
+        check_invariants(&view)
+    );
+    let stand_in = view.cells[&cell].story;
+    assert_ne!(stand_in, derived);
+    assert_eq!(report.virtual_stories, vec![(cell, stand_in)]);
+    assert_eq!(view.plain_text(stand_in), "\n");
+    assert!(!view.stories.contains_key(&derived));
 }

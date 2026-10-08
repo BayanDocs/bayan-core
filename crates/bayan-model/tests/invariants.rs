@@ -462,3 +462,60 @@ fn form_a_comment_referenced_only_from_its_own_story() {
     );
     assert_only(&view, "form", "cannot be reached from the main story");
 }
+
+// The checks below had no negative test, so deleting any of them left every suite green (review of CORE-004, second round, item A4).
+
+#[test]
+fn i6_a_table_without_rows() {
+    let mut view = valid();
+    view.tables.get_mut(&TABLE).expect("the table").rows.clear();
+    view.rows.remove(&ROW);
+    view.cells.remove(&CELL);
+    view.stories.remove(&CELL_STORY);
+    view.paragraphs.remove(&PARAGRAPHS[2]);
+    assert_only(&view, "I6", "has no rows");
+}
+
+#[test]
+fn i6_a_cell_without_its_story() {
+    let mut view = valid();
+    view.cells.get_mut(&CELL).expect("the cell").story = EntityId(0x999);
+    view.stories.remove(&CELL_STORY);
+    view.paragraphs.remove(&PARAGRAPHS[2]);
+    // The cell has no story (I6), and the story it names is owned but missing (form).
+    let (invariants, details) = broken(&view);
+    assert_eq!(invariants, ["I6", "form"], "{details}");
+    assert!(details.contains("has no story"), "{details}");
+    assert!(details.contains("is owned but missing"), "{details}");
+}
+
+#[test]
+fn form_a_comment_whose_story_is_missing() {
+    let mut view = valid();
+    view.stories.remove(&COMMENT_STORY);
+    view.paragraphs.remove(&PARAGRAPHS[3]);
+    assert_only(&view, "form", "is owned but missing");
+}
+
+#[test]
+fn i3_a_range_start_without_its_end() {
+    let mut view = valid();
+    let end = position(&view, AtomKind::RangeEnd);
+    main_items(&mut view).remove(end);
+    assert_only(&view, "I3", "not referenced exactly once as RangeEnd");
+}
+
+#[test]
+fn i5_an_atom_with_the_wrong_kind_of_reference() {
+    let mut view = valid();
+    // A tab references no entity; this one names one.
+    main_items(&mut view).insert(
+        1,
+        Item::Atom {
+            kind: AtomKind::Tab,
+            id: Some(EntityId(0x55)),
+            marks: BTreeMap::new(),
+        },
+    );
+    assert_only(&view, "I5", "wrong kind of reference");
+}

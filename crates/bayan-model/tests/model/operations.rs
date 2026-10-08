@@ -353,43 +353,43 @@ fn undoing_an_edit_that_materialized_a_split_returns_to_the_view_before_it() {
     assert!(saw_split);
 }
 
-/// Text moved from another story to just after a table whose split only normalization showed lands after the table: the position the caller computed before the target's materialization is mapped onto the story after it.
+/// Text moved from another story into a story whose view shows a split that only normalization added lands where the caller meant: the move materializes the target story first, and the position the caller computed on the story before that is mapped onto the story after it. Here a comment story stores "q" ⟦table⟧ "text" ¶ (one replica inserted the table after a paragraph end that the other merged away), and "H" moved to position 2, between the table and "text", must land there; without the mapping it lands before the table, which is refused (review of CORE-004, second round, item A4: the earlier version of this test materialized the target before the move, so it passed without the mapping).
 #[test]
 fn a_move_into_a_story_that_needs_materialization_lands_where_the_caller_meant() {
-    let mut saw_split = false;
-    for (peer_a, peer_b) in [(1, 2), (2, 1)] {
-        let Some((mut a, _, table)) = replicas_with_a_virtual_split(peer_a, peer_b) else {
-            continue;
-        };
-        saw_split = true;
-        let comment = a.add_comment(MAIN, 0..1, "Reviewer", "zz").unwrap();
-        let story = valid_view(&a).comments[&comment].story;
-        let after_table = a
-            .story_text(MAIN)
-            .unwrap()
-            .chars()
-            .position(|character| character == AtomKind::TableBlock.placeholder())
-            .unwrap()
-            + 1;
-        a.move_range(story, 0..2, MAIN, after_table).unwrap();
-        let view = valid_view(&a);
-        let main = view.main();
-        let position = main
-            .iter()
-            .position(|item| item.is(AtomKind::TableBlock))
-            .unwrap();
-        assert_eq!(
-            main[position],
-            Item::Atom {
-                kind: AtomKind::TableBlock,
-                id: Some(table),
-                marks: Default::default()
-            }
-        );
-        assert!(main[position - 1].is(AtomKind::ParagraphEnd));
-        assert!(matches!(&main[position + 1], Item::Text { text, .. } if text == "zz"));
-    }
-    assert!(saw_split);
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "Hi").unwrap();
+    let comment = a.add_comment(MAIN, 1..2, "Reviewer", "qtext").unwrap();
+    let story = valid_view(&a).comments[&comment].story;
+    a.split_paragraph(story, 1).unwrap();
+    let mut b = replica_of(&a, 2);
+    let table = a.insert_table(story, 2, 1, 1).unwrap();
+    b.merge_paragraph(story, 1).unwrap();
+    sync_both(&mut a, &mut b);
+    assert_eq!(
+        a.story_text(story).unwrap(),
+        format!(
+            "q{}text{}",
+            AtomKind::TableBlock.placeholder(),
+            AtomKind::ParagraphEnd.placeholder()
+        )
+    );
+    assert!(bayan_model::normalize(&a.raw()).1.n4 > 0);
+    // The comment story is not materialized yet: the move is the first edit after the merge.
+    a.move_range(MAIN, 0..1, story, 2).unwrap();
+    let view = valid_view(&a);
+    let items = &view.stories[&story];
+    assert!(matches!(&items[0], Item::Text { text, .. } if text == "q"));
+    assert!(items[1].is(AtomKind::ParagraphEnd));
+    assert_eq!(
+        items[2],
+        Item::Atom {
+            kind: AtomKind::TableBlock,
+            id: Some(table),
+            marks: Default::default()
+        }
+    );
+    assert!(matches!(&items[3], Item::Text { text, .. } if text == "Htext"));
+    assert_eq!(text(&a), "i\n");
 }
 
 #[test]
