@@ -1,0 +1,29 @@
+# The fuzzing findings of 2026-10-07 after minimization (report §8.2), without their bytes: where each panics, how long the crafted update is, and how much of the valid update it changes.
+# Produced by `crdt-model minimize` (with `--isolated` for the two aborts) from one input per panic site of the main run and of the short `--small` runs of 2026-10-07 (the code of commit 627d4cc); the 4-byte checksum that every input recomputes is not counted as a change. The inputs themselves, with a 41-line program that reproduces each with Loro alone, went to the owner as a private bundle and stay out of the repository (report §7).
+# "changed bytes" are single bytes changed in place in a valid update; the serde_columnar cases and the second abort were only minimized to a rewritten range, which is longer.
+case      update bytes  change                  where it panics (Loro 1.16.2 and its crates, release build)
+panic-01        88      1 changed byte          generic-btree-0.10.7/src/lib.rs:618
+panic-02       280      1 changed byte          loro-common-1.16.0/src/lib.rs:1001
+panic-03      5019      1 changed byte          loro-delta-1.13.0/src/delta_rope/compose.rs:136
+panic-04        97      1 changed byte          loro-internal-1.16.2/src/change.rs:244 (accepted by the import; panics when the imported changes are read back with export_json_in_id_span)
+panic-05       103      1 changed byte          generic-btree-0.10.7/src/lib.rs:618
+panic-06        94      1 changed byte          loro-internal-1.16.2/src/container/richtext/richtext_state.rs:2277
+panic-07        98      1 changed byte          loro-internal-1.16.2/src/container/richtext/tracker/crdt_rope.rs:106
+panic-08       103      1 changed byte          loro-internal-1.16.2/src/diff_calc.rs:1069
+panic-09        88      1 changed byte          loro-internal-1.16.2/src/diff_calc.rs:1071
+panic-10        95      1 changed byte          loro-internal-1.16.2/src/diff_calc.rs:1296
+panic-11       371      1 changed byte          loro-internal-1.16.2/src/diff_calc.rs:1630
+panic-12      3442      1 changed byte          loro-internal-1.16.2/src/diff_calc.rs:2183
+panic-13     14664      1 changed byte          loro-internal-1.16.2/src/history_cache.rs:921
+panic-14      2359      1 changed byte          loro-internal-1.16.2/src/history_cache.rs:980
+panic-15        88      2 changed bytes         loro-internal-1.16.2/src/oplog/loro_dag.rs:445
+panic-16      5247      1 changed byte          loro-internal-1.16.2/src/state/movable_list_state.rs:1053
+panic-17      1243      1 changed byte          loro-internal-1.16.2/src/state/movable_list_state.rs:1056
+panic-18      3442      1 changed byte          loro-internal-1.16.2/src/state/movable_list_state.rs:1210
+panic-19        89      a rewritten range       serde_columnar-0.3.14/src/strategy/rle.rs:564
+panic-20      8436      a rewritten range       serde_columnar-0.3.14/src/strategy/rle.rs:575
+panic-21       302      a rewritten range       serde_columnar-0.3.14/src/strategy/rle.rs:632
+panic-22      1613      a rewritten range       serde_columnar-0.3.14/src/strategy/rle.rs:637
+abort-01        94      8 changed bytes         aborts: an allocation of 193,120,648,240 bytes fails while the change header is decoded
+abort-02       695      a rewritten range       aborts: an allocation of 125,045,342,080 bytes fails while the change header is decoded
+# Summary: 18 of the 22 panic sites need only one or two changed bytes in a valid update; 11 of those 18 updates are 88 to 371 bytes long (9 of them shorter than 104 bytes).
