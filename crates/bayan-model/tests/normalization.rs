@@ -83,10 +83,61 @@ fn marks(rng: &mut Rng, pools: &Pools) -> BTreeMap<String, Value> {
     marks
 }
 
-/// A random story: text in several scripts, placeholders with good, wrong, dangling or missing bindings, and stray control characters.
+/// A placeholder bound to `id` as an atom of `kind`, with random marks besides.
+fn bound(rng: &mut Rng, pools: &Pools, kind: AtomKind, id: EntityId) -> Run {
+    let mut marks = marks(rng, pools);
+    marks.insert(ATOM_KEY.to_owned(), Value::Str(encode_binding(kind, id)));
+    Run {
+        text: kind.placeholder().to_string(),
+        marks,
+    }
+}
+
+/// A well-formed field: begin, a code, usually a separator and a result, and the end, with further fields nested in the code or the result (up to `depth` levels). The random tokens around it, and the occasional missing delimiter, then break some of them, so that the property test sees both nested fields that normalization keeps and ones it must repair (I2).
+fn field(rng: &mut Rng, pools: &Pools, depth: usize, runs: &mut Vec<Run>) {
+    let id = pick(rng, &pools.fields, &pools.missing);
+    let part = |rng: &mut Rng, runs: &mut Vec<Run>| {
+        runs.push(Run {
+            text: ["PAGE", "IF ", " = 1", "x"][rng.below(4)].to_owned(),
+            marks: BTreeMap::new(),
+        });
+        if depth > 0 && rng.chance(1, 2) {
+            field(rng, pools, depth - 1, runs);
+        }
+    };
+    let delimiters = [
+        AtomKind::FieldBegin,
+        AtomKind::FieldSeparator,
+        AtomKind::FieldEnd,
+    ];
+    // Now and then one delimiter is missing, as after a concurrent deletion.
+    let missing = if rng.chance(1, 8) {
+        Some(delimiters[rng.below(3)])
+    } else {
+        None
+    };
+    let delimiter = |rng: &mut Rng, runs: &mut Vec<Run>, kind: AtomKind| {
+        if missing != Some(kind) {
+            runs.push(bound(rng, pools, kind, id));
+        }
+    };
+    delimiter(rng, runs, AtomKind::FieldBegin);
+    part(rng, runs);
+    if rng.chance(4, 5) {
+        delimiter(rng, runs, AtomKind::FieldSeparator);
+        part(rng, runs);
+    }
+    delimiter(rng, runs, AtomKind::FieldEnd);
+}
+
+/// A random story: text in several scripts, placeholders with good, wrong, dangling or missing bindings, stray control characters, and well-formed nested fields that the rest may break.
 fn story(rng: &mut Rng, pools: &Pools, max_tokens: usize) -> Vec<Run> {
     let mut runs = Vec::new();
     for _ in 0..rng.below(max_tokens) {
+        if rng.chance(1, 8) {
+            field(rng, pools, 2, &mut runs);
+            continue;
+        }
         let mut marks = marks(rng, pools);
         let text = match rng.below(10) {
             0..=3 => ["abc", "\u{0627}\u{0644}", "\u{1F600}", "z", "x y"][rng.below(5)].to_owned(),
@@ -422,10 +473,30 @@ fn shrink(mut raw: RawDocument, seed: u64) -> RawDocument {
     }
 }
 
+/// Whether a story of the view holds a field inside another field's code or result.
+fn has_nested_field(view: &View) -> bool {
+    view.stories.values().any(|items| {
+        let mut open = 0_usize;
+        items.iter().any(|item| match item.kind() {
+            Some(AtomKind::FieldBegin) => {
+                open += 1;
+                open > 1
+            }
+            Some(AtomKind::FieldEnd) => {
+                open = open.saturating_sub(1);
+                false
+            }
+            _ => false,
+        })
+    })
+}
+
 #[test]
 fn normalization_yields_invariant_views_and_is_deterministic_and_idempotent() {
     let mut repaired = Report::default();
     let cases = cases();
+    // Cases whose view keeps a field, a field with a separator, and a field nested in another.
+    let (mut with_fields, mut with_separators, mut with_nested) = (0_u64, 0_u64, 0_u64);
     for seed in 0..cases {
         let raw = random_document(seed);
         if let Some(problem) = failure(&raw, seed) {
@@ -435,7 +506,15 @@ fn normalization_yields_invariant_views_and_is_deterministic_and_idempotent() {
                 failure(&small, seed)
             );
         }
-        let (_, report) = normalize(&raw);
+        let (view, report) = normalize(&raw);
+        with_fields += u64::from(!view.fields.is_empty());
+        with_separators += u64::from(
+            view.stories
+                .values()
+                .flatten()
+                .any(|item| item.is(AtomKind::FieldSeparator)),
+        );
+        with_nested += u64::from(has_nested_field(&view));
         repaired.n1 += report.n1;
         repaired.n2 += report.n2;
         repaired.n3 += report.n3;
@@ -459,6 +538,20 @@ fn normalization_yields_invariant_views_and_is_deterministic_and_idempotent() {
         ("dropped characters", repaired.dropped_characters),
     ] {
         assert!(count > 0, "rule {rule} never applied in {cases} cases");
+    }
+    // I2's nesting is really exercised: a good share of views keep fields, separators and fields nested in a code or a result.
+    println!(
+        "{cases} cases: {with_fields} keep a field, {with_separators} a separator, {with_nested} a nested field"
+    );
+    for (what, count) in [
+        ("a field", with_fields),
+        ("a separator", with_separators),
+        ("a nested field", with_nested),
+    ] {
+        assert!(
+            count * 10 >= cases,
+            "only {count} of {cases} views keep {what}"
+        );
     }
 }
 
