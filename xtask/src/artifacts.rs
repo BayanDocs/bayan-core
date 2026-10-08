@@ -888,10 +888,61 @@ mod tests {
             .to_owned()
     }
 
+    /// The release archives that `scripts/dev-setup.sh` pins, as `(name without .tar.gz, SHA-256)`.
+    fn dev_setup_archives() -> Vec<(String, String)> {
+        let script = read(&crate::workspace_root().join("scripts").join("dev-setup.sh")).unwrap();
+        script
+            .lines()
+            .filter_map(|line| line.trim().split_once(".tar.gz) echo "))
+            .filter(|(name, _)| name.starts_with("wasm-bindgen-"))
+            .map(|(name, rest)| {
+                let sha256 = rest.split_whitespace().next().unwrap_or_default();
+                (name.to_owned(), sha256.to_owned())
+            })
+            .collect()
+    }
+
     #[test]
     fn dev_setup_pins_the_locked_wasm_bindgen() {
         let locked = locked_version(&crate::workspace_root(), "wasm-bindgen").unwrap();
         assert_eq!(dev_setup_pin("WASM_BINDGEN_VERSION"), locked);
+        // Its release archives are those of the same version, each with a SHA-256.
+        let archives = dev_setup_archives();
+        assert_eq!(archives.len(), 4, "{archives:?}");
+        for (name, sha256) in archives {
+            assert!(
+                name.starts_with(&format!("wasm-bindgen-{locked}-")),
+                "{name}"
+            );
+            assert!(
+                sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{name}: {sha256}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_workflow_installs_the_pinned_wasm_bindgen() {
+        let root = crate::workspace_root();
+        let locked = locked_version(&root, "wasm-bindgen").unwrap();
+        let workflow = read(&root.join(".github").join("workflows").join("artifacts.yml")).unwrap();
+        let version = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("WASM_BINDGEN_VERSION: "))
+            .unwrap();
+        assert_eq!(version, locked);
+        // The Linux x86-64 archive that CI downloads has the checksum that scripts/dev-setup.sh pins for it.
+        let in_workflow = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("sha256="))
+            .unwrap();
+        let linux = format!("wasm-bindgen-{locked}-x86_64-unknown-linux-musl");
+        let pinned = dev_setup_archives()
+            .into_iter()
+            .find(|(name, _)| *name == linux)
+            .map(|(_, sha256)| sha256)
+            .unwrap();
+        assert_eq!(in_workflow, pinned);
     }
 
     #[test]

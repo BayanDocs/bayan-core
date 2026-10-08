@@ -6,8 +6,9 @@
 # The SDKs and the WebAssembly package are uploaded as workflow artifacts with a SHA-256 checksum of every file (SHA256SUMS inside the
 # artifact) and of the artifact itself (in the job summary). There are no releases yet.
 # Workflow rules (ADR-0017), as in verify.yml: actions pinned to full commit SHAs with the version in a comment, minimal permissions, no
-# credentials kept after checkout, a timeout on every job, tools downloaded at pinned versions and checked against SHA-256 checksums,
-# and caches written only by runs on main.
+# credentials kept after checkout, a timeout on every job, and tools downloaded at pinned versions and checked against SHA-256 checksums.
+# Unlike verify.yml, nothing here uses a cache: the artifacts are distributed, so they are built from a fresh checkout and fresh downloads,
+# each checked by Cargo or against a pinned checksum, and never from files a cache restored (which nothing checks again).
 name: artifacts
 
 on:
@@ -18,18 +19,27 @@ on:
 
 permissions: {}
 
+defaults:
+  run:
+    # Explicitly bash on every system, which also sets pipefail: a failing program before a pipe fails its step.
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  # Incremental compilation helps only when one machine rebuilds again and again; in CI it just makes the cache bigger.
+  # Incremental compilation helps only when one machine rebuilds again and again, which these jobs never do.
   CARGO_INCREMENTAL: 0
   # Node.js for the Node.js driver: the version of bayan-web's .nvmrc and of the BayanDocs cloud environment, released 2026-09-07. The
   # checksums in the Node.js step come from nodejs.org's SHASUMS256.txt for this version, whose signature by a key of the Node.js release
   # team (nodejs/release-keys) was checked on 2026-10-07; npmmirror's copy agrees. Change them only in the monthly dependency session.
   NODE_VERSION: 24.21.0
+  # wasm-bindgen's command-line tool, which turns the engine's module into the package (released 2026-09-25). Must equal the wasm-bindgen
+  # crate in Cargo.lock and WASM_BINDGEN_VERSION in scripts/dev-setup.sh, and the checksum in the WebAssembly job must equal that script's
+  # (an xtask test checks all three). Change them only in the monthly dependency session.
+  WASM_BINDGEN_VERSION: 0.2.129
 
 jobs:
   sdk:
@@ -48,9 +58,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    defaults:
-      run:
-        shell: bash
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -64,19 +71,6 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
-
-      - name: Restore the build cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: artifacts-sdk-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            artifacts-sdk-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-
 
       # Before the MSVC developer environment: without it, rustc finds Microsoft's linker by itself, as in verify.yml.
       - name: Build the C SDK
@@ -135,18 +129,6 @@ jobs:
           DIGEST: ${{ steps.upload.outputs.artifact-digest }}
         run: scripts/ci-checksums.sh --summary "bayan-core-sdk-$TARGET" "$DIGEST" "target/artifacts/bayan-core-sdk-$TARGET" >> "$GITHUB_STEP_SUMMARY"
 
-      # Only runs on main write the cache, so a pull request can never change what other runs restore.
-      - name: Save the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
   wasm:
     name: WebAssembly package
     runs-on: ubuntu-24.04
@@ -165,31 +147,24 @@ jobs:
           rustup toolchain install
           rustc --version
 
-      - name: Restore the build cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: artifacts-wasm-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            artifacts-wasm-${{ hashFiles('rust-toolchain.toml') }}-
-
-      # The wasm-bindgen binary has a cache of its own, with an exact key that changes with its pin in scripts/dev-setup.sh and
-      # no fallback, so an older version is never restored (dev-setup.sh refuses to replace a different version).
-      - name: Restore wasm-bindgen-cli
-        id: wasm-bindgen
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/wasm-bindgen
-          key: wasm-bindgen-${{ runner.os }}-${{ hashFiles('scripts/dev-setup.sh') }}
-
-      # Builds wasm-bindgen-cli at the pinned version from crates.io, unless the cache restored it.
-      - name: Install wasm-bindgen-cli (scripts/dev-setup.sh)
-        run: scripts/dev-setup.sh --no-miri
+      - name: Install wasm-bindgen (pinned release archive, SHA-256 checked)
+        run: |
+          # The project's release archive for Linux x86-64; the checksum matches the .sha256sum file published with it.
+          name="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
+          sha256=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$name.tar.gz" \
+            "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$name.tar.gz"
+          actual=$(sha256sum "$name.tar.gz")
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::wasm-bindgen checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          tar -xzf "$name.tar.gz" "$name/wasm-bindgen"
+          # Install next to cargo (rustup's bin directory), which is already on PATH.
+          cp "$name/wasm-bindgen" "$(dirname "$(command -v cargo)")/"
+          wasm-bindgen --version
 
       - name: Build the WebAssembly package
         run: cargo xtask wasm-package
@@ -210,24 +185,6 @@ jobs:
           DIGEST: ${{ steps.upload.outputs.artifact-digest }}
         run: scripts/ci-checksums.sh --summary bayan-core-wasm "$DIGEST" target/artifacts/bayan-core-wasm >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Save the build cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
-      - name: Save wasm-bindgen-cli
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.wasm-bindgen.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/wasm-bindgen
-          key: ${{ steps.wasm-bindgen.outputs.cache-primary-key }}
-
   node-driver:
     name: Node.js driver (${{ matrix.os }})
     needs: wasm
@@ -239,9 +196,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-    defaults:
-      run:
-        shell: bash
     env:
       OS: ${{ matrix.os }}
     steps:
@@ -291,7 +245,19 @@ jobs:
 
       - name: Run the Node.js driver
         run: |
-          "$NODE" crates/bayan-wasm/js/tests/node-driver.mjs wasm-package | tee "$RUNNER_TEMP/node-driver.txt"
+          status=0
+          "$NODE" crates/bayan-wasm/js/tests/node-driver.mjs wasm-package 2> "$RUNNER_TEMP/node-driver.err" \
+            | tee "$RUNNER_TEMP/node-driver.txt" || status=$?
+          cat "$RUNNER_TEMP/node-driver.err" >&2
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          # The driver makes the engine panic on purpose; neither the engine nor the worker host may print anything, because a
+          # message could quote document content (spec §3.1, §3.2). So anything on standard error fails the run.
+          if [ -s "$RUNNER_TEMP/node-driver.err" ]; then
+            echo "::error::the Node.js driver wrote to standard error"
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/tile"
           tile=$(grep -o '^tile fnv1a64:[0-9a-f]\{16\}' "$RUNNER_TEMP/node-driver.txt")
           printf 'Node.js driver, %s: %s\n' "$OS" "${tile#tile }" > "$RUNNER_TEMP/tile/node-$OS.txt"
@@ -307,11 +273,22 @@ jobs:
   same-tile:
     name: Same tile everywhere
     needs: [sdk, node-driver]
+    # Runs even when a driver job failed or was skipped, and then fails itself: a skipped check would count as passing.
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     steps:
+      - name: Check that every driver job passed
+        env:
+          SDK_RESULT: ${{ needs.sdk.result }}
+          NODE_DRIVER_RESULT: ${{ needs.node-driver.result }}
+        run: |
+          if [ "$SDK_RESULT" != success ] || [ "$NODE_DRIVER_RESULT" != success ]; then
+            echo "::error::every driver job must pass: the C SDK jobs ended with '$SDK_RESULT', the Node.js driver jobs with '$NODE_DRIVER_RESULT'"
+            exit 1
+          fi
+
       - name: Download the tile digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -327,12 +304,15 @@ jobs:
             sed 's/^/- /' tiles/*.txt
           } >> "$GITHUB_STEP_SUMMARY"
           cat tiles/*.txt
-          count=$(find tiles -name '*.txt' | wc -l)
-          if [ "$count" -ne 6 ]; then
-            echo "::error::expected 6 tile digests (3 C, 3 Node.js), found $count"
+          # Every line must be a driver's digest, one from each of the six runs, and all six must be the same.
+          digests=$(cat tiles/*.txt)
+          lines=$(printf '%s\n' "$digests" | wc -l)
+          matching=$(printf '%s\n' "$digests" | grep -c -E '^(C|Node\.js) driver, [^:]+: fnv1a64:[0-9a-f]{16}$' || true)
+          if [ "$lines" -ne 6 ] || [ "$matching" -ne 6 ]; then
+            echo "::error::expected 6 tile digests (3 C, 3 Node.js), found $matching in $lines lines"
             exit 1
           fi
-          if [ "$(sed 's/.*: //' tiles/*.txt | sort -u | wc -l)" -ne 1 ]; then
+          if [ "$(printf '%s\n' "$digests" | sed 's/.*: //' | sort -u | wc -l)" -ne 1 ]; then
             echo "::error::the drivers rendered different tiles"
             exit 1
           fi
