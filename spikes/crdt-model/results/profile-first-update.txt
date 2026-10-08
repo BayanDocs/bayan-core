@@ -1,35 +1,44 @@
-# callgrind, inclusive instruction counts: applying the first 1,000-operation update after opening.
-# Full 500-page model, release build with Loro's quadratic decoding fixed (README.md). Collected only inside the measured call, which a scratch copy of bench.rs wrapped in a function of its own (profile_*) so that callgrind could select it. Paths shortened.
+# callgrind, inclusive instruction counts: applying the first update after opening the full 500-page model (999 edits in one update; one call of profile_apply), commit 50dbc7a.
+# Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_apply*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
 
-307,448,384 (100.0%)  PROGRAM TOTALS
-307,448,384 (100.0%)  ???:crdt_model::bench::bench 
-307,448,384 (100.0%)  ???:crdt_model::bench::profile_apply 
-307,448,372 (100.0%)  ???:<bayan_model::document::Document>::import 
-307,448,327 (100.0%)  ???:<bayan_crdt::doc::Doc>::import 
-304,065,683 (98.90%)  ???:<loro_internal::LoroDoc>::_import_with 
-161,190,439 (52.43%)  ???:<loro_internal::state::DocState>::apply_diff 
-144,917,780 (47.14%)  ???:<loro_internal::state::container_store::ContainerStore>::get_container 
-139,220,384 (45.28%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal 
-134,364,027 (43.70%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_state 
-119,036,877 (38.72%)  ???:<loro_internal::oplog::OpLog>::iter_from_replay_base_causally 
-119,020,497 (38.71%)  ???:<loro_internal::oplog::loro_dag::AppDag>::ensure_vv_for 
-119,018,046 (38.71%)  ???:<loro_internal::oplog::loro_dag::AppDag>::frontiers_to_vv 
-117,382,497 (38.18%)  ???:<quick_cache::sync::Cache<usize, alloc::sync::Arc<loro_kv_store::block::Block>, loro_kv_store::sstable::BlockDataWeighter>>::get_or_insert_with::<usize, loro_common::error::LoroError, <loro_kv_s
-116,934,476 (38.03%)  ???:<loro_internal::oplog::loro_dag::AppDag as loro_internal::dag::Dag>::get 
-116,407,127 (37.86%)  ???:<loro_internal::oplog::loro_dag::AppDag>::ensure_lazy_load_node 
-115,799,172 (37.66%)  ???:<loro_kv_store::sstable::SsTable>::read_block 
-115,709,103 (37.64%)  ???:<loro_internal::oplog::change_store::ChangeStore>::get_dag_nodes_that_contains 
-115,304,395 (37.50%)  ???:<loro_kv_store::block::Block>::try_decode 
-115,285,098 (37.50%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_block_loaded_in_range 
-115,159,759 (37.46%)  ???:loro_kv_store::compress::decompress 
-114,784,051 (37.33%)  ???:<lz4_flex::frame::decompress::FrameDecoder<&[u8]> as alloc::io::read::Read>::read_to_end 
- 94,073,539 (30.60%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_id_lte 
- 87,290,478 (28.39%)  ???:<loro_kv_store::sstable::SsTableIter>::next_back 
- 86,085,291 (28.00%)  ???:<loro_kv_store::mem_store::MemStoreIterator<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<bytes::bytes::Bytes, bytes::bytes::Bytes>, <loro_kv_store::mem_store::MemKvStore>
- 86,041,131 (27.99%)  ???:<loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter> as core::iter::traits::double_ended::DoubleEndedIterator>::next_back 
- 85,780,155 (27.90%)  ???:<loro_kv_store::sstable::SsTableIter as core::iter::traits::double_ended::DoubleEndedIterator>::next_back 
- 71,745,800 (23.34%)  ???:<loro_internal::state::map_state::MapState as loro_internal::state::FastStateSnapshot>::decode_snapshot_fast 
- 61,353,109 (19.96%)  ./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms 
- 60,892,068 (19.81%)  ???:core::slice::sort::unstable::quicksort::quicksort::<loro_common::internal_string::InternalString, <loro_common::internal_string::InternalString as core::cmp::PartialOrd>::lt>'2 
- 43,152,955 (14.04%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_value 
- 43,150,115 (14.03%)  ???:<loro_internal::state::map_state::MapState>::decode_value_as_btree_map 
+    306,817,032 (100.0%)  PROGRAM TOTALS
+    306,817,032 (100.00%)  ???:crdt_model::bench::bench
+    306,817,032 (100.00%)  ???:crdt_model::bench::profile_apply
+    306,816,879 (100.00%)  ???:<bayan_model::document::Document>::import
+    306,816,833 (100.00%)  ???:<bayan_crdt::doc::Doc>::import
+    303,443,552 (98.90%)  ???:<loro_internal::LoroDoc>::_import_with
+    160,980,897 (52.47%)  ???:<loro_internal::state::DocState>::apply_diff
+    144,788,910 (47.19%)  ???:<loro_internal::state::container_store::ContainerStore>::get_container
+    138,815,645 (45.24%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal
+    134,235,247 (43.75%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_state
+    118,712,659 (38.69%)  ???:<loro_internal::oplog::OpLog>::iter_from_replay_base_causally
+    118,696,393 (38.69%)  ???:<loro_internal::oplog::loro_dag::AppDag>::ensure_vv_for
+    118,693,981 (38.69%)  ???:<loro_internal::oplog::loro_dag::AppDag>::frontiers_to_vv
+    117,116,827 (38.17%)  ???:<quick_cache::sync::Cache<usize, alloc::sync::Arc<loro_kv_store::block::Block>, loro_kv_store::sstable::BlockDataWeighter>>::get_or_insert_with::<usize, loro_common::error::LoroError, <loro_kv_store::sstable::SsTable>::read_block_cached::{closure#0}>
+    116,624,650 (38.01%)  ???:<loro_internal::oplog::loro_dag::AppDag as loro_internal::dag::Dag>::get
+    116,097,301 (37.84%)  ???:<loro_internal::oplog::loro_dag::AppDag>::ensure_lazy_load_node
+    115,535,126 (37.66%)  ???:<loro_kv_store::sstable::SsTable>::read_block
+    115,400,922 (37.61%)  ???:<loro_internal::oplog::change_store::ChangeStore>::get_dag_nodes_that_contains
+    115,041,771 (37.50%)  ???:<loro_kv_store::block::Block>::try_decode
+    114,966,175 (37.47%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_block_loaded_in_range
+    114,895,759 (37.45%)  ???:loro_kv_store::compress::decompress
+    114,536,105 (37.33%)  ???:<lz4_flex::frame::decompress::FrameDecoder<&[u8]> as alloc::io::read::Read>::read_to_end
+     93,661,894 (30.53%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_id_lte
+     87,099,887 (28.39%)  ???:<loro_kv_store::sstable::SsTableIter>::next_back
+     85,977,979 (28.02%)  ???:<loro_kv_store::mem_store::MemStoreIterator<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<bytes::bytes::Bytes, bytes::bytes::Bytes>, <loro_kv_store::mem_store::MemKvStore>::scan::{closure#2}>, loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter>> as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
+     85,933,819 (28.01%)  ???:<loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter> as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
+     85,672,321 (27.92%)  ???:<loro_kv_store::sstable::SsTableIter as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
+     71,727,632 (23.38%)  ???:<loro_internal::state::map_state::MapState as loro_internal::state::FastStateSnapshot>::decode_snapshot_fast
+     61,457,300 (20.03%)  ./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms
+     60,892,068 (19.85%)  ???:core::slice::sort::unstable::quicksort::quicksort::<loro_common::internal_string::InternalString, <loro_common::internal_string::InternalString as core::cmp::PartialOrd>::lt>'2
+     43,068,245 (14.04%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_value
+     43,065,405 (14.04%)  ???:<loro_internal::state::map_state::MapState>::decode_value_as_btree_map
+     43,064,765 (14.04%)  ???:<alloc::collections::btree::map::BTreeMap<alloc::string::String, loro_common::value::LoroValue> as serde_core::de::Deserialize>::deserialize::<&mut postcard::de::deserializer::Deserializer<postcard::de::flavors::Slice>>
+     42,900,319 (13.98%)  ???:<loro_internal::state::map_state::MapState>::insert
+     40,905,140 (13.33%)  ???:<alloc::collections::btree::map::BTreeMap<loro_common::internal_string::InternalString, loro_internal::delta::map_delta::MapValue>>::insert
+     28,292,612 ( 9.22%)  ???:<loro_common::internal_string::InternalString as core::cmp::Ord>::cmp
+     24,850,400 ( 8.10%)  ???:<loro_kv_store::mem_store::MemKvStore as loro_internal::kv_store::KvStore>::scan
+     24,849,120 ( 8.10%)  ???:<loro_kv_store::mem_store::MemKvStore>::scan
+     24,566,240 ( 8.01%)  ???:<alloc::vec::Vec<loro_kv_store::sstable::SsTableIter> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<loro_kv_store::sstable::SsTableIter, core::iter::adapters::map::Map<core::iter::adapters::rev::Rev<core::slice::iter::Iter<loro_kv_store::sstable::SsTable>>, <loro_kv_store::mem_store::MemKvStore>::scan::{closure#3}>>>::from_iter
+     24,308,984 ( 7.92%)  ???:<loro_kv_store::sstable::SsTableIter>::new_scan
+     23,938,304 ( 7.80%)  ???:__rustc::__rust_alloc
