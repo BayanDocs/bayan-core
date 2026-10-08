@@ -420,12 +420,10 @@ pub struct RenderTile {
     pub page: u32,
     /// The part of the page, in page coordinates.
     pub rect: Rect,
-    /// The tile's width in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it.
-    #[serde(default)]
-    pub width: Option<u32>,
-    /// The tile's height in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it.
-    #[serde(default)]
-    pub height: Option<u32>,
+    /// The tile's width in pixels, 1 to 4,096.
+    pub width: u32,
+    /// The tile's height in pixels, 1 to 4,096.
+    pub height: u32,
     /// The zoom factor, a hint for later rasterizers; it does not change the pixels.
     #[serde(default)]
     pub zoom: Option<f64>,
@@ -435,6 +433,50 @@ pub struct RenderTile {
     /// The rasterizer to use (ADR-0011 §3); both give the same pixels in v0.
     #[serde(default)]
     pub mode: Option<RenderMode>,
+}
+
+/// The request of `bayan_render_tile` on the C interface (spec §3.1): a `render.tile` payload whose `width` and `height` may be left out, because the function's parameters give them; if present, they must equal the parameters. It is not a message, so it is not in the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TileRequest {
+    /// The document.
+    pub doc_id: u64,
+    /// The page's index.
+    pub page: u32,
+    /// The part of the page, in page coordinates.
+    pub rect: Rect,
+    /// The tile's width in pixels; `bayan_render_tile`'s parameter gives it.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// The tile's height in pixels; `bayan_render_tile`'s parameter gives it.
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// As in [`RenderTile`].
+    #[serde(default)]
+    pub zoom: Option<f64>,
+    /// As in [`RenderTile`].
+    #[serde(default)]
+    pub device_scale: Option<f64>,
+    /// As in [`RenderTile`].
+    #[serde(default)]
+    pub mode: Option<RenderMode>,
+}
+
+impl TileRequest {
+    /// The `render.tile` payload this request stands for, with the size `bayan_render_tile` was called with, or `None` if the request names another size.
+    #[must_use]
+    pub fn with_size(self, width: u32, height: u32) -> Option<RenderTile> {
+        let fits = |given: Option<u32>, size: u32| given.is_none_or(|given| given == size);
+        (fits(self.width, width) && fits(self.height, height)).then_some(RenderTile {
+            doc_id: self.doc_id,
+            page: self.page,
+            rect: self.rect,
+            width,
+            height,
+            zoom: self.zoom,
+            device_scale: self.device_scale,
+            mode: self.mode,
+        })
+    }
 }
 
 /// Which rasterizer renders a tile (ADR-0011 §2–§3).

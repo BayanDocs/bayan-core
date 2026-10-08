@@ -23,7 +23,7 @@ publish = false
 # Rust types to and from JSON: the engine protocol's messages are serde types (ADR-0012 §1). Published 2026-07-18; MIT OR Apache-2.0.
 serde = { version = "=1.0.229", features = ["derive"] }
 # The JSON encoding of the engine protocol (ADR-0012 §1). `float_roundtrip` parses numbers exactly as JavaScript and Qt do, so a zoom factor means the same on both sides. Published 2026-07-20; MIT OR Apache-2.0.
-serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+serde_json = { version = "=1.0.151", features = ["float_roundtrip", "raw_value"] }
 # Generates the protocol's JSON Schema from the same Rust types (ADR-0012 §1, CORE-007). Published 2026-07-27; MIT.
 schemars = "=1.2.2"
 # The WebAssembly binding of the engine for the web shell (ADR-0012 §4). Must equal the wasm-bindgen CLI pinned in scripts/dev-setup.sh. Published 2026-09-25; MIT OR Apache-2.0.

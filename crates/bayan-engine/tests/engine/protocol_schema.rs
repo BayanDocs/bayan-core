@@ -231,6 +231,86 @@ fn every_catalog_request_is_handled() {
     }
 }
 
+/// The smallest value that `schema` accepts, with only the required fields of every object, a 1 for every number and the first value of every enumeration: a value whose shape is right but that says as little as possible.
+fn minimal(root: &Value, schema: &Value) -> Value {
+    if let Some(reference) = schema["$ref"].as_str() {
+        let name = reference.trim_start_matches("#/$defs/");
+        return minimal(root, &root["$defs"][name]);
+    }
+    if let Some(values) = schema["enum"].as_array() {
+        return values[0].clone();
+    }
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    for combination in ["anyOf", "oneOf"] {
+        if let Some(choices) = schema[combination].as_array() {
+            let choice = choices
+                .iter()
+                .find(|choice| choice["type"] != json!("null"))
+                .unwrap();
+            return minimal(root, choice);
+        }
+    }
+    let kind = match &schema["type"] {
+        Value::String(kind) => kind.as_str(),
+        // Optional fields such as `["integer", "null"]`; the first type is the field's own.
+        Value::Array(kinds) => kinds[0].as_str().unwrap(),
+        other => panic!("no type in {schema} ({other})"),
+    };
+    match kind {
+        "object" => {
+            let mut object = serde_json::Map::new();
+            for name in schema["required"].as_array().into_iter().flatten() {
+                let name = name.as_str().unwrap();
+                object.insert(name.to_owned(), minimal(root, &schema["properties"][name]));
+            }
+            Value::Object(object)
+        }
+        "array" => json!([]),
+        "integer" | "number" => json!(1),
+        "string" => json!("a"),
+        "boolean" => json!(false),
+        other => panic!("unexpected type {other} in {schema}"),
+    }
+}
+
+#[test]
+fn messages_the_schema_accepts_are_not_refused_for_their_shape() {
+    let schema = schema::json_schema().unwrap();
+    let validator = Validator::new(&schema);
+    let requests = schema["x-bayan-messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["direction"] == json!("to_engine"));
+    let mut checked = 0;
+    for entry in requests {
+        let kind = entry["type"].as_str().unwrap();
+        let payload = minimal(&schema, &json!({ "$ref": entry["payload"] }));
+        let message = request(7, kind, payload);
+        validator
+            .validate(&message)
+            .unwrap_or_else(|error| panic!("{error}\n{message}"));
+        // Document 1 and blob 1 exist, so every reference in the minimal payload names something real.
+        let mut engine = engine();
+        assert_eq!(open_document(&mut engine), 1);
+        let answers = send(&mut engine, &message);
+        let reply = reply_to(&answers, 7);
+        for refusal in ["invalid_request", "invalid_message"] {
+            assert_ne!(reply["error"]["code"], json!(refusal), "{message}\n{reply}");
+        }
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        MESSAGES
+            .iter()
+            .filter(|message| message.direction == Direction::ToEngine)
+            .count()
+    );
+}
+
 #[test]
 fn messages_that_break_the_schema_are_refused_by_the_engine_too() {
     let schema = schema::json_schema().unwrap();

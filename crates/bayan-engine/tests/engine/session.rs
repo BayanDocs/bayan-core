@@ -331,17 +331,17 @@ fn blob_0_stands_for_bytes_that_could_not_be_stored() {
 fn a_host_that_cannot_deliver_a_reply_answers_with_internal() {
     let mut engine = engine();
     let doc_id = open_document(&mut engine);
-    let tile = serde_json::to_vec(&request(3, "render.tile", whole_page(doc_id, 0, 4, 4))).unwrap();
     let answers: Vec<Value> = engine
-        .report_host_failure(&tile)
+        .report_host_failure(Some(3))
         .iter()
         .map(|json| serde_json::from_str(json).unwrap())
         .collect();
     assert_eq!(answers.len(), 1);
     assert_eq!(error_code(&answers, 3), "internal");
-    // A message without an identifier has nobody to answer.
-    let tile = serde_json::to_vec(&notice("render.tile", whole_page(doc_id, 0, 4, 4))).unwrap();
-    assert!(engine.report_host_failure(&tile).is_empty());
+    // A message without an identifier, or with one that is not a request identifier, has nobody to answer.
+    for id in [None, Some(0), Some(1 << 53)] {
+        assert!(engine.report_host_failure(id).is_empty());
+    }
     // The session is untouched.
     let answers = send(
         &mut engine,
@@ -573,15 +573,17 @@ fn unknown_and_unimplemented_messages_are_refused_without_echoing_content() {
         let text = serde_json::to_string(&answers).unwrap();
         assert!(!text.contains("document text"), "{text}");
     }
-    let long = "x".repeat(500);
-    let answers = send(&mut engine, &request(4, &long, json!({})));
+    // The type is repeated only if it looks like a message type (spec §12); anything else is left out, not cut.
+    let answers = send(&mut engine, &request(4, "no.such.thing", json!({})));
     assert_eq!(
-        reply_to(&answers, 4)["error"]["args"]["type"]
-            .as_str()
-            .unwrap()
-            .len(),
-        64
+        reply_to(&answers, 4)["error"]["args"]["type"],
+        json!("no.such.thing")
     );
+    for kind in ["x".repeat(65), "Document Text".to_owned()] {
+        let answers = send(&mut engine, &request(5, &kind, json!({})));
+        assert_eq!(error_code(&answers, 5), "unsupported_message");
+        assert_eq!(reply_to(&answers, 5)["error"]["args"], json!({}), "{kind}");
+    }
     // Without an id, failures arrive as recoverable engine.error events.
     let answers = send(&mut engine, &notice("no.such.thing", json!({})));
     assert_eq!(answers[0]["type"], json!("engine.error"));

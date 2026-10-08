@@ -32,6 +32,7 @@ pub mod blobs;
 pub mod config;
 pub mod digest;
 mod engine;
+mod envelope;
 pub mod limits;
 mod manifest;
 mod mock;

@@ -477,16 +477,16 @@ export interface RenderTile {
   device_scale?: number | null;
   /** The document. */
   doc_id: number;
-  /** The tile's height in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it. */
-  height?: number | null;
+  /** The tile's height in pixels, 1 to 4,096. */
+  height: number;
   /** The rasterizer to use (ADR-0011 §3); both give the same pixels in v0. */
   mode?: RenderMode | null;
   /** The page's index. */
   page: number;
   /** The part of the page, in page coordinates. */
   rect: Rect;
-  /** The tile's width in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it. */
-  width?: number | null;
+  /** The tile's width in pixels, 1 to 4,096. */
+  width: number;
   /** The zoom factor, a hint for later rasterizers; it does not change the pixels. */
   zoom?: number | null;
 }

@@ -28,6 +28,9 @@ pub const MAX_TILE_COORDINATE: i64 = 1 << 40;
 /// The most entries a recording may hold.
 pub const MAX_RECORDING_ENTRIES: usize = 100_000;
 
+/// The most pixels one replay may render, in all its tiles together: 2³⁰, as many as 64 tiles of the largest size, about 20 seconds of rendering natively. A recording is small for the work it can ask for (a tile entry of about 150 bytes can ask for 4,096 × 4,096 pixels), so without this limit one recording of 15 MB could keep the engine busy for hours.
+pub const MAX_REPLAY_PIXELS: u64 = 1 << 30;
+
 /// The largest recording, as JSON: 64 MiB, so it fits in one blob.
 pub const MAX_RECORDING_BYTES: usize = MAX_BLOB_BYTES;
 

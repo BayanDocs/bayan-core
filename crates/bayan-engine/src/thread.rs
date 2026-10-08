@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -56,6 +57,11 @@ enum Job {
     },
     /// Wakes the engine thread so it notices that it is stopping.
     Stop,
+    /// A panic outside the engine's own recovery, for tests; `answer` stands for a tile request waiting for the job.
+    #[cfg(test)]
+    Panic {
+        answer: SyncSender<Result<Vec<u8>, TileError>>,
+    },
 }
 
 /// What the shell's threads and the engine thread share.
@@ -106,27 +112,36 @@ impl std::fmt::Debug for EngineThread {
 fn run(mut engine: Engine, jobs: &Receiver<Job>, shared: &Shared) {
     ON_ENGINE_THREAD.with(|flag| flag.set(true));
     for job in jobs {
-        if shared.stopping.load(Ordering::SeqCst) {
+        if shared.stopping.load(Ordering::SeqCst) || matches!(job, Job::Stop) {
             return;
         }
-        match job {
-            Job::Message { bytes, received_ms } => {
-                let messages = engine.handle(&bytes, received_ms);
-                shared.deliver(messages);
-            }
-            Job::Tile {
-                request,
-                width,
-                height,
-                received_ms,
-                answer,
-            } => {
-                let outcome = engine.render_tile(&request, width, height, received_ms);
-                // The caller may have given up waiting; then nobody needs the pixels.
-                let _ignored = answer.send(outcome.pixels);
-                shared.deliver(outcome.messages);
-            }
-            Job::Stop => return,
+        // The engine catches the panics of its message handlers and of rendering itself (spec §12); this catches any other, so that no panic ends the thread and leaves the shell with an engine that silently refuses everything. A tile request whose job panicked gets `TileError::Internal`, because its answer channel is dropped unanswered.
+        let messages = catch_unwind(AssertUnwindSafe(|| perform(&mut engine, job)))
+            .unwrap_or_else(|_| engine.recover_from_escaped_panic());
+        shared.deliver(messages);
+    }
+}
+
+/// Does one job and returns the messages to deliver.
+fn perform(engine: &mut Engine, job: Job) -> Vec<String> {
+    match job {
+        Job::Message { bytes, received_ms } => engine.handle(&bytes, received_ms),
+        Job::Tile {
+            request,
+            width,
+            height,
+            received_ms,
+            answer,
+        } => {
+            let outcome = engine.render_tile(&request, width, height, received_ms);
+            // The caller may have given up waiting; then nobody needs the pixels.
+            let _ignored = answer.send(outcome.pixels);
+            outcome.messages
+        }
+        Job::Stop => Vec::new(),
+        #[cfg(test)]
+        Job::Panic { answer: _answer } => {
+            panic!("a panic outside the engine's own recovery, for a test")
         }
     }
 }
@@ -353,6 +368,34 @@ mod tests {
         assert_eq!(receiver.recv_timeout(WAIT), Ok(Err(TileError::WrongThread)));
         thread.stop();
         other.stop();
+    }
+
+    #[test]
+    fn a_panic_outside_the_engine_s_own_recovery_does_not_end_the_thread() {
+        let (thread, messages) = started();
+        let hello = |id: u64| {
+            format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#)
+                .into_bytes()
+        };
+        thread.post(hello(1), 0).unwrap();
+        assert!(messages.recv_timeout(WAIT).unwrap().contains(r#""re":1"#));
+        let (answer, waiting) = mpsc::sync_channel(1);
+        thread.jobs.send(Job::Panic { answer }).unwrap();
+        // The shell learns that the session is gone, and a waiting tile request fails instead of waiting forever.
+        let error = messages.recv_timeout(WAIT).unwrap();
+        assert!(
+            error.contains(r#""type":"engine.error""#) && error.contains(r#""recoverable":false"#),
+            "{error}"
+        );
+        assert!(waiting.recv_timeout(WAIT).is_err());
+        // The thread goes on: a new handshake works.
+        thread.post(hello(2), 0).unwrap();
+        let welcome = messages.recv_timeout(WAIT).unwrap();
+        assert!(
+            welcome.contains(r#""re":2"#) && welcome.contains(r#""ok":true"#),
+            "{welcome}"
+        );
+        thread.stop();
     }
 
     #[test]

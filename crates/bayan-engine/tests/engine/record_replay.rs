@@ -271,6 +271,79 @@ fn a_recording_keeps_the_blobs_it_used() {
     assert!(replay(Config::default(), &recording).unwrap().identical);
 }
 
+/// Records `count` tiles through the message path, each `tile(doc_id)` and released by the shell as soon as it arrives, as the web worker host does; returns the recording.
+fn recording_of_released_tiles(count: u64, tile: impl Fn(u64) -> Value) -> Vec<u8> {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    for id in 10..10 + count {
+        let answers = send(&mut engine, &request(id, "render.tile", tile(doc_id)));
+        let blob = ok_payload(&answers, id)["blob"].as_u64().unwrap();
+        assert!(engine.blobs().release(blob));
+    }
+    let stopped = send(&mut engine, &request(2, "diag.record.stop", json!({})));
+    let stopped = ok_payload(&stopped, 2);
+    assert_eq!(stopped["truncated"], json!(false));
+    engine
+        .blobs()
+        .take(stopped["blob"].as_u64().unwrap())
+        .unwrap()
+        .to_vec()
+}
+
+#[test]
+fn a_replay_of_more_tiles_than_blobs_may_exist_at_once_is_identical() {
+    // 1,100 tiles: more than the 1,024 blobs that may exist at once (spec §13). The shell released each one while recording, so the replay must too.
+    let recording = recording_of_released_tiles(1100, |doc_id| whole_page(doc_id, 0, 1, 1));
+    let report = replay(Config::default(), &recording).unwrap();
+    assert_eq!(report.first_difference, None);
+    assert!(report.identical);
+    assert_eq!(report.tiles.len(), 1100);
+}
+
+#[test]
+fn a_replay_of_more_pixels_than_blobs_may_hold_at_once_is_identical() {
+    // 300 tiles of 1 MiB each: more than the 256 MiB that all blobs may hold together (spec §13). They show an empty area beside the page, which is quick to draw (every pixel stays transparent) but just as large.
+    let recording = recording_of_released_tiles(300, |doc_id| {
+        json!({
+            "doc_id": doc_id,
+            "page": 0,
+            "rect": { "x": -40_000_000, "y": 0, "width": 15_544_800, "height": 15_544_800 },
+            "width": 512,
+            "height": 512,
+        })
+    });
+    let report = replay(Config::default(), &recording).unwrap();
+    assert_eq!(report.first_difference, None);
+    assert!(report.identical);
+    assert_eq!(report.tiles.len(), 300);
+}
+
+#[test]
+fn a_blob_the_engine_created_and_a_later_message_read_survives_the_replay() {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    let answers = send(
+        &mut engine,
+        &request(4, "render.tile", whole_page(doc_id, 0, 2, 2)),
+    );
+    let tile = ok_payload(&answers, 4)["blob"].as_u64().unwrap();
+    // The shell keeps the tile's blob and opens it as a document, so the recording carries it.
+    let opened = send(
+        &mut engine,
+        &request(5, "doc.open", json!({ "blob": tile })),
+    );
+    assert!(ok_payload(&opened, 5)["doc_id"].is_u64());
+    let stopped = send(&mut engine, &request(6, "diag.record.stop", json!({})));
+    let recording = engine
+        .blobs()
+        .take(ok_payload(&stopped, 6)["blob"].as_u64().unwrap())
+        .unwrap();
+    let report = replay(Config::default(), &recording).unwrap();
+    assert_eq!(report.first_difference, None);
+}
+
 #[test]
 fn a_message_the_host_refused_as_oversized_truncates_a_recording_only_without_an_identifier() {
     let mut engine = engine();
@@ -307,4 +380,24 @@ fn a_message_the_host_refused_as_oversized_truncates_a_recording_only_without_an
     let recording = engine.blobs().take(blob).unwrap();
     let report = replay(Config::default(), &recording).unwrap();
     assert!(report.identical);
+}
+
+#[test]
+fn a_message_the_host_could_not_serialize_is_answered_like_an_oversized_one() {
+    let mut engine = engine();
+    open_document(&mut engine);
+    let parse = |answers: Vec<String>| -> Vec<Value> {
+        answers
+            .iter()
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect()
+    };
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    let answers = parse(engine.refuse_unreadable(Some(4)));
+    assert_eq!(error_code(&answers, 4), "invalid_message");
+    let answers = parse(engine.refuse_unreadable(None));
+    assert_eq!(answers[0]["type"], json!("engine.error"));
+    assert_eq!(answers[0]["payload"]["code"], json!("invalid_message"));
+    let stopped = send(&mut engine, &request(5, "diag.record.stop", json!({})));
+    assert_eq!(ok_payload(&stopped, 5)["truncated"], json!(true));
 }

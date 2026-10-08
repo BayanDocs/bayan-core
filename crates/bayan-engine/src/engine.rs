@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::{BlobError, BlobId, BlobStore};
 use crate::config::Config;
 use crate::digest;
+use crate::envelope::{Envelope, EnvelopeError, invalid_request, with_type};
 use crate::limits::{
     MAX_DEVICE_SCALE, MAX_DOCUMENTS, MAX_ID, MAX_MESSAGE_BYTES, MAX_TILE_COORDINATE, MAX_TILE_SIDE,
     MAX_VIEW_COORDINATE, MAX_ZOOM, MIN_ZOOM,
@@ -25,17 +25,14 @@ use crate::protocol::{
     DocClose, DocOpen, DocOpened, Empty, EngineError, ErrorCode, ErrorInfo, FEATURES, FontReport,
     Hello, InputComposition, InputKey, InputPointer, InputText, LAYOUT_EPOCH, OverlayUpdate,
     PROTOCOL_VERSION, PointerKind, QueryA11y, RecordStopped, RenderInvalidate, RenderTile,
-    RenderTileReply, ReplayTile, UiManifestRequest, ViewLayoutProgress, ViewPages, ViewSet,
-    Welcome,
+    RenderTileReply, ReplayTile, TileRequest, UiManifestRequest, ViewLayoutProgress, ViewPages,
+    ViewSet, Welcome,
 };
 use crate::raster::TileGeometry;
 use crate::recording::{self, Recorder};
 
 /// The engine's semantic version, from the workspace version.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The longest message type an error repeats in its `args` (spec §12).
-const MAX_TYPE_IN_ERROR: usize = 64;
 
 /// Why a tile rendered through `bayan_render_tile` failed. On the C interface each maps to a `BayanStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,70 +225,9 @@ impl Outbox {
     }
 }
 
-/// A parsed envelope (spec §4).
-struct Envelope {
-    id: Option<u64>,
-    kind: String,
-    payload: serde_json::Value,
-}
-
-impl Envelope {
-    /// Reads an envelope. On failure, also returns the request identifier if one could be read, so the error can be the reply.
-    fn parse(message: &[u8]) -> Result<Self, (Option<u64>, ErrorInfo)> {
-        if message.len() > MAX_MESSAGE_BYTES {
-            return Err((
-                None,
-                ErrorInfo::new(ErrorCode::LimitExceeded).with_text("limit", "message_size"),
-            ));
-        }
-        let invalid = || ErrorInfo::new(ErrorCode::InvalidMessage);
-        let value: serde_json::Value =
-            serde_json::from_slice(message).map_err(|_| (None, invalid()))?;
-        let serde_json::Value::Object(mut fields) = value else {
-            return Err((None, invalid()));
-        };
-        let id = match fields.remove("id") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(value) => match value.as_u64() {
-                Some(id) if (1..=MAX_ID).contains(&id) => Some(id),
-                _ => return Err((None, invalid())),
-            },
-        };
-        if fields.get("v").and_then(serde_json::Value::as_u64) != Some(u64::from(PROTOCOL_VERSION))
-        {
-            return Err((id, unsupported_version()));
-        }
-        let Some(serde_json::Value::String(kind)) = fields.remove("type") else {
-            return Err((id, invalid()));
-        };
-        let payload = match fields.remove("payload") {
-            None | Some(serde_json::Value::Null) => {
-                serde_json::Value::Object(serde_json::Map::new())
-            }
-            Some(payload @ serde_json::Value::Object(_)) => payload,
-            Some(_) => return Err((id, invalid())),
-        };
-        Ok(Self { id, kind, payload })
-    }
-
-    /// The payload as the message type's payload type.
-    fn payload<T: DeserializeOwned>(&self) -> Result<T, ErrorInfo> {
-        serde_json::from_value(self.payload.clone()).map_err(|_| invalid_request(&self.kind))
-    }
-}
-
 fn unsupported_version() -> ErrorInfo {
     ErrorInfo::new(ErrorCode::UnsupportedProtocolVersion)
         .with_integers("supported", vec![i64::from(PROTOCOL_VERSION)])
-}
-
-/// The first characters of a message type, for an error's `args`: never more, so an error cannot carry a long string from the message back.
-fn short_type(kind: &str) -> String {
-    kind.chars().take(MAX_TYPE_IN_ERROR).collect()
-}
-
-fn invalid_request(kind: &str) -> ErrorInfo {
-    ErrorInfo::new(ErrorCode::InvalidRequest).with_text("type", &short_type(kind))
 }
 
 fn not_found(what: &str) -> ErrorInfo {
@@ -315,11 +251,8 @@ fn within(value: f64, low: f64, high: f64) -> bool {
 }
 
 /// The geometry of a tile request, checked against the limits of spec §13.
-fn tile_geometry(
-    request: &RenderTile,
-    width: u32,
-    height: u32,
-) -> Result<TileGeometry, TileFailure> {
+fn tile_geometry(request: &RenderTile) -> Result<TileGeometry, TileFailure> {
+    let (width, height) = (request.width, request.height);
     if width == 0 || height == 0 || width > MAX_TILE_SIDE || height > MAX_TILE_SIDE {
         return Err(TileFailure::Size);
     }
@@ -351,6 +284,8 @@ enum TileFailure {
     NoDocument,
     NoPage,
     Memory,
+    /// A replay has rendered as many pixels as it may (spec §13); the replay stops.
+    ReplayBudget,
 }
 
 impl TileFailure {
@@ -361,12 +296,13 @@ impl TileFailure {
             Self::NoDocument => not_found("document"),
             Self::NoPage => not_found("page"),
             Self::Memory => ErrorInfo::new(ErrorCode::Internal),
+            Self::ReplayBudget => limit_exceeded("replay_pixels"),
         }
     }
 
     const fn as_tile_error(&self) -> TileError {
         match self {
-            Self::Invalid | Self::Size => TileError::InvalidArgument,
+            Self::Invalid | Self::Size | Self::ReplayBudget => TileError::InvalidArgument,
             Self::NoDocument | Self::NoPage => TileError::NotFound,
             Self::Memory => TileError::Internal,
         }
@@ -387,10 +323,14 @@ pub struct Engine {
     replay: Option<ReplayLog>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ReplayLog {
     entry: u32,
     tiles: Vec<ReplayTile>,
+    /// How many more pixels the replay may render (spec §13).
+    pixels_left: u64,
+    /// Whether a tile was refused because the replay had rendered as many pixels as it may.
+    over_budget: bool,
 }
 
 impl Engine {
@@ -429,21 +369,21 @@ impl Engine {
         messages
     }
 
-    /// Reports, from a new engine, that the engine instance it replaces panicked while handling `message`: the error `panic` as the reply if the message had an identifier, then `engine.error` with `recoverable: false` (spec §3.2, §12). The web worker host calls it, because a panic in WebAssembly stops the whole instance instead of unwinding to [`Engine::handle`].
-    pub fn report_panic(&mut self, message: &[u8]) -> Vec<String> {
-        let id = match Envelope::parse(message) {
-            Ok(envelope) => envelope.id,
-            Err((id, _)) => id,
-        };
-        self.recover_from_panic(id)
+    /// Reports, from a new engine, that the engine instance it replaces panicked while handling a message with the identifier `id`: the error `panic` as the reply if the message had a valid identifier, then `engine.error` with `recoverable: false` (spec §3.2, §12). The web worker host calls it, because a panic in WebAssembly stops the whole instance instead of unwinding to [`Engine::handle`]. It passes only the identifier, which it reads itself, so the new instance never copies or parses the message that may have caused the panic.
+    pub fn report_panic(&mut self, id: Option<u64>) -> Vec<String> {
+        self.recover_from_panic(id.filter(|id| (1..=MAX_ID).contains(id)))
     }
 
-    /// Answers `message` with the error `internal`, for a host that could not deliver the engine's reply to it, such as the web worker host when the browser cannot create a tile's `ImageBitmap` (spec §3.2). A message without an identifier gets no reply, so nothing is sent for it.
-    pub fn report_host_failure(&mut self, message: &[u8]) -> Vec<String> {
-        let id = match Envelope::parse(message) {
-            Ok(envelope) => envelope.id,
-            Err((id, _)) => id,
-        };
+    /// Recovers from a panic that escaped [`Engine::handle`] or [`Engine::render_tile`], which catch the panics of message handlers and of rendering themselves: discards the session and any running recording, whose state the panic may have left half-changed, and reports `engine.error` with `recoverable: false` (spec §12). The native engine thread calls it, so that no panic ends the thread.
+    pub fn recover_from_escaped_panic(&mut self) -> Vec<String> {
+        self.recorder = None;
+        self.blob_reads.clear();
+        self.recover_from_panic(None)
+    }
+
+    /// Answers the message with the identifier `id` with the error `internal`, for a host that could not deliver the engine's reply to it, such as the web worker host when the browser cannot create a tile's `ImageBitmap` (spec §3.2). A message without a valid identifier gets no reply, so nothing is sent for it.
+    pub fn report_host_failure(&mut self, id: Option<u64>) -> Vec<String> {
+        let id = id.filter(|id| (1..=MAX_ID).contains(id));
         let mut outbox = Outbox::new(self.next_seq);
         if id.is_some() {
             outbox.fail(id, ErrorInfo::new(ErrorCode::Internal));
@@ -453,9 +393,19 @@ impl Engine {
 
     /// The answer to a message that the host did not hand to the engine because it is longer than the message limit (spec §13), as the web worker host does for JSON text over 16 MiB rather than copy it into the module's memory: `limit_exceeded` (`args.limit`: `message_size`), as the reply if the host could read the message's identifier `id`, otherwise as `engine.error`, as for a message the engine refuses itself. A recording cannot hold a message the engine never saw, so when the answer is an event (which counts towards `seq`), a running recording stops there and is marked truncated.
     pub fn refuse_oversized(&mut self, id: Option<u64>) -> Vec<String> {
+        self.refuse_unseen(id, limit_exceeded("message_size"))
+    }
+
+    /// The answer to a message that the host could not turn into JSON text, such as a JavaScript object holding a `BigInt` that the web worker host cannot serialize: `invalid_message`, as the reply if the host could read the message's identifier `id`, otherwise as `engine.error`, with the same effect on a running recording as [`Engine::refuse_oversized`] (spec §3.2).
+    pub fn refuse_unreadable(&mut self, id: Option<u64>) -> Vec<String> {
+        self.refuse_unseen(id, ErrorInfo::new(ErrorCode::InvalidMessage))
+    }
+
+    /// Answers a message the engine never saw with `error`. A recording cannot hold such a message, so when the answer is an event (which counts towards `seq`), a running recording stops there and is marked truncated.
+    fn refuse_unseen(&mut self, id: Option<u64>, error: ErrorInfo) -> Vec<String> {
         let id = id.filter(|id| (1..=MAX_ID).contains(id));
         let mut outbox = Outbox::new(self.next_seq);
-        outbox.fail(id, limit_exceeded("message_size"));
+        outbox.fail(id, error);
         self.next_seq = outbox.next_seq;
         if id.is_none()
             && let Some(recorder) = &mut self.recorder
@@ -509,27 +459,29 @@ impl Engine {
         if request.len() > MAX_MESSAGE_BYTES {
             return Err(TileError::InvalidArgument);
         }
-        let request: RenderTile =
+        let request: TileRequest =
             serde_json::from_slice(request).map_err(|_| TileError::InvalidArgument)?;
-        if request.width.is_some_and(|value| value != width)
-            || request.height.is_some_and(|value| value != height)
-        {
-            return Err(TileError::InvalidArgument);
-        }
+        let request = request
+            .with_size(width, height)
+            .ok_or(TileError::InvalidArgument)?;
         let pixels = self
-            .render(&request, width, height)
+            .render(&request)
             .map_err(|failure| failure.as_tile_error())?;
         self.log_tile(request.page, width, height, digest::of_bytes(&pixels));
         Ok(pixels)
     }
 
-    fn render(
-        &self,
-        request: &RenderTile,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>, TileFailure> {
-        let geometry = tile_geometry(request, width, height)?;
+    fn render(&mut self, request: &RenderTile) -> Result<Vec<u8>, TileFailure> {
+        let geometry = tile_geometry(request)?;
+        if let Some(replay) = &mut self.replay {
+            // Charged before rendering, so a replay never renders more than its budget.
+            let pixels = u64::from(geometry.width) * u64::from(geometry.height);
+            if pixels > replay.pixels_left {
+                replay.over_budget = true;
+                return Err(TileFailure::ReplayBudget);
+            }
+            replay.pixels_left -= pixels;
+        }
         let document = self
             .session
             .documents
@@ -561,6 +513,11 @@ impl Engine {
         let envelope = match Envelope::parse(message) {
             Ok(envelope) => envelope,
             Err((id, error)) => {
+                let error = match error {
+                    EnvelopeError::TooLarge => limit_exceeded("message_size"),
+                    EnvelopeError::Invalid => ErrorInfo::new(ErrorCode::InvalidMessage),
+                    EnvelopeError::UnsupportedVersion => unsupported_version(),
+                };
                 outbox.fail(id, error);
                 self.next_seq = outbox.next_seq;
                 return outbox.messages;
@@ -589,28 +546,29 @@ impl Engine {
         outbox.messages
     }
 
-    fn dispatch(&mut self, envelope: &Envelope, outbox: &mut Outbox) {
-        let result =
-            match envelope.kind.as_str() {
-                "hello" => self.hello(envelope, outbox),
-                _ if !self.session.handshake => Err(ErrorInfo::new(ErrorCode::HandshakeRequired)),
-                "doc.open" => self.doc_open(envelope, outbox),
-                "doc.close" => self.doc_close(envelope, outbox),
-                "view.set" => self.view_set(envelope, outbox),
-                "render.tile" => self.render_message(envelope, outbox),
-                "input.pointer" => self.input_pointer(envelope, outbox),
-                "input.key" => self.input_key(envelope, outbox),
-                "input.text" => self.input_text(envelope, outbox),
-                "input.composition" => self.input_composition(envelope, outbox),
-                "query.a11y" => self.query_a11y(envelope, outbox),
-                "ui.manifest" => Self::ui_manifest(envelope, outbox),
-                "diag.record.start" => self.record_start(envelope, outbox),
-                "diag.record.stop" => self.record_stop(envelope, outbox),
-                "diag.replay" => self.replay_message(envelope, outbox),
-                "diag.panic" => self.panic_message(),
-                other => Err(ErrorInfo::new(ErrorCode::UnsupportedMessage)
-                    .with_text("type", &short_type(other))),
-            };
+    fn dispatch(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) {
+        let result = match envelope.kind.as_str() {
+            "hello" => self.hello(envelope, outbox),
+            _ if !self.session.handshake => Err(ErrorInfo::new(ErrorCode::HandshakeRequired)),
+            "doc.open" => self.doc_open(envelope, outbox),
+            "doc.close" => self.doc_close(envelope, outbox),
+            "view.set" => self.view_set(envelope, outbox),
+            "render.tile" => self.render_message(envelope, outbox),
+            "input.pointer" => self.input_pointer(envelope, outbox),
+            "input.key" => self.input_key(envelope, outbox),
+            "input.text" => self.input_text(envelope, outbox),
+            "input.composition" => self.input_composition(envelope, outbox),
+            "query.a11y" => self.query_a11y(envelope, outbox),
+            "ui.manifest" => Self::ui_manifest(envelope, outbox),
+            "diag.record.start" => self.record_start(envelope, outbox),
+            "diag.record.stop" => self.record_stop(envelope, outbox),
+            "diag.replay" => self.replay_message(envelope, outbox),
+            "diag.panic" => self.panic_message(),
+            other => Err(with_type(
+                ErrorInfo::new(ErrorCode::UnsupportedMessage),
+                other,
+            )),
+        };
         if let Err(error) = result {
             outbox.fail(envelope.id, error);
         }
@@ -635,7 +593,7 @@ impl Engine {
             .ok_or_else(|| not_found("document"))
     }
 
-    fn hello(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn hello(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let hello: Hello = envelope.payload()?;
         if !hello.protocol_versions.contains(&PROTOCOL_VERSION) {
             return Err(unsupported_version());
@@ -655,7 +613,7 @@ impl Engine {
         Ok(())
     }
 
-    fn doc_open(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn doc_open(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let open: DocOpen = envelope.payload()?;
         // The v0 skeleton opens the mock document whatever the blob holds, but the blob must exist.
         self.read_blob(open.blob)?;
@@ -680,7 +638,7 @@ impl Engine {
         Ok(())
     }
 
-    fn doc_close(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn doc_close(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let close: DocClose = envelope.payload()?;
         self.session
             .documents
@@ -690,7 +648,7 @@ impl Engine {
         Ok(())
     }
 
-    fn view_set(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn view_set(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let view: ViewSet = envelope.payload()?;
         let viewport = view.viewport;
         let valid = within(view.zoom, MIN_ZOOM, MAX_ZOOM)
@@ -737,15 +695,13 @@ impl Engine {
 
     fn render_message(
         &mut self,
-        envelope: &Envelope,
+        envelope: &Envelope<'_>,
         outbox: &mut Outbox,
     ) -> Result<(), ErrorInfo> {
         let request: RenderTile = envelope.payload()?;
-        let (Some(width), Some(height)) = (request.width, request.height) else {
-            return Err(invalid_request(&envelope.kind));
-        };
+        let (width, height) = (request.width, request.height);
         let pixels = self
-            .render(&request, width, height)
+            .render(&request)
             .map_err(|failure| failure.as_message_error(&envelope.kind))?;
         let hash = digest::of_bytes(&pixels);
         self.log_tile(request.page, width, height, hash.clone());
@@ -765,7 +721,11 @@ impl Engine {
         Ok(())
     }
 
-    fn input_pointer(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn input_pointer(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
         let pointer: InputPointer = envelope.payload()?;
         let document = self.document(pointer.doc_id)?;
         let pressed = pointer.kind == PointerKind::Down && pointer.button == 0;
@@ -777,7 +737,7 @@ impl Engine {
         Ok(())
     }
 
-    fn input_key(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn input_key(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let key: InputKey = envelope.payload()?;
         let document = self.document(key.doc_id)?;
         let changed = !key.composing && document.key(&key.key);
@@ -788,7 +748,11 @@ impl Engine {
         Ok(())
     }
 
-    fn input_text(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn input_text(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
         let input: InputText = envelope.payload()?;
         let document = self.document(input.doc_id)?;
         let changed = document
@@ -803,7 +767,7 @@ impl Engine {
 
     fn input_composition(
         &mut self,
-        envelope: &Envelope,
+        envelope: &Envelope<'_>,
         outbox: &mut Outbox,
     ) -> Result<(), ErrorInfo> {
         let input: InputComposition = envelope.payload()?;
@@ -822,7 +786,11 @@ impl Engine {
         Ok(())
     }
 
-    fn query_a11y(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn query_a11y(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
         let query: QueryA11y = envelope.payload()?;
         let document = self.document(query.doc_id)?;
         let root = match query.node {
@@ -838,14 +806,18 @@ impl Engine {
         Ok(())
     }
 
-    fn ui_manifest(envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn ui_manifest(envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         // The stub is in English whatever locale is asked for (spec §6.8).
         let _request: UiManifestRequest = envelope.payload()?;
         outbox.reply(envelope.id, None, &manifest::stub());
         Ok(())
     }
 
-    fn record_start(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn record_start(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
         let _request: Empty = envelope.payload()?;
         // A replay behaves as the recording session did, where a recording was running.
         if self.recorder.is_some() || self.replay.is_some() {
@@ -856,7 +828,11 @@ impl Engine {
         Ok(())
     }
 
-    fn record_stop(&mut self, envelope: &Envelope, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+    fn record_stop(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
         let _request: Empty = envelope.payload()?;
         let recorder = self
             .recorder
@@ -879,7 +855,7 @@ impl Engine {
 
     fn replay_message(
         &mut self,
-        envelope: &Envelope,
+        envelope: &Envelope<'_>,
         outbox: &mut Outbox,
     ) -> Result<(), ErrorInfo> {
         if self.recorder.is_some() || self.replay.is_some() {
@@ -910,11 +886,12 @@ impl Engine {
         }
     }
 
-    /// An engine that replays a recording: it starts from the recording's snapshot, behaves as an engine that is recording, and lists the tiles it renders.
+    /// An engine that replays a recording: it starts from the recording's snapshot, behaves as an engine that is recording, lists the tiles it renders, and renders at most `pixel_budget` pixels.
     pub(crate) fn for_replay(
         config: Config,
         blobs: Arc<BlobStore>,
         snapshot: Snapshot,
+        pixel_budget: u64,
     ) -> Option<Self> {
         let valid = snapshot.session.is_valid()
             && (1..=MAX_ID).contains(&snapshot.next_seq)
@@ -922,9 +899,21 @@ impl Engine {
         valid.then(|| Self {
             session: snapshot.session,
             next_seq: snapshot.next_seq,
-            replay: Some(ReplayLog::default()),
+            replay: Some(ReplayLog {
+                entry: 0,
+                tiles: Vec::new(),
+                pixels_left: pixel_budget,
+                over_budget: false,
+            }),
             ..Self::new(config, blobs)
         })
+    }
+
+    /// Whether this replaying engine refused a tile because the replay had rendered as many pixels as it may.
+    pub(crate) fn replay_over_budget(&self) -> bool {
+        self.replay
+            .as_ref()
+            .is_some_and(|replay| replay.over_budget)
     }
 
     /// Sets the index of the recording entry being replayed.
@@ -975,65 +964,4 @@ fn line_changed(doc_id: u64, document: &MockDocument, outbox: &mut Outbox) {
             caret: Some(document.a11y_caret()),
         },
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_types_are_cut_at_64_characters() {
-        let long = "x".repeat(100);
-        assert_eq!(short_type(&long).len(), 64);
-        assert_eq!(short_type("doc.open"), "doc.open");
-    }
-
-    #[test]
-    fn parses_envelopes_strictly() {
-        let ok = Envelope::parse(br#"{"v":0,"id":3,"type":"hello","payload":{"a":1}}"#)
-            .ok()
-            .unwrap();
-        assert_eq!((ok.id, ok.kind.as_str()), (Some(3), "hello"));
-        let empty = Envelope::parse(br#"{"v":0,"type":"x"}"#).ok().unwrap();
-        assert!(
-            empty
-                .payload
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
-        );
-        let cases: [(&[u8], Option<u64>, ErrorCode); 7] = [
-            (b"[]", None, ErrorCode::InvalidMessage),
-            (b"not json", None, ErrorCode::InvalidMessage),
-            (
-                br#"{"v":0,"id":0,"type":"x"}"#,
-                None,
-                ErrorCode::InvalidMessage,
-            ),
-            (
-                br#"{"v":0,"id":9007199254740992,"type":"x"}"#,
-                None,
-                ErrorCode::InvalidMessage,
-            ),
-            (
-                br#"{"v":1,"id":4,"type":"x"}"#,
-                Some(4),
-                ErrorCode::UnsupportedProtocolVersion,
-            ),
-            (br#"{"v":0,"id":5}"#, Some(5), ErrorCode::InvalidMessage),
-            (
-                br#"{"v":0,"id":6,"type":"x","payload":[]}"#,
-                Some(6),
-                ErrorCode::InvalidMessage,
-            ),
-        ];
-        for (message, id, code) in cases {
-            let error = Envelope::parse(message).err().unwrap();
-            assert_eq!(
-                (error.0, error.1.code),
-                (id, code),
-                "{}",
-                String::from_utf8_lossy(message)
-            );
-        }
-    }
 }

@@ -1269,14 +1269,10 @@
           "type": "integer"
         },
         "height": {
-          "default": null,
-          "description": "The tile's height in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it.",
+          "description": "The tile's height in pixels, 1 to 4,096.",
           "format": "uint32",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "mode": {
           "anyOf": [
@@ -1301,14 +1297,10 @@
           "description": "The part of the page, in page coordinates."
         },
         "width": {
-          "default": null,
-          "description": "The tile's width in pixels, 1 to 4,096. Required in the message form; on the C interface, `bayan_render_tile`'s parameter gives it.",
+          "description": "The tile's width in pixels, 1 to 4,096.",
           "format": "uint32",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "zoom": {
           "default": null,
@@ -1323,7 +1315,9 @@
       "required": [
         "doc_id",
         "page",
-        "rect"
+        "rect",
+        "width",
+        "height"
       ],
       "type": "object"
     },

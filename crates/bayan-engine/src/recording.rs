@@ -6,7 +6,7 @@
 //!
 //! [spec]: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use crate::blobs::{BlobId, BlobStore};
 use crate::config::Config;
 use crate::digest;
 use crate::engine::{ENGINE_VERSION, Engine, Snapshot};
-use crate::limits::{MAX_BLOBS, MAX_RECORDING_BYTES, MAX_RECORDING_ENTRIES};
+use crate::limits::{MAX_BLOBS, MAX_RECORDING_BYTES, MAX_RECORDING_ENTRIES, MAX_REPLAY_PIXELS};
 use crate::protocol::{ErrorCode, ErrorInfo, LAYOUT_EPOCH, PROTOCOL_VERSION, ReplayReport};
 
 /// The `format` field of every recording.
@@ -280,12 +280,33 @@ fn entry_bytes(entry: &Entry) -> Result<Vec<u8>, ErrorInfo> {
     }
 }
 
+/// Releases the blobs the engine created while replaying one entry, from `first` on, except those the recording carries (spec §10). A recording does not say when the shell released a blob, but every blob that a later message read is among those it carries; keeping the others would fill the blob store after 1,024 tiles or 256 MiB, and every later entry would then differ.
+fn release_unread_blobs(blobs: &BlobStore, first: BlobId, recorded: &BTreeSet<BlobId>) {
+    let end = blobs.next_engine_id();
+    let mut id = first;
+    while id < end {
+        if !recorded.contains(&id) {
+            blobs.release(id);
+        }
+        id += 2;
+    }
+}
+
 /// Replays a recording with an engine configuration and reports whether every entry produced what it produced when it was recorded (spec §6.7, §10).
 ///
 /// # Errors
 ///
-/// `invalid_recording` if the recording cannot be read or exceeds a limit, and `recording_mismatch` if it comes from another engine version, protocol version or layout epoch.
+/// `invalid_recording` if the recording cannot be read or exceeds a limit, `recording_mismatch` if it comes from another engine version, protocol version or layout epoch, and `limit_exceeded` (`args.limit`: `replay_pixels`) if its tiles have more pixels than one replay may render (spec §13).
 pub fn replay(config: Config, recording: &[u8]) -> Result<ReplayReport, ErrorInfo> {
+    replay_with_budget(config, recording, MAX_REPLAY_PIXELS)
+}
+
+/// [`replay`], rendering at most `pixel_budget` pixels.
+fn replay_with_budget(
+    config: Config,
+    recording: &[u8],
+    pixel_budget: u64,
+) -> Result<ReplayReport, ErrorInfo> {
     if recording.len() > MAX_RECORDING_BYTES {
         return Err(invalid());
     }
@@ -306,18 +327,23 @@ pub fn replay(config: Config, recording: &[u8]) -> Result<ReplayReport, ErrorInf
         return Err(invalid());
     }
     let blobs = Arc::new(BlobStore::new());
+    let mut recorded = BTreeSet::new();
     for blob in &file.blobs {
         let bytes = base64::decode(&blob.base64).ok_or_else(invalid)?;
         if !blobs.insert_recorded(blob.id, bytes) {
             return Err(invalid());
         }
+        recorded.insert(blob.id);
     }
-    let mut engine = Engine::for_replay(config, blobs, file.initial_state).ok_or_else(invalid)?;
+    let mut engine =
+        Engine::for_replay(config, Arc::clone(&blobs), file.initial_state, pixel_budget)
+            .ok_or_else(invalid)?;
     let mut first_difference = None;
     for (index, entry) in file.entries.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| invalid())?;
         engine.set_replay_entry(index);
         let bytes = entry_bytes(entry)?;
+        let first_new_blob = blobs.next_engine_id();
         let produced = match entry.kind {
             EntryKind::Message => digest::of_messages(&engine.handle(&bytes, entry.t_ms)),
             EntryKind::Tile => {
@@ -330,9 +356,15 @@ pub fn replay(config: Config, recording: &[u8]) -> Result<ReplayReport, ErrorInf
                 }
             }
         };
+        if engine.replay_over_budget() {
+            return Err(
+                ErrorInfo::new(ErrorCode::LimitExceeded).with_text("limit", "replay_pixels")
+            );
+        }
         if produced != entry.digest && first_difference.is_none() {
             first_difference = Some(index);
         }
+        release_unread_blobs(&blobs, first_new_blob, &recorded);
     }
     Ok(ReplayReport {
         entries: u32::try_from(file.entries.len()).map_err(|_| invalid())?,
@@ -436,6 +468,57 @@ mod tests {
             replay(Config::default(), b"{").unwrap_err().code,
             ErrorCode::InvalidRecording
         );
+    }
+
+    #[test]
+    fn a_replay_renders_no_more_pixels_than_its_budget() {
+        let mut engine = engine();
+        engine.handle(
+            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+            0,
+        );
+        let blob = engine.blobs().put_shell(b"").unwrap();
+        engine.handle(
+            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
+            0,
+        );
+        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        // Three tiles of 10 × 10 pixels: one through each path, and one more through messages.
+        let tile = r#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":100000,"height":100000},"width":10,"height":10}"#;
+        engine.handle(
+            format!(r#"{{"v":0,"id":4,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
+            0,
+        );
+        assert!(
+            engine
+                .render_tile(tile.as_bytes(), 10, 10, 0)
+                .pixels
+                .is_ok()
+        );
+        engine.handle(
+            format!(r#"{{"v":0,"id":5,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
+            0,
+        );
+        let reply = engine.handle(br#"{"v":0,"id":6,"type":"diag.record.stop"}"#, 0);
+        let reply: serde_json::Value = serde_json::from_str(&reply[0]).unwrap();
+        let recording = engine
+            .blobs()
+            .take(reply["payload"]["blob"].as_u64().unwrap())
+            .unwrap();
+        // Exactly enough for the three tiles.
+        let report = replay_with_budget(Config::default(), &recording, 300).unwrap();
+        assert!(report.identical);
+        assert_eq!(report.tiles.len(), 3);
+        // One pixel less: the third tile is refused, and with it the replay.
+        let error = replay_with_budget(Config::default(), &recording, 299).unwrap_err();
+        assert_eq!(error.code, ErrorCode::LimitExceeded);
+        assert_eq!(
+            error.args.get("limit"),
+            Some(&crate::protocol::ArgValue::Text("replay_pixels".to_owned()))
+        );
+        // The direct path counts as well: with a budget for one tile, the second (direct) one is refused.
+        let error = replay_with_budget(Config::default(), &recording, 150).unwrap_err();
+        assert_eq!(error.code, ErrorCode::LimitExceeded);
     }
 
     #[test]

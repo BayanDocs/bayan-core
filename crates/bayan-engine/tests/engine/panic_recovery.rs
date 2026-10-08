@@ -63,9 +63,8 @@ fn a_panic_without_a_request_identifier_is_still_reported() {
 fn a_new_engine_reports_the_panic_that_stopped_its_predecessor() {
     // The web worker host replaces a WebAssembly instance that panicked and lets the new engine report it (engine protocol §3.2).
     let mut engine = engine_with(panicking());
-    let message = serde_json::to_vec(&request(7, "diag.panic", json!({}))).unwrap();
     let answers: Vec<Value> = engine
-        .report_panic(&message)
+        .report_panic(Some(7))
         .iter()
         .map(|json| serde_json::from_str(json).unwrap())
         .collect();
@@ -75,9 +74,9 @@ fn a_new_engine_reports_the_panic_that_stopped_its_predecessor() {
     assert_eq!(errors[0]["payload"]["recoverable"], json!(false));
     // Event numbers start again at 1 in the new instance (§4).
     assert_eq!(errors[0]["seq"], json!(1));
-    // Without an identifier, or unreadable, only the event remains.
-    for message in [br#"{"v":0,"type":"diag.panic"}"#.as_slice(), b"not json"] {
-        let answers = engine.report_panic(message);
+    // Without an identifier, or with one that is not a request identifier, only the event remains.
+    for id in [None, Some(0), Some(1 << 53)] {
+        let answers = engine.report_panic(id);
         assert_eq!(answers.len(), 1);
         assert!(answers[0].contains(r#""type":"engine.error""#));
     }

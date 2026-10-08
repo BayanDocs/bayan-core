@@ -88,18 +88,18 @@ impl WasmEngine {
         )
     }
 
-    /// On a new engine: the answers that report that the engine before it panicked while handling `message_json` (spec §3.2), as the text of a JSON array.
+    /// On a new engine: the answers that report that the engine before it panicked while handling the message with the request identifier `id` (pass `NaN` when it had none), as the text of a JSON array (spec §3.2). The worker host reads the identifier itself, so the new instance never copies or parses the message that may have caused the panic.
     #[wasm_bindgen(js_name = reportPanic)]
     #[must_use]
-    pub fn report_panic(&mut self, message_json: &str) -> String {
-        json_array(&self.engine.report_panic(message_json.as_bytes()))
+    pub fn report_panic(&mut self, id: f64) -> String {
+        json_array(&self.engine.report_panic(identifier(id)))
     }
 
-    /// The answer to `message_json` when the worker host could not deliver the engine's reply, for example because the browser could not create a tile's `ImageBitmap` (spec §3.2), as the text of a JSON array.
+    /// The answer to request `id` when the worker host could not deliver the engine's reply, for example because the browser could not create a tile's `ImageBitmap` (spec §3.2), as the text of a JSON array; empty if `id` is not a request identifier.
     #[wasm_bindgen(js_name = reportHostFailure)]
     #[must_use]
-    pub fn report_host_failure(&mut self, message_json: &str) -> String {
-        json_array(&self.engine.report_host_failure(message_json.as_bytes()))
+    pub fn report_host_failure(&mut self, id: f64) -> String {
+        json_array(&self.engine.report_host_failure(identifier(id)))
     }
 
     /// The answer to a message the worker host did not hand to the engine because it is longer than [`max_message_bytes`]: `limit_exceeded` as the reply to request `id`, or, if `id` is not a request identifier (pass `NaN` when the message has none), as `engine.error` (spec §3.2, §13). Returns the text of a JSON array.
@@ -107,6 +107,13 @@ impl WasmEngine {
     #[must_use]
     pub fn refuse_oversized(&mut self, id: f64) -> String {
         json_array(&self.engine.refuse_oversized(identifier(id)))
+    }
+
+    /// The answer to a message the worker host could not turn into JSON text, such as one holding a `BigInt`: `invalid_message` as the reply to request `id`, or, if `id` is not a request identifier (pass `NaN` when the message has none), as `engine.error` (spec §3.2). Returns the text of a JSON array.
+    #[wasm_bindgen(js_name = refuseUnreadable)]
+    #[must_use]
+    pub fn refuse_unreadable(&mut self, id: f64) -> String {
+        json_array(&self.engine.refuse_unreadable(identifier(id)))
     }
 
     /// Stores bytes from the shell in a new blob and returns its identifier, or 0 if a limit refuses them (spec §13). The engine answers a message that names blob 0 with `limit_exceeded`.
@@ -284,20 +291,33 @@ mod tests {
     #[test]
     fn a_new_engine_reports_the_panic_and_host_failures() {
         let mut engine = WasmEngine::new("").unwrap();
-        let panic = parse(&engine.report_panic(r#"{"v":0,"id":5,"type":"diag.panic"}"#));
+        let panic = parse(&engine.report_panic(5.0));
         assert_eq!(panic.len(), 2);
         assert_eq!(panic[0]["re"], 5);
         assert_eq!(panic[0]["error"]["code"], "panic");
         assert_eq!(panic[1]["payload"]["recoverable"], false);
+        // Without a valid identifier, only the event remains.
+        for id in [f64::NAN, 0.0, 1.5, 9_007_199_254_740_992.0] {
+            let panic = parse(&engine.report_panic(id));
+            assert_eq!(panic.len(), 1, "{id}");
+            assert_eq!(panic[0]["type"], "engine.error");
+        }
         let oversized = parse(&engine.refuse_oversized(9.0));
         assert_eq!(oversized[0]["re"], 9);
         assert_eq!(oversized[0]["error"]["args"]["limit"], "message_size");
         let anonymous = parse(&engine.refuse_oversized(f64::NAN));
         assert_eq!(anonymous[0]["type"], "engine.error");
+        let unreadable = parse(&engine.refuse_unreadable(10.0));
+        assert_eq!(unreadable[0]["re"], 10);
+        assert_eq!(unreadable[0]["error"]["code"], "invalid_message");
+        let anonymous = parse(&engine.refuse_unreadable(f64::NAN));
+        assert_eq!(anonymous[0]["payload"]["code"], "invalid_message");
         assert_eq!(max_message_bytes(), 16 * 1024 * 1024);
-        let failure = parse(&engine.report_host_failure(r#"{"v":0,"id":6,"type":"render.tile"}"#));
+        let failure = parse(&engine.report_host_failure(6.0));
         assert_eq!(failure.len(), 1);
+        assert_eq!(failure[0]["re"], 6);
         assert_eq!(failure[0]["error"]["code"], "internal");
+        assert!(parse(&engine.report_host_failure(f64::NAN)).is_empty());
         assert_eq!(json_array(&[]), "[]");
     }
 }
