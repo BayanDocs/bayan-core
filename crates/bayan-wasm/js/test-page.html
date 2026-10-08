@@ -1,0 +1,49 @@
+<!doctype html>
+<!--
+  A page for trying the WebAssembly engine and its worker host by hand (CORE-007). Serve the package directory over
+  HTTP (module workers do not run from file: addresses), for example with `python3 -m http.server -d <package>`, and
+  open test-page.html. It has no inline scripts or styles, so it runs under the web shell's Content Security Policy, except
+  for its Trusted Types rules: under those, `new Worker()` needs a policy for the worker's script address, which this page
+  does not create (the web shell does, from WEB-002 on). Serve it with that policy minus `require-trusted-types-for` and
+  `trusted-types`.
+
+  SPDX-FileCopyrightText: 2026 BayanDocs contributors
+  SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BayanDocs engine test page</title>
+    <link rel="stylesheet" href="test-page.css">
+    <script type="module" src="test-page.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>BayanDocs engine test page</h1>
+      <p>The engine runs as WebAssembly in a Web Worker and shows its mock document. Type in the field to edit the document's editable line; an input method's composition shows there too.</p>
+      <div class="controls">
+        <label><input type="checkbox" id="allow-panic"> Allow <code>diag.panic</code></label>
+        <button type="button" id="start">Start</button>
+        <button type="button" id="record" disabled>Record</button>
+        <button type="button" id="replay" disabled>Stop and replay</button>
+        <button type="button" id="panic" disabled>Panic</button>
+      </div>
+      <p class="controls">
+        <label for="typing">Type into the editable line:</label>
+        <input type="text" id="typing" autocomplete="off" disabled>
+      </p>
+      <p id="status" role="status">Not started.</p>
+    </header>
+    <main>
+      <div id="pages">
+        <canvas id="canvas" width="0" height="0">The mock document's pages.</canvas>
+        <div id="caret" hidden></div>
+      </div>
+      <section>
+        <h2>Messages</h2>
+        <ol id="log"></ol>
+      </section>
+    </main>
+  </body>
+</html>

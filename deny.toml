@@ -1,5 +1,5 @@
-# cargo-deny configuration (ADR-0017), checked by `cargo deny check` as part of `cargo xtask verify`.
-# CORE-001 added this minimal version so that the first dependencies, which arrive while X-003 is still in progress, are already checked against the policy. X-003 completes it.
+# cargo-deny configuration (ADR-0017), checked by `cargo deny check` as part of `cargo xtask verify`, on every pull request and every night.
+# It covers RustSec advisories, the license allowlist, banned and duplicate crates, and the allowed sources. The rules Cargo and cargo-deny cannot check (exact pins and the 24-hour minimum age of new package versions) are `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age` (work package X-003).
 
 [graph]
 # Check the dependencies of every feature, so nothing escapes the check by hiding behind an optional feature.
@@ -8,6 +8,9 @@ all-features = true
 [advisories]
 # Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version. An exception needs the advisory ID in `ignore`, with a comment explaining why we are not affected.
 yanked = "deny"
+# Advisories that a crate is unmaintained or unsound count for every crate in the build, direct or not. For unmaintained crates that is cargo-deny's default; for unsound ones the default would count only the workspace's direct dependencies.
+unmaintained = "all"
+unsound = "all"
 # Exceptions added by the CORE-004 spike for crates that Loro 1.16.2 (ADR-0008) pulls in. All four advisories are informational "unmaintained" notices: none reports a vulnerability, and none has a patched version, because the repositories were archived. They are recorded as a risk of ADR-0008 in spikes/crdt-model/REPORT.md, which recommends asking the Loro maintainers to move to the maintained forks; remove each entry as soon as Loro no longer depends on the crate.
 ignore = [
   { id = "RUSTSEC-2026-0248", reason = "im (unmaintained since 2026-05-03): a persistent-collections crate used inside loro-internal; no known vulnerability. Its maintained fork is imbl." },
@@ -49,8 +52,9 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
-# Dependencies come only from crates.io. A Git dependency needs an explicit entry in `allow-git` at a pinned revision (X-003).
+# Dependencies come only from crates.io. A Git dependency needs its repository listed in `allow-git`, with a reason, and must name a fixed `tag` or `rev` (a commit), never a branch; `cargo xtask check-exact-pins` checks the same in the manifests. Cargo.lock records the exact commit either way. `cargo xtask check-lockfile-age`, which runs before anything is built, refuses a Git dependency until a work package teaches it to judge the commit's age.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+required-git-spec = "tag"

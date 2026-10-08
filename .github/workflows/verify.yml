@@ -23,6 +23,8 @@ env:
   CARGO_INCREMENTAL: 0
   # Must equal CARGO_DENY_VERSION in xtask/src/verify.rs (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
   CARGO_DENY_VERSION: 0.20.2
+  # Node.js runs the tests in WebAssembly (CORE-002). Must equal NODE_VERSION in xtask/src/verify.rs, scripts/dev-setup.sh and .github/workflows/artifacts.yml (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
+  NODE_VERSION: 24.21.0
 
 jobs:
   verify:
@@ -42,6 +44,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares Cargo.lock with the merge base of the pull request and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -74,6 +78,36 @@ jobs:
           # Install next to cargo (rustup's bin directory), which is already on PATH.
           cp "$name/cargo-deny$exe" "$(dirname "$(command -v cargo)")/"
           cargo deny --version
+
+      - name: Install Node.js for the WebAssembly tests (pinned version, SHA-256 checked)
+        run: |
+          # Node.js 24.21.0 (Active LTS, released 2026-09-07). Only the node program itself is needed: on Windows it is published on its own, elsewhere it is unpacked from the release archive. The checksums are those of nodejs.org's SHASUMS256.txt for this release, whose signature by the Node.js release key 5BE8 A3F6 C8A5 C01D 106C 0AD8 20B1 A390 B168 D356 was checked.
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) file="node-v$NODE_VERSION-linux-x64.tar.xz" sha256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;;
+            Windows-X64) file="win-x64/node.exe" sha256=ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32 ;;
+            macOS-ARM64) file="node-v$NODE_VERSION-darwin-arm64.tar.xz" sha256=6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe ;;
+            *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          cd "$RUNNER_TEMP" || exit 1
+          download=$(basename "$file")
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$download" \
+            "https://nodejs.org/dist/v$NODE_VERSION/$file"
+          if command -v sha256sum > /dev/null; then actual=$(sha256sum "$download"); else actual=$(shasum -a 256 "$download"); fi
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::Node.js checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          mkdir node
+          if [ "$RUNNER_OS" = Windows ]; then
+            mv "$download" node/node.exe
+            # GitHub reads this file as Windows paths.
+            cygpath -w "$RUNNER_TEMP/node" >> "$GITHUB_PATH"
+          else
+            tar -xJf "$download" -C node --strip-components 2 "${download%.tar.xz}/bin/node"
+            echo "$RUNNER_TEMP/node" >> "$GITHUB_PATH"
+          fi
+          node/node --version
 
       - name: Restore the build cache
         id: cache

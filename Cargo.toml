@@ -18,8 +18,26 @@ repository = "https://github.com/BayanDocs/bayan-core"
 # Nothing is published to crates.io until the release work packages set up trusted publishing (ADR-0017, ADR-0026).
 publish = false
 
-# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017).
+# Every third-party dependency is declared here once, with an exact `=x.y.z` requirement, and crates use it with `name.workspace = true`. The version must be at least 24 hours old, its license must be on the allowlist in deny.toml, and the pull request that adds it must justify it (ADR-0017). Our own crates depend on each other by path, in their own manifests.
 [workspace.dependencies]
+# Rust types to and from JSON: the engine protocol's messages are serde types (ADR-0012 §1). Published 2026-07-18; MIT OR Apache-2.0.
+serde = { version = "=1.0.229", features = ["derive"] }
+# The JSON encoding of the engine protocol (ADR-0012 §1). `float_roundtrip` parses numbers exactly as JavaScript and Qt do, so a zoom factor means the same on both sides. Published 2026-07-20; MIT OR Apache-2.0.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip", "raw_value"] }
+# Generates the protocol's JSON Schema from the same Rust types (ADR-0012 §1, CORE-007). Published 2026-07-27; MIT.
+schemars = "=1.2.2"
+# The WebAssembly binding of the engine for the web shell (ADR-0012 §4). Must equal the wasm-bindgen CLI pinned in scripts/dev-setup.sh. Published 2026-09-25; MIT OR Apache-2.0.
+wasm-bindgen = "=0.2.129"
+# Generates the C header of bayan-ffi (ADR-0012 §3); a test dependency only, which checks that the committed header is current. Without default features, so without its command-line parser. Published 2026-06-09; MPL-2.0.
+cbindgen = { version = "=0.29.4", default-features = false }
+# The Serialize and Deserialize traits without the derive macro, for types that implement them by hand (bayan-units). The same traits that `serde` re-exports, so both crates' types work with every serde format. Published 2026-07-18; MIT OR Apache-2.0.
+serde_core = { version = "=1.0.229", default-features = false }
+# Test-only. Property-based testing. Without its default features it seeds every run with the same fixed value, so a failure reproduces on every platform, and it needs no operating-system randomness: its `std` feature would pull in getrandom, which does not build for wasm32-unknown-unknown. `no_std` makes num-traits use libm for the float strategies proptest offers. Published 2026-03-24; MIT OR Apache-2.0.
+proptest = { version = "=1.11.0", default-features = false, features = ["alloc", "no_std"] }
+# Test-only. Arbitrary-precision integers for the independent reference implementations that the rounding, parsing and trigonometry tests compare against. Published 2026-07-05; MIT OR Apache-2.0.
+num-bigint = { version = "=0.5.1", default-features = false }
+# Test-only. Checks Serialize and Deserialize implementations against the exact serde calls they make. Published 2024-08-05; MIT OR Apache-2.0.
+serde_test = "=1.0.177"
 # The CRDT library of ADR-0008 (MIT, published 2026-09-21). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
 loro = "=1.16.2"
 # The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.

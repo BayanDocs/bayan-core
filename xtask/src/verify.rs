@@ -16,6 +16,12 @@ pub const CARGO_DENY_VERSION: &str = "0.20.2";
 /// The WebAssembly target of the web app's engine (ADR-0014).
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
+/// The WebAssembly target the tests run on. The engine's own target, wasm32-unknown-unknown, offers no standard way to run Rust's test harness, so the tests are built for WASI (wasm32-wasip1) and run in Node.js, as ADR-0025 §1 foresees for the determinism checks. Both targets compile the code to the same WebAssembly instructions with the same arithmetic; WASI adds only the operating-system interface the test harness needs to print its results and report how it ended. `rust-toolchain.toml` lists the target, so rustup installs it.
+const WASM_TEST_TARGET: &str = "wasm32-wasip1";
+
+/// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; the Node.js driver in `.github/workflows/artifacts.yml` uses it too, and a test keeps all four equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
+pub const NODE_VERSION: &str = "24.21.0";
+
 /// Crates that run natively only and are therefore not built for WebAssembly, with the reason. Every other workspace member must build for WebAssembly, so a new crate is covered without anyone having to remember it.
 pub const NATIVE_ONLY: [(&str, &str); 3] = [
     ("bayan-cli", "a command-line tool, run natively"),
@@ -88,11 +94,23 @@ pub const CLIPPY_RUNS: [ClippyRun; 4] = [
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
 
-/// Hook for the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not cover. Work package X-003 adds `check-exact-pins` (every entry of `[workspace.dependencies]` is an exact `=x.y.z` requirement) and `check-lockfile-age` (no package version in `Cargo.lock` is younger than 24 hours) here, and as `cargo xtask` commands.
-const SUPPLY_CHAIN_CHECKS: &[Check] = &[];
+/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to `Cargo.lock` is at least 24 hours old. The second compares with the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when `Cargo.lock` changed.
+const SUPPLY_CHAIN_CHECKS: &[Check] = &[
+    (
+        "check-exact-pins: every dependency is pinned exactly (ADR-0017 rule 5)",
+        exact_pins,
+    ),
+    (
+        "check-lockfile-age: Cargo builds exactly what Cargo.lock lists, and every package version added to it was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
+        lockfile_age,
+    ),
+];
 
 /// Hook for determinism checks (ADR-0004, ADR-0025 §1): checks that the same input produces identical layout and pixel hashes on every platform plug in here, from CORE-002 and CORE-003 onward.
-const DETERMINISM_CHECKS: &[Check] = &[];
+const DETERMINISM_CHECKS: &[Check] = &[(
+    "bayan-units: the fixed test vector of the deterministic math (CORE-002) gives the committed fingerprints on the host and in WebAssembly",
+    math_fingerprints,
+)];
 
 /// One step of the gate.
 pub struct Step {
@@ -103,8 +121,13 @@ pub struct Step {
     run: fn(&Path) -> Result<(), String>,
 }
 
-/// The steps, in order. The first six are the ones work package CORE-001 lists, in its order.
+/// The steps, in order. The supply-chain checks come first, so that no code of a dependency they reject is compiled or run (build scripts, procedural macros, tests) before they fail; they build nothing themselves. The next six are the ones work package CORE-001 lists, in its order.
 pub const STEPS: [Step; 9] = [
+    Step {
+        name: "supply-chain",
+        title: "Supply-chain checks (exact pins, what Cargo builds, age and checksum of new package versions)",
+        run: supply_chain,
+    },
     Step {
         name: "fmt",
         title: "Formatting (rustfmt)",
@@ -117,7 +140,7 @@ pub const STEPS: [Step; 9] = [
     },
     Step {
         name: "test",
-        title: "Tests",
+        title: "Tests (on the host, then in WebAssembly with Node.js)",
         run: test,
     },
     Step {
@@ -139,11 +162,6 @@ pub const STEPS: [Step; 9] = [
         name: "guardrails",
         title: "Guardrails: lint configuration and lint canaries",
         run: guardrails,
-    },
-    Step {
-        name: "supply-chain",
-        title: "Supply-chain checks (X-003)",
-        run: supply_chain,
     },
     Step {
         name: "determinism",
@@ -217,6 +235,15 @@ fn preflight(root: &Path) -> Result<(), String> {
             ));
         }
     }
+
+    let mut node = Command::new("node");
+    node.arg("--version").current_dir(root);
+    let found = first_line(&mut node).map_err(|_| {
+        format!(
+            "Node.js is not installed, or not on PATH. The gate runs the tests in WebAssembly with Node.js {NODE_VERSION}: run scripts/dev-setup.sh, which installs it with a verified checksum (on Linux and macOS) and prints how to put it on PATH."
+        )
+    })?;
+    println!("    {}", check_node(&found)?);
 
     // Checked before Clippy first runs, because another configuration file would quietly change what every later step checks.
     let clippy_conf_dir = std::env::var_os("CLIPPY_CONF_DIR");
@@ -319,8 +346,28 @@ fn clippy_args(run: &ClippyRun) -> Vec<String> {
     args
 }
 
+/// Runs the tests on the host, then the same tests in WebAssembly (CORE-002, acceptance criterion 2), where they run as WASI programs in Node.js.
 fn test(root: &Path) -> Result<(), String> {
-    process::run(cargo(root).args(["test", "--workspace", "--locked"]))
+    process::run(cargo(root).args(["test", "--workspace", "--locked"]))?;
+    println!(
+        "    The same tests in WebAssembly ({WASM_TEST_TARGET}), run by Node.js {NODE_VERSION} through xtask/wasi-runner.mjs:"
+    );
+    for (name, reason) in NATIVE_ONLY {
+        println!("    not tested in WebAssembly: {name} ({reason})");
+    }
+    process::run(cargo(root).args(wasm_test_args(root, &workspace_without_native_only(), &[])?))
+}
+
+/// Runs the fixed test vector of bayan-units' deterministic math on the host and in WebAssembly, showing the fingerprints each run prints. The tests compare them with the fingerprints committed in `crates/bayan-units/tests/determinism.rs`, so both passing means both produced exactly those bits. CI runs the gate on Linux x86-64, Windows x86-64 and macOS arm64, which makes four platforms (CORE-002, acceptance criterion 4).
+fn math_fingerprints(root: &Path) -> Result<(), String> {
+    let vector = ["--package", "bayan-units", "--test", "determinism"];
+    process::run(
+        cargo(root)
+            .arg("test")
+            .args(vector)
+            .args(["--locked", "--", "--show-output"]),
+    )?;
+    process::run(cargo(root).args(wasm_test_args(root, &vector, &[])?))
 }
 
 fn wasm32(root: &Path) -> Result<(), String> {
@@ -363,7 +410,15 @@ fn guardrails(root: &Path) -> Result<(), String> {
 }
 
 fn supply_chain(root: &Path) -> Result<(), String> {
-    run_hook(SUPPLY_CHAIN_CHECKS, root, "work package X-003 adds them")
+    run_hook(SUPPLY_CHAIN_CHECKS, root, "none are configured")
+}
+
+fn exact_pins(root: &Path) -> Result<(), String> {
+    crate::supply_chain::exact_pins::check(root, &mut |line| println!("      {line}"))
+}
+
+fn lockfile_age(root: &Path) -> Result<(), String> {
+    crate::supply_chain::lockfile_age::check(root, None, &mut |line| println!("      {line}"))
 }
 
 fn determinism(root: &Path) -> Result<(), String> {
@@ -383,6 +438,74 @@ fn run_hook(checks: &[Check], root: &Path, when_empty: &str) -> Result<(), Strin
         check(root)?;
     }
     Ok(())
+}
+
+/// The arguments that select the workspace members to test in WebAssembly: all but the `NATIVE_ONLY` crates.
+fn workspace_without_native_only() -> Vec<&'static str> {
+    let mut selection = vec!["--workspace"];
+    for (name, _) in NATIVE_ONLY {
+        selection.extend(["--exclude", name]);
+    }
+    selection
+}
+
+/// The arguments after `cargo` that run the tests of `selection` (such as `--workspace`) in WebAssembly, with Node.js and the runner script as Cargo's runner for the target, followed by `--no-capture` and `harness` for the test harness itself.
+///
+/// The runner is passed as a TOML array through `--config`, not as an environment variable, because Cargo splits the variable's value at spaces and the repository's path may contain some.
+fn wasm_test_args(
+    root: &Path,
+    selection: &[&str],
+    harness: &[&str],
+) -> Result<Vec<String>, String> {
+    let script = root.join("xtask").join("wasi-runner.mjs");
+    let script = script.to_str().ok_or_else(|| {
+        format!(
+            "the path of the WebAssembly test runner, {}, is not valid Unicode, so it cannot be handed to Cargo",
+            script.display()
+        )
+    })?;
+    let runner = format!(
+        "target.{WASM_TEST_TARGET}.runner = [\"node\", \"--disable-warning=ExperimentalWarning\", {}]",
+        toml_string(script)
+    );
+    let mut args = vec!["test".to_owned()];
+    args.extend(selection.iter().map(|&arg| arg.to_owned()));
+    args.extend(["--locked", "--target", WASM_TEST_TARGET, "--config"].map(str::to_owned));
+    args.push(runner);
+    // In WebAssembly a panic aborts the whole test program, before the test harness could print the output it captured, and with it the failure's message (or proptest's smallest failing input). So nothing is captured: everything is printed as it happens. The tests run one after the other there, so their output does not interleave.
+    args.extend(["--", "--no-capture"].map(str::to_owned));
+    args.extend(harness.iter().map(|&arg| arg.to_owned()));
+    Ok(args)
+}
+
+/// `text` as a TOML basic string: in double quotes, with backslashes, double quotes and control characters escaped.
+fn toml_string(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            control if control.is_control() => {
+                quoted.push_str(&format!("\\u{:04X}", u32::from(control)));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Checks the first line that `node --version` printed against the pinned version, and returns how to report it.
+fn check_node(found: &str) -> Result<String, String> {
+    if found == format!("v{NODE_VERSION}") {
+        Ok(format!(
+            "Node.js: {NODE_VERSION} (pinned in xtask/src/verify.rs), which runs the tests in WebAssembly"
+        ))
+    } else {
+        Err(format!(
+            "the gate runs the tests in WebAssembly with Node.js {NODE_VERSION}, but `node --version` reports `{found}`. Run scripts/dev-setup.sh, which installs it with a verified checksum (on Linux and macOS) and prints how to put it on PATH; in BayanDocs cloud sessions it is already installed, so run `. /etc/profile.d/zz-bayandocs.sh` first (see AGENTS.md)."
+        ))
+    }
 }
 
 /// Runs a command and returns the first line it printed, or an error if it failed.
@@ -449,12 +572,14 @@ fn duration(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// The supply-chain checks run before anything is compiled, so that a dependency they reject never runs its build script, procedural macros or tests; then the steps that work package CORE-001 lists, in its order.
     #[test]
-    fn runs_the_briefs_steps_first_and_in_its_order() {
+    fn runs_the_supply_chain_checks_first_then_the_briefs_steps_in_its_order() {
         let names: Vec<&str> = STEPS.iter().map(|step| step.name).collect();
         assert_eq!(
             names,
             [
+                "supply-chain",
                 "fmt",
                 "clippy",
                 "test",
@@ -462,7 +587,6 @@ mod tests {
                 "doc",
                 "deny",
                 "guardrails",
-                "supply-chain",
                 "determinism"
             ]
         );
@@ -642,5 +766,139 @@ mod tests {
     fn formats_durations() {
         assert_eq!(duration(Duration::from_millis(4_250)), "4.2 s");
         assert_eq!(duration(Duration::from_secs(83)), "1 min 23 s");
+    }
+
+    #[test]
+    fn runs_the_tests_in_webassembly_with_node_and_the_runner_script() {
+        let root = Path::new("/repo");
+        let args = wasm_test_args(root, &workspace_without_native_only(), &[]).unwrap();
+        let config = args.iter().position(|arg| arg == "--config").unwrap();
+        assert_eq!(
+            args[..=config],
+            [
+                "test",
+                "--workspace",
+                "--exclude",
+                "bayan-cli",
+                "--exclude",
+                "bayan-ffi",
+                "--exclude",
+                "xtask",
+                "--locked",
+                "--target",
+                "wasm32-wasip1",
+                "--config",
+            ]
+        );
+        let runner = &args[config + 1];
+        assert!(
+            runner.starts_with(r#"target.wasm32-wasip1.runner = ["node", "--disable-warning=ExperimentalWarning", "/repo"#),
+            "{runner}"
+        );
+        assert!(runner.ends_with(r#"wasi-runner.mjs"]"#), "{runner}");
+        // Nothing is captured: in WebAssembly a failing test aborts the program before the harness could print what it captured.
+        assert_eq!(args[config + 2..], ["--", "--no-capture"]);
+        // The runner script is the file in this repository.
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("wasi-runner.mjs")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn passes_arguments_to_the_test_harness_after_a_double_dash() {
+        let args = wasm_test_args(
+            Path::new("/repo"),
+            &["--package", "bayan-units", "--test", "determinism"],
+            &["--exact", "a_test"],
+        )
+        .unwrap();
+        assert_eq!(
+            &args[..5],
+            ["test", "--package", "bayan-units", "--test", "determinism"]
+        );
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["--", "--no-capture", "--exact", "a_test"]
+        );
+    }
+
+    #[test]
+    fn writes_text_as_toml_strings() {
+        assert_eq!(
+            toml_string("/repo/xtask/wasi-runner.mjs"),
+            r#""/repo/xtask/wasi-runner.mjs""#
+        );
+        assert_eq!(
+            toml_string(r"C:\Users\Ana\bayan-core"),
+            r#""C:\\Users\\Ana\\bayan-core""#
+        );
+        assert_eq!(toml_string(r#"a "quoted" name"#), r#""a \"quoted\" name""#);
+        assert_eq!(
+            toml_string("tab\tand\u{7f}delete"),
+            r#""tab\u0009and\u007Fdelete""#
+        );
+        assert_eq!(toml_string("Zoë/Ω"), "\"Zoë/Ω\"");
+    }
+
+    #[test]
+    fn accepts_only_the_pinned_node() {
+        assert!(check_node(&format!("v{NODE_VERSION}")).is_ok());
+        let problem = check_node("v22.22.0").unwrap_err();
+        assert!(
+            problem.contains("v22.22.0") && problem.contains(NODE_VERSION),
+            "{problem}"
+        );
+        assert!(check_node("").is_err());
+    }
+
+    #[test]
+    fn pins_the_same_node_as_ci_and_the_setup_script() {
+        let workflow = include_str!("../../.github/workflows/verify.yml");
+        assert!(
+            workflow
+                .lines()
+                .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
+            "the CI workflow must install Node.js {NODE_VERSION}"
+        );
+        let artifacts = include_str!("../../.github/workflows/artifacts.yml");
+        assert!(
+            artifacts
+                .lines()
+                .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
+            "the artifacts workflow's Node.js driver must use Node.js {NODE_VERSION}"
+        );
+        let script = include_str!("../../scripts/dev-setup.sh");
+        assert!(
+            script
+                .lines()
+                .any(|line| line.starts_with(&format!("NODE_VERSION={NODE_VERSION} "))),
+            "scripts/dev-setup.sh must install Node.js {NODE_VERSION}"
+        );
+    }
+
+    #[test]
+    fn the_setup_script_never_lets_rustup_update_itself() {
+        // `rustup toolchain install` and `rustup update` also update rustup itself, by default to its newest release, which can be less than 24 hours old (ADR-0017: no silent upgrades).
+        let script = include_str!("../../scripts/dev-setup.sh");
+        let installs: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| {
+                line.contains("rustup toolchain install") || line.contains("rustup update")
+            })
+            .collect();
+        assert!(
+            !installs.is_empty(),
+            "scripts/dev-setup.sh no longer installs the toolchain with rustup; update this test"
+        );
+        for line in installs {
+            assert!(
+                line.contains("--no-self-update"),
+                "scripts/dev-setup.sh must pass --no-self-update to rustup: {line}"
+            );
+        }
     }
 }
