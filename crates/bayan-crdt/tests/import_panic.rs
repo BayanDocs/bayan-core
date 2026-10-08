@@ -34,7 +34,7 @@ fn silence_library_panics() {
         std::panic::set_hook(Box::new(move |info| {
             let in_library = info
                 .location()
-                .is_some_and(|location| location.file().contains("/loro"));
+                .is_some_and(|location| is_library_file(location.file()));
             if in_library {
                 SILENCED.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -42,6 +42,23 @@ fn silence_library_panics() {
             }
         }));
     });
+}
+
+/// Whether a panic's source file belongs to one of Loro's crates, such as `…/index.crates.io-…/loro-internal-1.16.2/src/oplog.rs`; on Windows the separators are backslashes.
+fn is_library_file(file: &str) -> bool {
+    file.split(['/', '\\']).any(|part| part.starts_with("loro"))
+}
+
+#[test]
+fn recognizes_the_library_s_files_with_either_separator() {
+    assert!(is_library_file(
+        "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loro-internal-1.16.2/src/container/richtext/richtext_state.rs"
+    ));
+    assert!(is_library_file(
+        r"C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\loro-internal-1.16.2\src\container\richtext\richtext_state.rs"
+    ));
+    assert!(!is_library_file("crates/bayan-crdt/tests/import_panic.rs"));
+    assert!(!is_library_file(r"crates\bayan-crdt\tests\import_panic.rs"));
 }
 
 fn load() -> Doc {
