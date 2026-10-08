@@ -1,0 +1,22 @@
+# F5: how deep a nested value may be before importing an update that carries it overflows the stack (report §6 Q7, §7 F5). Measured 2026-10-08 on commit d64ec12 (Loro 1.16.2, Rust 1.99.0, x86-64 Linux, Cargo's default dev and release profiles) on the machine of results/README.md.
+# Method: a scratch probe (not committed; it builds the update exactly as `hostile_update` in crates/bayan-crdt/tests/adapter.rs does: a value nested <depth> levels deep, 2 bytes per level plus about 98) runs each attempt in a process of its own, on a thread with the given stack, and records whether it survives or aborts with "has overflowed its stack". Stages: `adapter` = Doc::new, Doc::import(&update, &ImportLimits::UPDATE) and drop; `meta` = LoroDoc::decode_import_blob_meta alone; `raw` = LoroDoc::import with the document leaked; `raw-read` = that plus export_json_in_id_span (the adapter's read-back); `raw-free` = LoroDoc::import, then drop. Each boundary was measured three times; the results are deterministic, and debug and release builds write byte-identical updates.
+# Reading: Loro decodes nested values without recursion and frees them recursively; the overflow happens when the decoded copy inside decode_import_blob_meta (the adapter's first call into Loro, before the change and operation limits are compared) is freed. The probe's inputs are crash reproductions and stay private.
+
+profile  stage     stack     deepest that survives    first that aborts
+release  adapter    2 MiB     21,700 levels (43,499 B) 21,800 levels (43,699 B)
+release  meta       2 MiB     21,700 levels (43,499 B) 21,800 levels (43,699 B)
+release  raw        2 MiB     524,238 levels (1,048,575 B) none up to 524,238 levels
+release  raw-free   2 MiB     21,700 levels (43,499 B) 21,800 levels (43,699 B)
+release  raw-read   2 MiB     524,238 levels (1,048,575 B) none up to 524,238 levels
+release  adapter    8 MiB     87,300 levels (174,699 B) 87,400 levels (174,899 B)
+debug    adapter    2 MiB     5,900 levels (11,897 B)  6,000 levels (12,097 B)
+debug    meta       2 MiB     5,900 levels (11,897 B)  6,000 levels (12,097 B)
+debug    raw        2 MiB     524,238 levels (1,048,575 B) none up to 524,238 levels
+debug    raw-free   2 MiB     5,900 levels (11,897 B)  6,000 levels (12,097 B)
+debug    raw-read   2 MiB     524,238 levels (1,048,575 B) none up to 524,238 levels
+debug    adapter    8 MiB     23,700 levels (47,499 B) 23,800 levels (47,699 B)
+
+# The deepest value the 1 MiB size limit admits: 524,238 levels (1,048,575 bytes); one level more (1,048,577 bytes) is refused as TooLarge before any decoding. The stack an import of the deepest value needs:
+release  adapter   40 MiB aborts, 48 MiB aborts, 52 MiB survives, 56 MiB survives, 64 MiB survives
+debug    adapter   160 MiB aborts, 176 MiB survives, 192 MiB survives, 224 MiB survives, 256 MiB survives
+# (When it survives, the import returns ImportError::ValueTooDeep and poisons the document.)

@@ -1,4 +1,4 @@
-# callgrind, inclusive instruction counts: the first read of the full 500-page model after loading it (one call of profile_first_read: RawDocument::read, then normalize), commit 50dbc7a.
+# callgrind, inclusive instruction counts: the first read of the full 500-page model after loading it (one call of profile_first_read: RawDocument::read, then normalize), commit 50dbc7a, 2026-10-08.
 # Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_first_read*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
 
   2,279,160,260 (100.0%)  PROGRAM TOTALS

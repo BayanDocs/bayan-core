@@ -26,4 +26,5 @@ panic-21       302      a rewritten range       serde_columnar-0.3.14/src/strate
 panic-22      1613      a rewritten range       serde_columnar-0.3.14/src/strategy/rle.rs:637
 abort-01        94      8 changed bytes         aborts: an allocation of 193,120,648,240 bytes fails while the change header is decoded
 abort-02       695      a rewritten range       aborts: an allocation of 125,045,342,080 bytes fails while the change header is decoded
-# Summary: 18 of the 22 panic sites need only one or two changed bytes in a valid update; 11 of those 18 updates are 88 to 371 bytes long (9 of them shorter than 104 bytes).
+# Summary: 18 of the 22 cases (17 sites) need only one or two changed bytes in a valid update; 11 of those 18 updates are 88 to 371 bytes long (9 of them shorter than 104 bytes).
+# Corrected 2026-10-08 (second review round): the 22 cases were meant as one per panic site but cover 21 of the 22 sites found that day: generic-btree's lib.rs:618 twice (panic-01 and panic-05), and richtext_state.rs:1718, a site of that day's main run (304 panics), not at all. That site, and the three found since (diff_calc.rs:969, rle.rs:568, change.rs:237; report §8.2), are still to be minimized.

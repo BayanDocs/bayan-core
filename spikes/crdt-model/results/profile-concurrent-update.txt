@@ -1,4 +1,4 @@
-# callgrind, inclusive instruction counts: applying the update of 1,000 edits made while the receiver typed (after eleven concurrent keystrokes; one call of profile_concurrent), in the full 500-page model, commit 50dbc7a.
+# callgrind, inclusive instruction counts: applying the update of 1,000 edits made while the receiver typed (after eleven concurrent keystrokes; one call of profile_concurrent), in the full 500-page model, commit 50dbc7a, 2026-10-08.
 # Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_concurrent*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
 
     600,844,994 (100.0%)  PROGRAM TOTALS

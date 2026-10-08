@@ -1,4 +1,4 @@
-# callgrind, inclusive instruction counts: applying the first update after opening the full 500-page model (999 edits in one update; one call of profile_apply), commit 50dbc7a.
+# callgrind, inclusive instruction counts: applying the first update after opening the full 500-page model (999 edits in one update; one call of profile_apply), commit 50dbc7a, 2026-10-08.
 # Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_apply*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
 
     306,817,032 (100.0%)  PROGRAM TOTALS

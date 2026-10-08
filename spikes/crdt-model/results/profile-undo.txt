@@ -1,4 +1,4 @@
-# callgrind, inclusive instruction counts: 20 undo steps on the replica that made the edits (one call of profile_undo), in the full 500-page model, commit 50dbc7a.
+# callgrind, inclusive instruction counts: 20 undo steps on the replica that made the edits (one call of profile_undo), in the full 500-page model, commit 50dbc7a, 2026-10-08.
 # Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_undo*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
 
  22,926,636,767 (100.0%)  PROGRAM TOTALS
