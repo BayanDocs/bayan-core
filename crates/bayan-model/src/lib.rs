@@ -38,7 +38,7 @@ pub mod simulation;
 mod view;
 
 pub use atoms::{AtomKind, decode_binding, encode_binding, is_text_character};
-pub use document::{Document, EditError};
+pub use document::{Document, EditError, MaterializationCheck};
 pub use ids::{EntityId, IdGenerator};
 pub use invariants::{Violation, check_invariants};
 pub use normalize::{

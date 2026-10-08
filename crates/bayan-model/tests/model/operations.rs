@@ -1,7 +1,9 @@
 //! Every operation of the brief, on one replica and across replicas, with the invariants checked on every view.
 
 use bayan_crdt::Value;
-use bayan_model::{AtomKind, EditError, EntityId, Item, encode_binding, marks};
+use bayan_model::{
+    AtomKind, Document, EditError, EntityId, Item, MaterializationCheck, encode_binding, marks,
+};
 
 use crate::common::{document, replica_of, sync_both, text, valid_view};
 
@@ -261,25 +263,32 @@ fn a_paragraph_mark_formatted_with_its_text_stores_the_formatting_on_the_paragra
     assert!(!valid_view(&a).paragraphs[&first].contains_key("rPr.b"));
 }
 
-/// A table inserted at the start of a paragraph while another replica types there: if the merge puts the text before the table, the table is mid-paragraph and normalization splits the paragraph (N4). The next edit of that story materializes the split without changing the view, and undoing that edit returns to the view before it.
+/// Two replicas whose story shows a paragraph split that only normalization added (N4): a table inserted at the start of a paragraph while the other replica typed there, merged with the text before the table. Returns `None` when this peer order put the text after the table instead.
+fn replicas_with_a_virtual_split(
+    peer_a: u64,
+    peer_b: u64,
+) -> Option<(Document, Document, EntityId)> {
+    let mut a = document(peer_a);
+    a.insert_text(MAIN, 0, "first").expect("typing");
+    a.split_paragraph(MAIN, 5).expect("splitting");
+    let mut b = replica_of(&a, peer_b);
+    let table = a.insert_table(MAIN, 6, 1, 1).expect("a table");
+    b.insert_text(MAIN, 6, "typed").expect("typing concurrently");
+    sync_both(&mut a, &mut b);
+    (bayan_model::normalize(&a.raw()).1.n4 > 0).then_some((a, b, table))
+}
+
+/// The edit of a story whose view shows a split that only normalization added materializes the split first, which does not change the view, also when two replicas materialize concurrently. A refused edit materializes too, so it is used here to materialize without editing.
 #[test]
-fn materialization_does_not_change_the_view_and_undoes_with_the_edit() {
+fn materialization_does_not_change_the_view_even_when_replicas_materialize_concurrently() {
     let mut saw_split = false;
     for (peer_a, peer_b) in [(1, 2), (2, 1)] {
-        let mut a = document(peer_a);
-        a.insert_text(MAIN, 0, "first").unwrap();
-        a.split_paragraph(MAIN, 5).unwrap();
-        let mut b = replica_of(&a, peer_b);
-        let table = a.insert_table(MAIN, 6, 1, 1).unwrap();
-        b.insert_text(MAIN, 6, "typed").unwrap();
-        sync_both(&mut a, &mut b);
+        let Some((mut a, mut b, table)) = replicas_with_a_virtual_split(peer_a, peer_b) else {
+            continue;
+        };
+        saw_split = true;
         let before = valid_view(&a);
         assert_eq!(before, valid_view(&b));
-        let report = bayan_model::normalize(&a.raw()).1;
-        if report.n4 == 0 {
-            continue;
-        }
-        saw_split = true;
         // The view shows the split before the table.
         let position = before
             .main()
@@ -287,14 +296,26 @@ fn materialization_does_not_change_the_view_and_undoes_with_the_edit() {
             .position(|item| item.is(AtomKind::TableBlock))
             .unwrap();
         assert!(before.main()[position - 1].is(AtomKind::ParagraphEnd));
-        // Materializing changes the stored state but not the view.
-        a.materialize(MAIN).unwrap();
-        a.crdt().commit();
-        assert_eq!(bayan_model::normalize(&a.raw()).1.n4, 0);
-        assert_eq!(valid_view(&a), before);
-        // Both replicas materializing concurrently still agree.
-        b.materialize(MAIN).unwrap();
-        b.crdt().commit();
+        for replica in [&mut a, &mut b] {
+            replica.check_materializations();
+            assert!(matches!(
+                replica.insert_text(MAIN, usize::MAX, "x"),
+                Err(EditError::InvalidPosition {
+                    pos: usize::MAX,
+                    ..
+                })
+            ));
+            assert_eq!(
+                replica.materialization_check(),
+                Some(MaterializationCheck {
+                    performed: 1,
+                    changed_view: 0
+                })
+            );
+            assert_eq!(bayan_model::normalize(&replica.raw()).1.n4, 0);
+            assert_eq!(valid_view(replica), before);
+        }
+        // Both replicas materialized the same split; merged, they still show the same view.
         sync_both(&mut a, &mut b);
         assert_eq!(valid_view(&a), before);
         assert_eq!(valid_view(&b), before);
@@ -304,6 +325,69 @@ fn materialization_does_not_change_the_view_and_undoes_with_the_edit() {
         saw_split,
         "neither peer order put the typed text before the table"
     );
+}
+
+/// The edit that materializes the split is one undo step: undoing it returns to the view before it, with the split still stored.
+#[test]
+fn undoing_an_edit_that_materialized_a_split_returns_to_the_view_before_it() {
+    let mut saw_split = false;
+    for (peer_a, peer_b) in [(1, 2), (2, 1)] {
+        let Some((mut a, _, _)) = replicas_with_a_virtual_split(peer_a, peer_b) else {
+            continue;
+        };
+        saw_split = true;
+        let before = valid_view(&a);
+        a.check_materializations();
+        a.insert_text(MAIN, 0, "z").unwrap();
+        assert_eq!(a.materialization_check().unwrap().performed, 1);
+        assert_eq!(bayan_model::normalize(&a.raw()).1.n4, 0);
+        assert_eq!(text(&a), format!("z{}", before.plain_text(MAIN)));
+        assert!(a.undo().unwrap());
+        assert_eq!(valid_view(&a), before);
+        assert_eq!(bayan_model::normalize(&a.raw()).1.n4, 0);
+        assert!(a.redo().unwrap());
+        assert_eq!(text(&a), format!("z{}", before.plain_text(MAIN)));
+    }
+    assert!(saw_split);
+}
+
+/// Text moved from another story to just after a table whose split only normalization showed lands after the table: the position the caller computed before the target's materialization is mapped onto the story after it.
+#[test]
+fn a_move_into_a_story_that_needs_materialization_lands_where_the_caller_meant() {
+    let mut saw_split = false;
+    for (peer_a, peer_b) in [(1, 2), (2, 1)] {
+        let Some((mut a, _, table)) = replicas_with_a_virtual_split(peer_a, peer_b) else {
+            continue;
+        };
+        saw_split = true;
+        let comment = a.add_comment(MAIN, 0..1, "Reviewer", "zz").unwrap();
+        let story = valid_view(&a).comments[&comment].story;
+        let after_table = a
+            .story_text(MAIN)
+            .unwrap()
+            .chars()
+            .position(|character| character == AtomKind::TableBlock.placeholder())
+            .unwrap()
+            + 1;
+        a.move_range(story, 0..2, MAIN, after_table).unwrap();
+        let view = valid_view(&a);
+        let main = view.main();
+        let position = main
+            .iter()
+            .position(|item| item.is(AtomKind::TableBlock))
+            .unwrap();
+        assert_eq!(
+            main[position],
+            Item::Atom {
+                kind: AtomKind::TableBlock,
+                id: Some(table),
+                marks: Default::default()
+            }
+        );
+        assert!(main[position - 1].is(AtomKind::ParagraphEnd));
+        assert!(matches!(&main[position + 1], Item::Text { text, .. } if text == "zz"));
+    }
+    assert!(saw_split);
 }
 
 #[test]
@@ -352,4 +436,185 @@ fn a_placeholder_typed_through_the_adapter_never_leaks() {
     a.crdt().commit();
     let view = valid_view(&a);
     assert_eq!(view.plain_text(MAIN), "abc\n");
+}
+
+/// A refused move cuts nothing: everything is checked before the source is touched, so neither this replica nor one that receives its later changes ever loses the text (review of CORE-004, item 1). Covered: a target position beyond the same story, beyond another story, and exactly at the end of either (after the final paragraph end).
+#[test]
+fn a_refused_move_changes_nothing_here_or_on_other_replicas() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "Hello").unwrap();
+    let comment = a.add_comment(MAIN, 4..5, "Reviewer", "note").unwrap();
+    let other = valid_view(&a).comments[&comment].story;
+    let before = valid_view(&a);
+    let len = a.story_len(MAIN).unwrap();
+    let other_len = a.story_len(other).unwrap();
+    for (to, to_pos, story_len) in [
+        (MAIN, 100, len),
+        (other, 1_000, other_len),
+        (MAIN, len, len),
+        (other, other_len, other_len),
+    ] {
+        assert_eq!(
+            a.move_range(MAIN, 0..2, to, to_pos),
+            Err(EditError::InvalidPosition {
+                pos: to_pos,
+                len: story_len
+            }),
+            "to {to} at {to_pos}"
+        );
+        assert_eq!(valid_view(&a), before);
+    }
+    // The next operation commits whatever the refused ones left pending: there must be nothing.
+    a.insert_text(MAIN, 0, ">").unwrap();
+    assert_eq!(text(&a), ">Hello\n");
+    let b = replica_of(&a, 2);
+    assert_eq!(valid_view(&b), valid_view(&a));
+}
+
+/// Positions are checked before they are mapped past materialization, and refused positions are reported as the caller gave them (review of CORE-004, item 16).
+#[test]
+fn refused_positions_are_reported_as_given_even_after_materialization() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abc").unwrap();
+    // A misbehaving replica deletes the final paragraph end, so the next edit materializes it first.
+    let b = replica_of(&a, 2);
+    b.crdt().main_story().delete(3..4).unwrap();
+    b.crdt().commit();
+    crate::common::sync(&b, &mut a);
+    assert_eq!(a.story_len(MAIN), Some(3));
+    assert_eq!(
+        a.insert_text(MAIN, usize::MAX, "X"),
+        Err(EditError::InvalidPosition {
+            pos: usize::MAX,
+            len: 3
+        })
+    );
+    // The refused edit materialized the final paragraph end, which the stored story now holds.
+    assert_eq!(a.story_len(MAIN), Some(4));
+    assert_eq!(
+        a.insert_text(MAIN, 99, "X"),
+        Err(EditError::InvalidPosition { pos: 99, len: 4 })
+    );
+    assert_eq!(text(&a), "abc\n");
+    // Typing at the end of the story the caller saw lands before the materialized paragraph end.
+    a.insert_text(MAIN, 3, "d").unwrap();
+    assert_eq!(text(&a), "abcd\n");
+}
+
+/// The atom binding is written only by the adapter, and keys of no mark family have no agreed expansion: formatting with either is refused (review of CORE-004, item 17).
+#[test]
+fn formatting_refuses_the_atom_binding_and_unknown_families() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "a").unwrap();
+    a.split_paragraph(MAIN, 1).unwrap();
+    a.insert_text(MAIN, 2, "bc").unwrap();
+    a.insert_table(MAIN, 2, 1, 1).unwrap();
+    let before = valid_view(&a);
+    let len = a.story_len(MAIN).unwrap();
+    assert_eq!(
+        a.clear_format(MAIN, 0..len, bayan_crdt::ATOM_KEY),
+        Err(EditError::InvalidKey)
+    );
+    assert_eq!(
+        a.format(MAIN, 0..1, bayan_crdt::ATOM_KEY, &Value::from("p:0")),
+        Err(EditError::InvalidKey)
+    );
+    assert_eq!(
+        a.format(MAIN, 0..1, "unknown:x", &Value::Bool(true)),
+        Err(EditError::InvalidKey)
+    );
+    assert_eq!(valid_view(&a), before);
+    // Keys of the model's families are accepted, including the family name alone.
+    a.format(MAIN, 0..1, marks::LINK, &Value::from("https://example.org"))
+        .unwrap();
+}
+
+/// Edits that would separate the parts of a field or the ends of a range are refused, and so are atoms that would stand at the block position before a table (review of CORE-004, item 18).
+#[test]
+fn edits_that_would_unbalance_fields_ranges_or_tables_are_refused() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "ab").unwrap();
+    // "a" field(PAGE | 7) "b" ¶
+    a.insert_field(MAIN, 1, "PAGE", "7").unwrap();
+    assert_eq!(text(&a), "a7b\n");
+    let before = valid_view(&a);
+    // The field begin alone, the separator alone, and begin to separator.
+    for range in [1..2, 6..7, 1..7] {
+        assert_eq!(
+            a.delete(MAIN, range.clone()),
+            Err(EditError::WouldUnbalance),
+            "{range:?}"
+        );
+        assert_eq!(
+            a.move_range(MAIN, range.clone(), MAIN, 0),
+            Err(EditError::WouldUnbalance),
+            "{range:?}"
+        );
+    }
+    assert_eq!(valid_view(&a), before);
+    // The whole field may be deleted.
+    a.delete(MAIN, 1..9).unwrap();
+    assert_eq!(text(&a), "ab\n");
+
+    let bookmark = a.insert_bookmark(MAIN, 0..1, "first").unwrap();
+    // ⟦start⟧ a ⟦end⟧ b ¶: the end alone may not move away from its start.
+    assert_eq!(
+        a.move_range(MAIN, 2..3, MAIN, 4),
+        Err(EditError::WouldUnbalance)
+    );
+    assert_eq!(a.delete(MAIN, 0..1), Err(EditError::WouldUnbalance));
+    assert!(valid_view(&a).ranges.contains_key(&bookmark));
+    a.delete(MAIN, 0..3).unwrap();
+    assert_eq!(text(&a), "b\n");
+
+    // b ¶ [table] c d ¶ e f ¶: a comment over the first paragraph would put its reference before the table.
+    a.split_paragraph(MAIN, 1).unwrap();
+    a.insert_table(MAIN, 2, 1, 1).unwrap();
+    a.insert_text(MAIN, 3, "cdef").unwrap();
+    a.split_paragraph(MAIN, 5).unwrap();
+    assert_eq!(text(&a), "b\ncd\nef\n");
+    let before = valid_view(&a);
+    assert_eq!(
+        a.add_comment(MAIN, 0..2, "Reviewer", "x"),
+        Err(EditError::NotABlockPosition)
+    );
+    // A bookmark that starts or ends at the block position before the table.
+    assert_eq!(
+        a.insert_bookmark(MAIN, 2..3, "t"),
+        Err(EditError::NotABlockPosition)
+    );
+    assert_eq!(
+        a.insert_bookmark(MAIN, 0..2, "t"),
+        Err(EditError::NotABlockPosition)
+    );
+    // Text moved to the block position before the table is refused, as typing there is, also when the cut makes the position one.
+    assert_eq!(
+        a.move_range(MAIN, 3..5, MAIN, 2),
+        Err(EditError::NotABlockPosition)
+    );
+    assert_eq!(
+        a.move_range(MAIN, 0..1, MAIN, 2),
+        Err(EditError::NotABlockPosition)
+    );
+    assert_eq!(valid_view(&a), before);
+    // A whole paragraph may go there.
+    a.move_range(MAIN, 3..6, MAIN, 2).unwrap();
+    assert_eq!(text(&a), "b\ncd\nef\n");
+    let view = valid_view(&a);
+    // "b" ¶ "cd" ¶ [table] "ef" ¶
+    assert!(matches!(&view.main()[2], Item::Text { text, .. } if text == "cd"));
+    assert!(view.main()[3].is(AtomKind::ParagraphEnd));
+    assert!(view.main()[4].is(AtomKind::TableBlock));
+}
+
+/// Moving content to its own start or end changes nothing, and writes nothing.
+#[test]
+fn moving_a_range_onto_itself_writes_nothing() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abcdef").unwrap();
+    let changes = a.crdt().stats().changes;
+    a.move_range(MAIN, 1..3, MAIN, 1).unwrap();
+    a.move_range(MAIN, 1..3, MAIN, 3).unwrap();
+    assert_eq!(a.crdt().stats().changes, changes);
+    assert_eq!(text(&a), "abcdef\n");
 }

@@ -5,8 +5,8 @@ use std::fmt;
 use std::ops::Range;
 
 use bayan_crdt::{
-    ATOM_KEY, CrdtError, Doc, ImportError, ImportLimits, ImportReport, PeerId, PropertyMap, Story,
-    UndoManager, Value, Version, VersionVector,
+    ATOM_KEY, CrdtError, Doc, ImportError, ImportLimits, ImportReport, PeerId, PropertyMap, Run,
+    Story, UndoManager, Value, Version, VersionVector,
 };
 
 use crate::atoms::{decode_binding, encode_binding, is_text_character};
@@ -17,7 +17,9 @@ use crate::{AtomKind, EntityId, IdGenerator, Props, SECTION_DEFAULTS, marks, nor
 const PARAGRAPH_END: char = '\u{0D}';
 const TABLE_BLOCK: char = '\u{07}';
 
-/// Why an operation was refused. A refused operation changes nothing that the next successful one would not also have written (see [`Document`]).
+/// Why an operation was refused.
+///
+/// Every operation checks everything that can make it fail before it writes anything, so a refused operation changes nothing, except that it may have materialized the story first (see [`Document`]), which does not change the view. Only an error of the CRDT itself ([`EditError::Crdt`]) can come after a write; the written part then stays pending and is committed with the next operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     /// The CRDT refused.
@@ -49,6 +51,10 @@ pub enum EditError {
     WouldCreateCycle,
     /// A table must keep at least one row, and every row at least one cell.
     LastRowOrColumn,
+    /// The mark key is the reserved atom binding ([`ATOM_KEY`]), or belongs to none of the model's mark families ([`marks::FAMILIES`]).
+    InvalidKey,
+    /// The edit would delete or move part of a field (its begin, separator or end) or one end of a range without the rest. What Word does in that case is for a Word Behavior Note to establish (ADR-0007, decision 6); until then the model refuses.
+    WouldUnbalance,
     /// The document shows an older version (see [`Document::checkout`]) and cannot be edited.
     Detached,
 }
@@ -79,6 +85,9 @@ impl fmt::Display for EditError {
             Self::LastRowOrColumn => {
                 formatter.write_str("a table keeps at least one row and column")
             }
+            Self::InvalidKey => formatter.write_str("the mark key is reserved or unknown"),
+            Self::WouldUnbalance => formatter
+                .write_str("the edit would separate the parts of a field or the ends of a range"),
             Self::Detached => formatter.write_str("the document shows an older version"),
         }
     }
@@ -98,7 +107,7 @@ impl From<CrdtError> for EditError {
 ///
 /// **Entities and undo.** An operation that creates entities (a paragraph, a table with its rows, cells and cell stories, a comment with its story, a field, an object, a range) commits their creation first, as a change that is not an undo step, and then makes the change that references them (the atom, or the row or cell in a list) as the operation's undo step. Undo removes only the reference: the entity stays stored but invisible (normalization rule N5) and redo shows it again with everything other replicas wrote into it meanwhile. (Undoing the creation itself is not an option with Loro 1.16.2: redoing the creation of a child container duplicates its content; see the CORE-004 report.)
 ///
-/// **Materialization** (document model §14): when an operation edits a story whose view contains structure that only normalization added (a final paragraph end, or a paragraph end before a table found mid-paragraph), the operation first writes that structure into the CRDT, with the identifiers and properties the view already shows. The view therefore does not change by materialization, and concurrent materializations by several replicas merge into the same entities. Materialization is committed as its own change and is not an undo step: undoing the operation returns the view to the state before the operation without removing the materialized structure, which the view showed anyway.
+/// **Materialization** (document model §14): when an operation edits a story whose view contains structure that only normalization added (a final paragraph end, or a paragraph end before a table found mid-paragraph), the operation first writes that structure into the CRDT, with the identifiers and properties the view already shows. The view therefore does not change by materialization, and concurrent materializations by several replicas merge into the same entities. Materialization is committed as its own change and is not an undo step: undoing the operation returns the view to the state before the operation without removing the materialized structure, which the view showed anyway. Positions that the caller computed on the story before materialization are mapped onto the story after it: a position between two characters keeps its place before an inserted paragraph end, and a range keeps exactly the characters it covered (see `Positions`).
 #[derive(Debug)]
 pub struct Document {
     crdt: Doc,
@@ -106,6 +115,17 @@ pub struct Document {
     undo: UndoManager,
     /// Stories known not to need materialization since the last import or undo.
     clean: BTreeSet<EntityId>,
+    /// Counts of checked materializations, once [`Document::check_materializations`] was called.
+    check: Option<MaterializationCheck>,
+}
+
+/// What [`Document::check_materializations`] counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaterializationCheck {
+    /// Materializations performed since the check started.
+    pub performed: usize,
+    /// Materializations after which the view differed from the view before them. Materialization must never change the view (document model §14), so this must stay 0.
+    pub changed_view: usize,
 }
 
 impl Document {
@@ -178,7 +198,19 @@ impl Document {
             ids: IdGenerator::new(seed ^ peer.rotate_left(32) ^ 0xD0C0_0004_D0C0_0004),
             undo,
             clean: BTreeSet::new(),
+            check: None,
         }
+    }
+
+    /// From now on, normalizes the document before and after every materialization and counts the materializations that changed the view (see [`MaterializationCheck`]). For tests and the simulation: each check normalizes the whole document twice.
+    pub fn check_materializations(&mut self) {
+        self.check.get_or_insert_default();
+    }
+
+    /// What [`Document::check_materializations`] has counted, if it was called.
+    #[must_use]
+    pub const fn materialization_check(&self) -> Option<MaterializationCheck> {
+        self.check
     }
 
     /// The underlying replica.
@@ -205,7 +237,7 @@ impl Document {
         self.story(story).ok().map(|story| story.len())
     }
 
-    /// The stored characters of a story, placeholders included, if it exists.
+    /// The stored characters of a story, if it exists: the raw story as the CRDT holds it, with a placeholder character for every atom and without normalization (use [`Document::view`] and [`View::plain_text`] for what a reader sees). Positions in it are the positions the operations take.
     #[must_use]
     pub fn story_text(&self, story: EntityId) -> Option<String> {
         self.story(story).ok().map(|story| story.text())
@@ -274,30 +306,28 @@ impl Document {
         if text.is_empty() || !text.chars().all(is_text_character) {
             return Err(EditError::InvalidText);
         }
-        self.edit(story, |document, handle, shift| {
-            let pos = shift(pos);
-            check_inner_position(handle, pos)?;
+        self.edit(story, |_, handle, positions| {
+            let pos = positions.insertion_point(handle, pos)?;
             if before_block_at_block_position(handle, pos) {
                 return Err(EditError::NotABlockPosition);
             }
             handle.insert(pos, text)?;
-            document.note_structure(story, handle, pos + text.chars().count());
             Ok(())
         })
     }
 
-    /// Deletes `range` of `story`, which may not include the final paragraph end and may not leave a table in the middle of a paragraph. Entities whose atoms are deleted stay stored (undo may restore their reference) but leave the view.
+    /// Deletes `range` of `story`, which may not include the final paragraph end, may not leave a table in the middle of a paragraph, and may not hold only part of a field or only one end of a range ([`EditError::WouldUnbalance`]). Entities whose atoms are deleted stay stored (undo may restore their reference) but leave the view.
     ///
     /// # Errors
     ///
-    /// [`EditError::InvalidPosition`], [`EditError::WouldBreakBlockStructure`], or the errors of the CRDT.
+    /// [`EditError::InvalidPosition`], [`EditError::WouldBreakBlockStructure`], [`EditError::WouldUnbalance`], or the errors of the CRDT.
     pub fn delete(&mut self, story: EntityId, range: Range<usize>) -> Result<(), EditError> {
-        self.edit(story, |_, handle, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_deletable(handle, &range)?;
+        self.edit(story, |_, handle, positions| {
+            let range = positions.inner_range(handle, &range)?;
             if would_break_blocks(handle, &range) {
                 return Err(EditError::WouldBreakBlockStructure);
             }
+            check_whole_markers(handle, &range)?;
             handle.delete(range)?;
             Ok(())
         })
@@ -307,7 +337,7 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::InvalidPosition`], or the errors of the CRDT.
+    /// [`EditError::InvalidKey`] for the atom binding or a key of no mark family, [`EditError::InvalidPosition`], or the errors of the CRDT.
     pub fn format(
         &mut self,
         story: EntityId,
@@ -315,9 +345,9 @@ impl Document {
         key: &str,
         value: &Value,
     ) -> Result<(), EditError> {
-        self.edit(story, |document, handle, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_range(handle, &range)?;
+        check_mark_key(key)?;
+        self.edit(story, |document, handle, positions| {
+            let range = positions.range(handle, &range)?;
             if marks::is_run_property(key) {
                 let property = format!("rPr.{}", key.trim_start_matches("r:"));
                 for paragraph in document.atoms_in(handle, &range, AtomKind::ParagraphEnd)? {
@@ -349,9 +379,9 @@ impl Document {
         range: Range<usize>,
         key: &str,
     ) -> Result<(), EditError> {
-        self.edit(story, |document, handle, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_range(handle, &range)?;
+        check_mark_key(key)?;
+        self.edit(story, |document, handle, positions| {
+            let range = positions.range(handle, &range)?;
             if marks::is_run_property(key) {
                 let property = format!("rPr.{}", key.trim_start_matches("r:"));
                 for paragraph in document.atoms_in(handle, &range, AtomKind::ParagraphEnd)? {
@@ -371,9 +401,8 @@ impl Document {
     ///
     /// [`EditError::InvalidPosition`], or the errors of the CRDT.
     pub fn split_paragraph(&mut self, story: EntityId, pos: usize) -> Result<EntityId, EditError> {
-        self.edit(story, |document, handle, shift| {
-            let pos = shift(pos);
-            check_inner_position(handle, pos)?;
+        self.edit(story, |document, handle, positions| {
+            let pos = positions.insertion_point(handle, pos)?;
             let props = document
                 .next_paragraph(handle, pos)
                 .map(|paragraph| document.paragraph_props(paragraph))
@@ -395,8 +424,10 @@ impl Document {
     ///
     /// [`EditError::NotAParagraphEnd`], [`EditError::WouldBreakBlockStructure`], or the errors of the CRDT.
     pub fn merge_paragraph(&mut self, story: EntityId, pos: usize) -> Result<(), EditError> {
-        self.edit(story, |_, handle, shift| {
-            let pos = shift(pos);
+        self.edit(story, |_, handle, positions| {
+            let pos = positions
+                .character(pos)
+                .map_err(|_| EditError::NotAParagraphEnd)?;
             if handle.char_at(pos) != Some(PARAGRAPH_END) || pos + 1 >= handle.len() {
                 return Err(EditError::NotAParagraphEnd);
             }
@@ -447,9 +478,8 @@ impl Document {
         if rows == 0 || columns == 0 {
             return Err(EditError::LastRowOrColumn);
         }
-        self.edit(story, |document, handle, shift| {
-            let pos = shift(pos);
-            check_inner_position(handle, pos)?;
+        self.edit(story, |document, handle, positions| {
+            let pos = positions.insertion_point(handle, pos)?;
             if !at_block_position(handle, pos) {
                 return Err(EditError::NotABlockPosition);
             }
@@ -493,7 +523,7 @@ impl Document {
             .get(index.min(list.len().saturating_sub(1)))
             .and_then(|item| item.as_str().and_then(EntityId::parse));
         let columns = neighbor
-            .and_then(|row| self.cells_list(row).ok())
+            .and_then(|row| self.cells_list(row))
             .map_or(1, |cells| cells.len().max(1));
         let row = self.new_row(columns)?;
         self.crdt.commit_without_undo();
@@ -536,18 +566,27 @@ impl Document {
         Ok(())
     }
 
-    /// Inserts a column before column `index` of `table`: a new cell in every row, at `index` or at the end of a shorter row.
+    /// Inserts a column before column `index` of `table`: a new cell in every row, at `index` or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends).
     ///
     /// # Errors
     ///
-    /// [`EditError::NoSuchTable`], or the errors of the CRDT.
+    /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], or the errors of the CRDT.
     pub fn insert_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let mut new_cells = Vec::new();
-        for row in self.table_row_ids(table)? {
-            let Ok(cells) = self.cells_list(row) else {
-                continue;
-            };
+        let rows: Vec<_> = self
+            .table_row_ids(table)?
+            .into_iter()
+            .filter_map(|row| self.cells_list(row))
+            .collect();
+        let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
+        if index > widest {
+            return Err(EditError::InvalidPosition {
+                pos: index,
+                len: widest,
+            });
+        }
+        let mut new_cells = Vec::with_capacity(rows.len());
+        for cells in rows {
             new_cells.push((cells, self.new_cell()?));
         }
         self.crdt.commit_without_undo();
@@ -558,17 +597,27 @@ impl Document {
         Ok(())
     }
 
-    /// Deletes column `index` of `table`: the cell at `index` of every row that has one and keeps at least one cell. Refused when no row could lose a cell.
+    /// Deletes column `index` of `table`: the cell at `index` of every row that has one and keeps at least one cell. Refused when no row has a cell at `index`, or when no row could lose one.
     ///
     /// # Errors
     ///
-    /// [`EditError::NoSuchTable`], [`EditError::LastRowOrColumn`], or the errors of the CRDT.
+    /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], [`EditError::LastRowOrColumn`], or the errors of the CRDT.
     pub fn delete_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let lists: Vec<_> = self
+        let rows: Vec<_> = self
             .table_row_ids(table)?
             .into_iter()
-            .filter_map(|row| self.cells_list(row).ok())
+            .filter_map(|row| self.cells_list(row))
+            .collect();
+        let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
+        if index >= widest {
+            return Err(EditError::InvalidPosition {
+                pos: index,
+                len: widest,
+            });
+        }
+        let lists: Vec<_> = rows
+            .into_iter()
             .filter(|cells| cells.len() > index && cells.len() > 1)
             .collect();
         if lists.is_empty() {
@@ -583,11 +632,11 @@ impl Document {
 
     // ----- Comments, fields, objects, bookmarks -----
 
-    /// Adds a comment by `author` with text `text` over `range` of `story`: a comment entity with its own story, the highlight mark `cmt:<id>` on the range (it never expands), and a comment reference atom right after the range. Returns its identifier.
+    /// Adds a comment by `author` with text `text` over `range` of `story`: a comment entity with its own story, the highlight mark `cmt:<id>` on the range (it never expands), and a comment reference atom right after the range. The range may not be empty, and may not end at the block position before a table, where the reference would leave the table in the middle of a paragraph. Returns its identifier.
     ///
     /// # Errors
     ///
-    /// [`EditError::InvalidPosition`], [`EditError::InvalidText`], or the errors of the CRDT.
+    /// [`EditError::InvalidPosition`], [`EditError::NotABlockPosition`], [`EditError::InvalidText`], or the errors of the CRDT.
     pub fn add_comment(
         &mut self,
         story: EntityId,
@@ -598,14 +647,16 @@ impl Document {
         if !text.chars().all(is_text_character) {
             return Err(EditError::InvalidText);
         }
-        self.edit(story, |document, handle, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_inner_position(handle, range.end)?;
-            if range.is_empty() || range.start > range.end {
-                return Err(EditError::InvalidPosition {
-                    pos: range.start,
-                    len: handle.len(),
-                });
+        if range.is_empty() {
+            return Err(EditError::InvalidPosition {
+                pos: range.start,
+                len: self.story_len(story).unwrap_or(0),
+            });
+        }
+        self.edit(story, |document, handle, positions| {
+            let range = positions.inner_range(handle, &range)?;
+            if before_block_at_block_position(handle, range.end) {
+                return Err(EditError::NotABlockPosition);
             }
             let comment = document.ids.next_id();
             let comment_story = document.new_story(text)?;
@@ -646,9 +697,8 @@ impl Document {
         {
             return Err(EditError::InvalidText);
         }
-        self.edit(story, |document, handle, shift| {
-            let mut pos = shift(pos);
-            check_inner_position(handle, pos)?;
+        self.edit(story, |document, handle, positions| {
+            let mut pos = positions.insertion_point(handle, pos)?;
             if before_block_at_block_position(handle, pos) {
                 return Err(EditError::NotABlockPosition);
             }
@@ -679,9 +729,8 @@ impl Document {
     ///
     /// [`EditError::InvalidPosition`], [`EditError::NotABlockPosition`], or the errors of the CRDT.
     pub fn insert_object(&mut self, story: EntityId, pos: usize) -> Result<EntityId, EditError> {
-        self.edit(story, |document, handle, shift| {
-            let pos = shift(pos);
-            check_inner_position(handle, pos)?;
+        self.edit(story, |document, handle, positions| {
+            let pos = positions.insertion_point(handle, pos)?;
             if before_block_at_block_position(handle, pos) {
                 return Err(EditError::NotABlockPosition);
             }
@@ -703,25 +752,23 @@ impl Document {
         })
     }
 
-    /// Inserts a bookmark named `name` around `range` of `story`: a range start before it and a range end after it. Returns the range's identifier.
+    /// Inserts a bookmark named `name` around `range` of `story`: a range start before it and a range end after it. Neither may stand at the block position before a table, where it would leave the table in the middle of a paragraph. Returns the range's identifier.
     ///
     /// # Errors
     ///
-    /// [`EditError::InvalidPosition`], or the errors of the CRDT.
+    /// [`EditError::InvalidPosition`], [`EditError::NotABlockPosition`], or the errors of the CRDT.
     pub fn insert_bookmark(
         &mut self,
         story: EntityId,
         range: Range<usize>,
         name: &str,
     ) -> Result<EntityId, EditError> {
-        self.edit(story, |document, handle, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_inner_position(handle, range.end)?;
-            if range.start > range.end {
-                return Err(EditError::InvalidPosition {
-                    pos: range.start,
-                    len: handle.len(),
-                });
+        self.edit(story, |document, handle, positions| {
+            let range = positions.inner_range(handle, &range)?;
+            if before_block_at_block_position(handle, range.start)
+                || before_block_at_block_position(handle, range.end)
+            {
+                return Err(EditError::NotABlockPosition);
             }
             let bookmark = document.ids.next_id();
             let map = document
@@ -741,16 +788,15 @@ impl Document {
                 AtomKind::RangeStart.placeholder(),
                 &encode_binding(AtomKind::RangeStart, bookmark),
             )?;
-            document.note_structure(story, handle, range.end + 2);
             Ok(bookmark)
         })
     }
 
-    /// Moves `range` of story `from` to position `to_pos` of story `to` (cut and paste of the same content): text keeps its marks, and atoms keep their entities, so a table, object, field or comment moves with its identity. A move may not put a table inside itself or a comment reference into a comment; replicas that move the same content concurrently can still duplicate a reference, which normalization resolves (N7).
+    /// Moves `range` of story `from` to position `to_pos` of story `to` (cut and paste of the same content): text keeps its marks, and atoms keep their entities, so a table, object, field or comment moves with its identity. Everything is checked before anything is cut: the range must hold whole fields and both ends of every range in it ([`EditError::WouldUnbalance`]), a move may not put a table inside itself or a comment reference into a comment, and content that does not end with a paragraph end or a table may not land at the block position before a table, as for typing. Moving content to its own start or end changes nothing. Replicas that move the same content concurrently can still duplicate a reference, which normalization resolves (N7).
     ///
     /// # Errors
     ///
-    /// [`EditError::InvalidPosition`], [`EditError::WouldCreateCycle`], [`EditError::WouldBreakBlockStructure`], or the errors of the CRDT.
+    /// [`EditError::NoSuchStory`], [`EditError::InvalidPosition`], [`EditError::WouldCreateCycle`], [`EditError::WouldBreakBlockStructure`], [`EditError::WouldUnbalance`], [`EditError::NotABlockPosition`], or the errors of the CRDT.
     pub fn move_range(
         &mut self,
         from: EntityId,
@@ -758,66 +804,77 @@ impl Document {
         to: EntityId,
         to_pos: usize,
     ) -> Result<(), EditError> {
-        if from != to {
-            // Materialize the target first, as its own preparation, so that both stories are clean before the move.
-            self.edit(to, |_, _, _| Ok(()))?;
+        self.check_attached()?;
+        let same = from == to;
+        let source = self.story(from)?;
+        let target = if same {
+            source.clone()
+        } else {
+            self.story(to)?
+        };
+        // Both stories are materialized first, each as a change of its own that is not an undo step, so that the positions refer to stored structure.
+        let source_positions = self.prepare(from, &source)?;
+        let target_positions = if same {
+            source_positions.clone()
+        } else {
+            self.prepare(to, &target)?
+        };
+        let cut = source_positions.inner_range(&source, &range)?;
+        if cut.is_empty() {
+            return Err(source_positions.invalid(range.start));
         }
-        self.edit(from, |document, source, shift| {
-            let range = shift(range.start)..shift(range.end);
-            check_deletable(source, &range)?;
-            if range.is_empty() {
-                return Err(EditError::InvalidPosition {
-                    pos: range.start,
-                    len: source.len(),
-                });
-            }
-            let target = if from == to {
-                source.clone()
-            } else {
-                document.story(to)?
-            };
-            let same = from == to;
-            let to_pos = if same { shift(to_pos) } else { to_pos };
-            if same && to_pos > range.start && to_pos < range.end {
-                return Err(EditError::InvalidPosition {
-                    pos: to_pos,
-                    len: source.len(),
-                });
-            }
-            let runs = source.runs_in(range.clone())?;
-            document.check_move_target(&runs, to)?;
-            if would_break_blocks(source, &range) {
-                return Err(EditError::WouldBreakBlockStructure);
-            }
-            source.delete(range.clone())?;
-            let mut pos = if same && to_pos >= range.end {
-                to_pos - range.len()
-            } else {
-                to_pos
-            };
-            check_inner_position(&target, pos)?;
-            let start = pos;
-            for run in &runs {
-                let len = run.len();
-                target.insert(pos, &run.text)?;
-                // The pasted characters keep exactly their own marks: marks they inherited by expansion are removed.
-                for inherited in target.runs_in(pos..pos + len)? {
-                    for key in inherited.marks.keys() {
-                        if !run.marks.contains_key(key) {
-                            target.unmark(pos..pos + len, key)?;
-                        }
+        let paste_at = target_positions.insertion_point(&target, to_pos)?;
+        if same && paste_at > cut.start && paste_at < cut.end {
+            return Err(target_positions.invalid(to_pos));
+        }
+        if would_break_blocks(&source, &cut) {
+            return Err(EditError::WouldBreakBlockStructure);
+        }
+        check_whole_markers(&source, &cut)?;
+        let runs = source.runs_in(cut.clone())?;
+        self.check_move_target(&runs, to)?;
+        if same && (paste_at == cut.start || paste_at == cut.end) {
+            return Ok(());
+        }
+        // Where the content lands once it is cut out.
+        let paste = if same && paste_at >= cut.end {
+            paste_at - cut.len()
+        } else {
+            paste_at
+        };
+        let ends_a_block = runs
+            .last()
+            .and_then(|run| run.text.chars().last())
+            .is_some_and(|last| last == PARAGRAPH_END || last == TABLE_BLOCK);
+        if !ends_a_block && before_block_after_cut(&target, paste, same.then_some(&cut)) {
+            return Err(EditError::NotABlockPosition);
+        }
+        source.delete(cut.clone())?;
+        let mut pos = paste;
+        for run in &runs {
+            let len = run.len();
+            target.insert(pos, &run.text)?;
+            // The pasted characters keep exactly their own marks: marks they inherited by expansion are removed.
+            for inherited in target.runs_in(pos..pos + len)? {
+                for key in inherited.marks.keys() {
+                    if !run.marks.contains_key(key) {
+                        target.unmark(pos..pos + len, key)?;
                     }
                 }
-                for (key, value) in &run.marks {
-                    target.mark(pos..pos + len, key, value)?;
-                }
-                pos += len;
             }
-            document.note_structure(from, source, range.start);
-            document.note_structure(to, &target, start);
-            document.note_structure(to, &target, pos);
-            Ok(())
-        })
+            for (key, value) in &run.marks {
+                target.mark(pos..pos + len, key, value)?;
+            }
+            pos += len;
+        }
+        if runs.iter().any(|run| run.text.contains(TABLE_BLOCK)) {
+            // A moved table may now stand in the middle of a paragraph: the next edit of the story materializes the split that normalization shows.
+            self.clean.remove(&to);
+        }
+        self.note_structure(from, &source, cut.start);
+        self.note_structure(to, &target, pos);
+        self.crdt.commit();
+        Ok(())
     }
 
     // ----- Replication -----
@@ -920,15 +977,49 @@ impl Document {
         self.undo.undo_count()
     }
 
-    // ----- Materialization -----
+    // ----- Internals -----
 
-    /// Writes into the CRDT the structure that the view of `story` shows but the story does not store (N1 and N4 paragraph ends), so that later edits act on stored structure. Returns the positions, in the story before materialization, where paragraph ends were inserted. Runs as part of the next commit; operations call it themselves.
-    ///
-    /// # Errors
-    ///
-    /// The errors of the CRDT.
-    pub fn materialize(&mut self, story: EntityId) -> Result<Vec<usize>, EditError> {
+    /// Runs one operation on `story` as one transaction: materializes the story if it may need it, gives the operation the mapping from the positions the caller computed to the story after materialization, and commits if the operation succeeds. Operations check everything before they write, so a refused operation leaves nothing pending.
+    fn edit<T>(
+        &mut self,
+        story: EntityId,
+        operation: impl FnOnce(&mut Self, &Story, &Positions) -> Result<T, EditError>,
+    ) -> Result<T, EditError> {
+        self.check_attached()?;
         let handle = self.story(story)?;
+        let positions = self.prepare(story, &handle)?;
+        let result = operation(self, &handle, &positions)?;
+        self.crdt.commit();
+        Ok(result)
+    }
+
+    /// Materializes `story` if it may need it, as a change of its own that is not an undo step (materialization does not change the view), and returns how positions computed on the story before map onto it after.
+    fn prepare(&mut self, story: EntityId, handle: &Story) -> Result<Positions, EditError> {
+        let len = handle.len();
+        let mut inserted = Vec::new();
+        if !self.clean.contains(&story) {
+            if needs_materialization(handle) {
+                let before = self.check.is_some().then(|| self.view());
+                inserted = self.materialize(story, handle)?;
+                self.crdt.commit_without_undo();
+                if let Some(before) = before {
+                    let after = self.view();
+                    if let Some(check) = &mut self.check {
+                        check.performed += 1;
+                        if after != before {
+                            check.changed_view += 1;
+                        }
+                    }
+                }
+            }
+            self.clean.insert(story);
+        }
+        inserted.sort_unstable();
+        Ok(Positions { inserted, len })
+    }
+
+    /// Writes into the CRDT the structure that the view of `story` shows but the story does not store (N1 and N4 paragraph ends), so that later edits act on stored structure. Returns the positions, in the story before materialization, where paragraph ends were inserted. The caller commits.
+    fn materialize(&mut self, story: EntityId, handle: &Story) -> Result<Vec<usize>, EditError> {
         let (_, report) = normalize(&self.raw());
         let mut virtual_ends: Vec<_> = report
             .virtual_paragraph_ends
@@ -951,31 +1042,6 @@ impl Document {
             inserted.push(pos);
         }
         Ok(inserted)
-    }
-
-    // ----- Internals -----
-
-    /// Runs one operation on `story` as one transaction: materializes the story if it may need it, gives the operation a function that maps positions from before the materialization to after it, and commits if the operation succeeds.
-    fn edit<T>(
-        &mut self,
-        story: EntityId,
-        operation: impl FnOnce(&mut Self, &Story, &dyn Fn(usize) -> usize) -> Result<T, EditError>,
-    ) -> Result<T, EditError> {
-        self.check_attached()?;
-        let handle = self.story(story)?;
-        let mut inserted = Vec::new();
-        if !self.clean.contains(&story) {
-            if needs_materialization(&handle) {
-                inserted = self.materialize(story)?;
-                // Materialization does not change the view, so it is not an undo step.
-                self.crdt.commit_without_undo();
-            }
-            self.clean.insert(story);
-        }
-        let shift = |pos: usize| pos + inserted.iter().filter(|at| **at < pos).count();
-        let result = operation(self, &handle, &shift)?;
-        self.crdt.commit();
-        Ok(result)
     }
 
     /// Marks `story` for a materialization check when a local edit may have placed a table at a position that is no longer a block position.
@@ -1082,12 +1148,12 @@ impl Document {
             .ok_or(EditError::NoSuchTable(table))
     }
 
-    fn cells_list(&self, row: EntityId) -> Result<bayan_crdt::IdList, EditError> {
+    /// The cell list of a stored row, if the row exists and has one.
+    fn cells_list(&self, row: EntityId) -> Option<bayan_crdt::IdList> {
         self.crdt
             .registry(registry::ROWS)
             .get(&row.to_string())
             .and_then(|map| map.get_id_list(registry::CELLS_KEY))
-            .ok_or(EditError::NoSuchTable(row))
     }
 
     fn table_row_ids(&self, table: EntityId) -> Result<Vec<EntityId>, EditError> {
@@ -1254,35 +1320,145 @@ fn would_break_blocks(handle: &Story, range: &Range<usize>) -> bool {
     handle.char_at(range.end) == Some(TABLE_BLOCK) && !at_block_position(handle, range.start)
 }
 
-/// A position where something may be inserted: anywhere before the final paragraph end.
-fn check_inner_position(handle: &Story, pos: usize) -> Result<(), EditError> {
-    let len = handle.len();
-    if pos >= len {
-        return Err(EditError::InvalidPosition { pos, len });
+/// Whether `pos` is the block position right before a table in the story as it is once `cut` (a range of the same story, if any) is removed.
+fn before_block_after_cut(handle: &Story, pos: usize, cut: Option<&Range<usize>>) -> bool {
+    let before_cut = |at: usize| match cut {
+        Some(cut) if at >= cut.start => at + cut.len(),
+        _ => at,
+    };
+    handle.char_at(before_cut(pos)) == Some(TABLE_BLOCK)
+        && (pos == 0
+            || matches!(
+                handle.char_at(before_cut(pos - 1)),
+                Some(PARAGRAPH_END | TABLE_BLOCK)
+            ))
+}
+
+/// Refuses the atom binding, which only the adapter writes, and keys of no mark family of the model, whose expansion no replica configured.
+fn check_mark_key(key: &str) -> Result<(), EditError> {
+    let family = key.split(':').next().unwrap_or(key);
+    if key == ATOM_KEY || !marks::FAMILIES.iter().any(|known| known.name == family) {
+        Err(EditError::InvalidKey)
+    } else {
+        Ok(())
+    }
+}
+
+/// Refuses to cut `range` out of a story when it holds some but not all of the delimiters of a field (begin, separator, end), or one end of a range without the other: what is left would be repaired by normalization (N2, N3) into something nobody wrote, such as a field code shown as text.
+fn check_whole_markers(handle: &Story, range: &Range<usize>) -> Result<(), EditError> {
+    if range.is_empty() {
+        return Ok(());
+    }
+    let inside = markers(&handle.runs_in(range.clone())?);
+    if inside.is_empty() {
+        return Ok(());
+    }
+    let everywhere = markers(&handle.runs());
+    if inside
+        .iter()
+        .any(|(entity, count)| everywhere.get(entity) != Some(count))
+    {
+        return Err(EditError::WouldUnbalance);
     }
     Ok(())
 }
 
-/// A range inside the story.
-fn check_range(handle: &Story, range: &Range<usize>) -> Result<(), EditError> {
-    let len = handle.len();
-    if range.start > range.end || range.end > len {
-        return Err(EditError::InvalidPosition {
-            pos: range.end,
-            len,
-        });
+/// How many field and range delimiters of each field or range the runs hold.
+fn markers(runs: &[Run]) -> BTreeMap<EntityId, usize> {
+    let mut counts = BTreeMap::new();
+    for run in runs {
+        let Some((kind, id)) = run
+            .marks
+            .get(ATOM_KEY)
+            .and_then(Value::as_str)
+            .and_then(decode_binding)
+        else {
+            continue;
+        };
+        if matches!(
+            kind,
+            AtomKind::FieldBegin
+                | AtomKind::FieldSeparator
+                | AtomKind::FieldEnd
+                | AtomKind::RangeStart
+                | AtomKind::RangeEnd
+        ) {
+            let placeholders = run
+                .text
+                .chars()
+                .filter(|character| *character == kind.placeholder())
+                .count();
+            *counts.entry(id).or_insert(0) += placeholders;
+        }
     }
-    Ok(())
+    counts
 }
 
-/// A range that may be deleted: inside the story and before its final paragraph end.
-fn check_deletable(handle: &Story, range: &Range<usize>) -> Result<(), EditError> {
-    let len = handle.len();
-    if range.start > range.end || range.end >= len {
-        return Err(EditError::InvalidPosition {
-            pos: range.end,
-            len,
-        });
+/// How positions that a caller computed on a story before its materialization map onto the story after it, and the checks of those positions. A refused position is reported as the caller gave it, with the length of the story the caller saw.
+///
+/// Materialization inserts paragraph ends. A position between two characters (where something is inserted, or where a range ends) keeps its place before a paragraph end inserted there; the position of a character (where a range starts, or a paragraph end to merge) follows the character.
+#[derive(Debug, Clone)]
+struct Positions {
+    /// Where materialization inserted paragraph ends, in the story before it, in increasing order.
+    inserted: Vec<usize>,
+    /// The length of the story before materialization, which is what the caller saw.
+    len: usize,
+}
+
+impl Positions {
+    /// The error for a position the caller gave.
+    const fn invalid(&self, pos: usize) -> EditError {
+        EditError::InvalidPosition { pos, len: self.len }
     }
-    Ok(())
+
+    /// The position between two characters, after materialization.
+    fn boundary(&self, pos: usize) -> Result<usize, EditError> {
+        if pos > self.len {
+            return Err(self.invalid(pos));
+        }
+        Ok(pos + self.inserted.iter().filter(|at| **at < pos).count())
+    }
+
+    /// The position of the character at `pos`, after materialization.
+    fn character(&self, pos: usize) -> Result<usize, EditError> {
+        if pos >= self.len {
+            return Err(self.invalid(pos));
+        }
+        Ok(pos + self.inserted.iter().filter(|at| **at <= pos).count())
+    }
+
+    /// A position where something may be inserted: anywhere before the final paragraph end.
+    fn insertion_point(&self, handle: &Story, pos: usize) -> Result<usize, EditError> {
+        let at = self.boundary(pos)?;
+        if at >= handle.len() {
+            return Err(self.invalid(pos));
+        }
+        Ok(at)
+    }
+
+    /// A range inside the story.
+    fn range(&self, handle: &Story, range: &Range<usize>) -> Result<Range<usize>, EditError> {
+        if range.start > range.end {
+            return Err(self.invalid(range.start));
+        }
+        let end = self.boundary(range.end)?;
+        let start = if range.is_empty() {
+            end
+        } else {
+            self.character(range.start)?
+        };
+        if end > handle.len() {
+            return Err(self.invalid(range.end));
+        }
+        Ok(start..end)
+    }
+
+    /// A range that ends before the final paragraph end: one that may be deleted, or after which an atom may be inserted.
+    fn inner_range(&self, handle: &Story, range: &Range<usize>) -> Result<Range<usize>, EditError> {
+        let mapped = self.range(handle, range)?;
+        if mapped.end >= handle.len() {
+            return Err(self.invalid(range.end));
+        }
+        Ok(mapped)
+    }
 }
