@@ -2,6 +2,9 @@
 //!
 //! This is a deterministic, bounded stand-in for fuzzing until the fuzzing workspace exists (CORE-005, CORE-006): it runs the same damaged inputs on every run and every platform.
 
+use std::cell::Cell;
+use std::sync::Once;
+
 use bayan_engine::config::Config;
 use bayan_engine::recording::replay;
 use bayan_engine::schema;
@@ -9,6 +12,73 @@ use serde_json::{Value, json};
 
 use crate::support::schema_validator::Validator;
 use crate::support::{engine, ok_payload, open_document, request, send, view, whole_page};
+
+thread_local! {
+    /// How many panics happened on this thread, including those the engine caught.
+    static PANICS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The number of panics on the current thread so far. The first call installs a panic hook that counts each panic on the thread where it happens, then hands it on to the previous hook. The engine catches the panics of its handlers, also while it replays a recording, so only such a count shows them all; other tests' panics happen on other threads and do not count here.
+fn panics_so_far() -> u64 {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ignored = PANICS.try_with(|count| count.set(count.get() + 1));
+            previous(info);
+        }));
+    });
+    PANICS.with(Cell::get)
+}
+
+/// Numbers that limits and conversions must survive: negative, fractional, beyond `u32`, `i64`, `u64` and 2⁵³, too large for a double, subnormal, zero, and values that are not numbers at all.
+const EXTREMES: [&str; 14] = [
+    "-1",
+    "0",
+    "-0",
+    "0.5",
+    "4097",
+    "4294967296",
+    "9007199254740992",
+    "-9223372036854775809",
+    "18446744073709551616",
+    "1e309",
+    "1e-320",
+    "null",
+    "\"\"",
+    "[]",
+];
+
+/// Where the numbers of a JSON text are, outside its strings: the byte ranges of every number token.
+fn number_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+        } else if byte == b'"' {
+            in_string = true;
+            index += 1;
+        } else if byte == b'-' || byte.is_ascii_digit() {
+            let start = index;
+            while index < bytes.len() && b"-+.eE0123456789".contains(&bytes[index]) {
+                index += 1;
+            }
+            spans.push((start, index));
+        } else {
+            index += 1;
+        }
+    }
+    spans
+}
 
 /// A small deterministic pseudo-random generator (xorshift64*), so every run tests the same inputs.
 struct Random(u64);
@@ -46,19 +116,14 @@ fn damage(bytes: &[u8], random: &mut Random) -> Vec<u8> {
             out.splice(position..position, slice);
         }
         _ => {
-            // Replace a number with an extreme one.
+            // Replace a randomly chosen number, anywhere in the message, with an extreme one.
             let text = String::from_utf8_lossy(&out).into_owned();
-            let extreme = [
-                "-1",
-                "1e309",
-                "18446744073709551616",
-                "-9223372036854775809",
-                "0.5",
-                "null",
-                "\"\"",
-                "[]",
-            ][random.below(8)];
-            out = text.replacen(char::is_numeric, extreme, 1).into_bytes();
+            let spans = number_spans(&text);
+            if !spans.is_empty() {
+                let (start, end) = spans[random.below(spans.len())];
+                let extreme = EXTREMES[random.below(EXTREMES.len())];
+                out = format!("{}{extreme}{}", &text[..start], &text[end..]).into_bytes();
+            }
         }
     }
     out
@@ -86,6 +151,25 @@ fn seeds(doc_id: u64, blob: u64) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn numbers_are_found_outside_strings_only() {
+    let text = r#"{"a":-12.5e3,"b":"x1","c":[0,7],"d":"\"9"}"#;
+    let numbers: Vec<&str> = number_spans(text)
+        .iter()
+        .map(|&(start, end)| &text[start..end])
+        .collect();
+    assert_eq!(numbers, ["-12.5e3", "0", "7"]);
+}
+
+#[test]
+fn the_panic_count_sees_panics_the_engine_catches() {
+    let mut engine = crate::support::engine_with(Config { allow_panic: true });
+    open_document(&mut engine);
+    let before = panics_so_far();
+    send(&mut engine, &request(5, "diag.panic", json!({})));
+    assert_eq!(panics_so_far(), before + 1);
+}
+
+#[test]
 fn damaged_messages_are_answered_with_valid_messages_and_never_panic_a_handler() {
     let schema = schema::json_schema().unwrap();
     let validator = Validator::new(&schema);
@@ -107,7 +191,15 @@ fn damaged_messages_are_answered_with_valid_messages_and_never_panic_a_handler()
                 .map(|_| u8::try_from(random.next() & 0xff).unwrap())
                 .collect();
         }
-        for answer in engine.handle(&message, 0) {
+        let panics = panics_so_far();
+        let answers = engine.handle(&message, 0);
+        assert_eq!(
+            panics_so_far(),
+            panics,
+            "handling a damaged message panicked: {}",
+            String::from_utf8_lossy(&message)
+        );
+        for answer in answers {
             let answer: Value = serde_json::from_str(&answer).unwrap();
             validator
                 .validate(&answer)
@@ -160,8 +252,16 @@ fn damaged_recordings_are_refused_or_replayed_but_never_panic() {
         for _ in 0..=random.below(4) {
             damaged = damage(&damaged, &mut random);
         }
-        // A damaged recording either fails to load, or replays and reports what differs; it never panics.
-        if replay(Config::default(), &damaged).is_err() {
+        // A damaged recording either fails to load, or replays and reports what differs; it never panics, not even in a handler, where the replaying engine would catch the panic and only a digest would show it.
+        let panics = panics_so_far();
+        let outcome = replay(Config::default(), &damaged);
+        assert_eq!(
+            panics_so_far(),
+            panics,
+            "replaying a damaged recording panicked: {}",
+            String::from_utf8_lossy(&damaged)
+        );
+        if outcome.is_err() {
             refused += 1;
         }
     }

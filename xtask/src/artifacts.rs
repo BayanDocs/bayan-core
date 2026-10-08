@@ -483,9 +483,15 @@ fn run_c_driver(args: &[&str]) -> Result<(), String> {
         }
         println!("    running the C driver, {linking}ally linked:");
         let mut run = Command::new(&program);
-        let output = run_and_capture(&mut run)?;
+        let (output, errors) = run_and_capture_both(&mut run)?;
         for line in output.lines() {
             println!("      {line}");
+        }
+        // The driver writes only to standard output, and it makes the engine panic on purpose: the engine must not print that panic, because a panic message could quote document content (spec §3.1). So anything on standard error fails the run.
+        if !errors.is_empty() {
+            return Err(format!(
+                "the C driver, {linking}ally linked, wrote to standard error:\n{errors}"
+            ));
         }
         outputs.push(output);
     }
