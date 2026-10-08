@@ -19,8 +19,11 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 /// The nightly toolchain that runs Miri: the BayanDocs cloud environment's nightly (`RUST_NIGHTLY` in the docs repository's `scripts/cloud-environment-setup.sh`). `scripts/dev-setup.sh` installs it with Miri, and a test keeps the two equal; change them in the monthly dependency session.
 pub const MIRI_TOOLCHAIN: &str = "nightly-2026-10-02";
 
-/// The licence of the artifacts, as an SPDX expression (ADR-0003), and the files under `LICENSES/` that hold it.
+/// The licence of the artifacts, as an SPDX expression in the form of REUSE metadata and of the files under `LICENSES/` that hold it (ADR-0003 §4).
 const LICENSE: &str = "GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission";
+
+/// The same licence in the form that package manifests use, with SPDX 3.0's `AdditionRef-` (ADR-0003 §4), as in `Cargo.toml` and bayan-web's `package.json`.
+const MANIFEST_LICENSE: &str = "GPL-3.0-or-later WITH AdditionRef-BayanDocs-App-Store-Permission";
 const LICENSE_FILES: [&str; 2] = [
     "GPL-3.0-or-later.txt",
     "LicenseRef-BayanDocs-App-Store-Permission.txt",
@@ -409,7 +412,7 @@ fn build_wasm_package(args: &[&str]) -> Result<(), String> {
 /// A `package.json` that names the package and its licence. It is private: the package is a build artifact, never published to a registry.
 fn package_json(version: &str) -> String {
     format!(
-        "{{\n  \"name\": \"@bayandocs/engine-wasm\",\n  \"version\": \"{version}\",\n  \"description\": \"The BayanDocs engine as WebAssembly, with its Web Worker host (engine protocol v0)\",\n  \"license\": \"{LICENSE}\",\n  \"private\": true,\n  \"type\": \"module\"\n}}\n"
+        "{{\n  \"name\": \"@bayandocs/engine-wasm\",\n  \"version\": \"{version}\",\n  \"description\": \"The BayanDocs engine as WebAssembly, with its Web Worker host (engine protocol v0)\",\n  \"license\": \"{MANIFEST_LICENSE}\",\n  \"private\": true,\n  \"type\": \"module\"\n}}\n"
     )
 }
 
@@ -422,7 +425,7 @@ fn wasm_readme(version: &str) -> String {
          - `engine-protocol.d.ts` and `engine-protocol.schema.json`: the protocol's TypeScript declarations and JSON Schema.\n\
          - `test-page.html`, `test-page.css` and `test-page.js`: a page for trying the engine by hand. Serve this folder over HTTP, for example with `python3 -m http.server`, and open `test-page.html`.\n\
          - `LICENSES/`, `THIRD-PARTY-LICENSES.txt` and `RUST-STANDARD-LIBRARY-COPYRIGHT.html`: BayanDocs' licence ({LICENSE}) and the notices of the code compiled into the module. Distribute them with it.\n\n\
-         The page that runs the worker needs a Content Security Policy that allows `'wasm-unsafe-eval'` in `script-src` and `'self'` in `worker-src`. Under Trusted Types, creating the worker needs a policy for its script address.\n\n\
+         Serving it: send `bayan_wasm_bg.wasm` as `application/wasm` (otherwise wasm-bindgen's glue falls back to a slower way of loading it and warns on the console) and the `.js` files as `text/javascript`. The page that starts the worker needs `'self'` in `worker-src` of its Content Security Policy, and under Trusted Types a policy for the worker's script address. The worker has a Content Security Policy of its own, which comes with the response that delivers `bayan-worker.js`, so send one with that response too: it needs `'self'` and `'wasm-unsafe-eval'` in `script-src` (for the scripts it imports and to compile the module) and `'self'` in `connect-src` (to fetch the module).\n\n\
          The protocol: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md\n"
     )
 }
@@ -961,8 +964,11 @@ mod tests {
         );
         assert_eq!(
             value.get("license").and_then(json::Value::as_str),
-            Some(LICENSE)
+            Some(MANIFEST_LICENSE)
         );
+        // The manifest form is the one Cargo.toml uses.
+        let cargo = read(&crate::workspace_root().join("Cargo.toml")).unwrap();
+        assert!(cargo.contains(&format!("license = \"{MANIFEST_LICENSE}\"")));
     }
 
     #[test]
