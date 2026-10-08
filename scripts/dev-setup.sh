@@ -12,8 +12,9 @@
 #     below, into $CARGO_HOME/bin (default ~/.cargo/bin), which rustup puts on PATH. Only where no archive is pinned, or
 #     the download fails, does it build the tool from crates.io instead (`cargo install --locked --no-default-features`:
 #     149 crates and about a minute; Cargo checks every crate against the SHA-256 in the crates.io index). That build
-#     compiles no C code, but four of its crates, which only wasm-bindgen's test runner uses, are listed by RustSec as
-#     unmaintained (buf_redux, multipart, safemem, twoway); the release archives avoid it.
+#     compiles no C code, but it builds the crates of wasm-bindgen's test runner too, among them four that RustSec lists
+#     as unmaintained (buf_redux, multipart, safemem, twoway) and one that was yanked (yoke-derive 0.8.3, which
+#     `--locked` builds anyway); the release archives avoid all of that.
 #   - Miri and the standard library's source for the pinned nightly toolchain (the BayanDocs cloud environment's
 #     RUST_NIGHTLY), which `cargo xtask miri` uses to check bayan-ffi's pointer handling for undefined behaviour.
 #     rustup checks every component against the SHA-256 in the toolchain's release manifest. `cargo miri setup` then
