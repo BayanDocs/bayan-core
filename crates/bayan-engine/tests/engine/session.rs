@@ -644,3 +644,34 @@ fn the_limits_are_enforced() {
     );
     assert_eq!(reply_to(&full, 5)["error"]["args"]["limit"], json!("blobs"));
 }
+
+#[test]
+fn a_tile_too_large_is_over_a_limit_and_a_rectangle_out_of_range_is_invalid() {
+    // Spec §13: the tile size is a resource limit (limit_exceeded); the rectangle's range keeps the rasterizer's arithmetic exact, so a value outside it is an invalid request (§12), like a zoom out of range.
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    let answers = send(
+        &mut engine,
+        &request(3, "render.tile", whole_page(doc_id, 0, 4097, 1)),
+    );
+    assert_eq!(error_code(&answers, 3), "limit_exceeded");
+    assert_eq!(
+        reply_to(&answers, 3)["error"]["args"]["limit"],
+        json!("tile_size")
+    );
+    let edge = 1_i64 << 40;
+    for rect in [
+        json!({ "x": edge + 1, "y": 0, "width": 1, "height": 1 }),
+        json!({ "x": 0, "y": -edge - 1, "width": 1, "height": 1 }),
+        json!({ "x": 0, "y": 0, "width": edge + 1, "height": 1 }),
+        json!({ "x": 0, "y": 0, "width": 0, "height": 1 }),
+    ] {
+        let tile = json!({ "doc_id": doc_id, "page": 0, "rect": rect, "width": 1, "height": 1 });
+        let answers = send(&mut engine, &request(4, "render.tile", tile));
+        assert_eq!(error_code(&answers, 4), "invalid_request", "{rect}");
+    }
+    // The edges themselves are inside the range.
+    let tile = json!({ "doc_id": doc_id, "page": 0, "rect": { "x": -edge, "y": edge, "width": edge, "height": edge }, "width": 1, "height": 1 });
+    let answers = send(&mut engine, &request(5, "render.tile", tile));
+    assert!(ok_payload(&answers, 5)["blob"].is_u64());
+}
