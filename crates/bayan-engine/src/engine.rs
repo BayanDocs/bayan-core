@@ -61,12 +61,26 @@ impl TileError {
 }
 
 /// What rendering a tile through `bayan_render_tile` produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TileOutcome {
     /// The pixels, premultiplied RGBA8 without row padding, or why there are none.
     pub pixels: Result<Vec<u8>, TileError>,
+    /// The digest of the pixels (spec §10), if a recording or a replay needed it; it is computed only then, because it takes a pass over up to 64 MiB.
+    pub digest: Option<String>,
     /// Messages to deliver to the shell: an `engine.error` if rendering panicked (spec §12).
     pub messages: Vec<String>,
+}
+
+/// Shows the size of the pixels, never the pixels, which show a document (AGENTS.md §6).
+impl std::fmt::Debug for TileOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TileOutcome")
+            .field("pixels", &self.pixels.as_ref().map(Vec::len))
+            .field("digest", &self.digest)
+            .field("messages", &self.messages.len())
+            .finish()
+    }
 }
 
 /// The state of one session: the handshake and the open documents.
@@ -310,7 +324,6 @@ impl TileFailure {
 }
 
 /// An engine: one session, its blobs, and a recording if one is running.
-#[derive(Debug)]
 pub struct Engine {
     config: Config,
     blobs: Arc<BlobStore>,
@@ -321,6 +334,21 @@ pub struct Engine {
     blob_reads: Vec<(BlobId, Arc<[u8]>)>,
     /// While this engine replays a recording: the index of the entry being replayed, and the tiles rendered so far.
     replay: Option<ReplayLog>,
+}
+
+/// Shows the session's shape, never its documents, recordings or blobs, which hold document content: a host that logs an engine with `{:?}` must not log content (AGENTS.md §6).
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Engine")
+            .field("handshake", &self.session.handshake)
+            .field("documents", &self.session.documents.len())
+            .field("next_seq", &self.next_seq)
+            .field("recorder", &self.recorder)
+            .field("replaying", &self.replay.is_some())
+            .field("blobs", &self.blobs)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -429,19 +457,27 @@ impl Engine {
             self.render_direct(request, width, height)
         }));
         let outcome = match attempt {
-            Ok(pixels) => TileOutcome {
-                pixels,
+            Ok(Ok((pixels, digest))) => TileOutcome {
+                pixels: Ok(pixels),
+                digest,
+                messages: Vec::new(),
+            },
+            Ok(Err(error)) => TileOutcome {
+                pixels: Err(error),
+                digest: None,
                 messages: Vec::new(),
             },
             Err(_) => TileOutcome {
                 pixels: Err(TileError::Internal),
+                digest: None,
                 messages: self.recover_from_panic(None),
             },
         };
         if recording {
-            let digest = match &outcome.pixels {
-                Ok(pixels) => digest::of_bytes(pixels),
-                Err(error) => format!("error:{}", error.as_str()),
+            let digest = match (&outcome.pixels, &outcome.digest) {
+                (Ok(_), Some(digest)) => digest.clone(),
+                (Ok(pixels), None) => digest::of_bytes(pixels),
+                (Err(error), _) => format!("error:{}", error.as_str()),
             };
             if let Some(recorder) = &mut self.recorder {
                 recorder.record_tile(request, width, height, received_ms, digest);
@@ -450,12 +486,13 @@ impl Engine {
         outcome
     }
 
+    /// Renders a tile for [`Engine::render_tile`], and computes its digest if a recording or a replay needs it.
     fn render_direct(
         &mut self,
         request: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<Vec<u8>, TileError> {
+    ) -> Result<(Vec<u8>, Option<String>), TileError> {
         if request.len() > MAX_MESSAGE_BYTES {
             return Err(TileError::InvalidArgument);
         }
@@ -467,11 +504,20 @@ impl Engine {
         let pixels = self
             .render(&request)
             .map_err(|failure| failure.as_tile_error())?;
-        self.log_tile(request.page, width, height, digest::of_bytes(&pixels));
-        Ok(pixels)
+        let digest =
+            (self.recorder.is_some() || self.replay.is_some()).then(|| digest::of_bytes(&pixels));
+        if let Some(digest) = &digest {
+            self.log_tile(request.page, width, height, digest.clone());
+        }
+        Ok((pixels, digest))
     }
 
     fn render(&mut self, request: &RenderTile) -> Result<Vec<u8>, TileFailure> {
+        #[cfg(test)]
+        assert!(
+            !tests::PANIC_WHILE_RENDERING.with(std::cell::Cell::get),
+            "a panic while rendering, for a test"
+        );
         let geometry = tile_geometry(request)?;
         if let Some(replay) = &mut self.replay {
             // Charged before rendering, so a replay never renders more than its budget.
@@ -836,14 +882,24 @@ impl Engine {
         let _request: Empty = envelope.payload()?;
         let recorder = self
             .recorder
-            .take()
+            .as_ref()
             .ok_or_else(|| ErrorInfo::new(ErrorCode::NotRecording))?;
-        let (bytes, entries, truncated) = recorder.finish()?;
+        let (bytes, entries, truncated) = match recorder.finish() {
+            Ok(finished) => finished,
+            Err(error) => {
+                // A recording too large to write never will be: it ends here.
+                self.recorder = None;
+                return Err(error);
+            }
+        };
         // As for tiles: without an identifier, nobody could release the recording's blob.
         if envelope.id.is_none() {
+            self.recorder = None;
             return Ok(());
         }
+        // The recording ends only once its blob is stored: if the blob store is full, it keeps running, and the shell can release blobs and stop it again.
         let blob = self.blobs.put_engine(bytes).map_err(blob_error)?;
+        self.recorder = None;
         let stopped = RecordStopped {
             blob: BlobRef(blob),
             entries,
@@ -964,4 +1020,102 @@ fn line_changed(doc_id: u64, document: &MockDocument, outbox: &mut Outbox) {
             caret: Some(document.a11y_caret()),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    thread_local! {
+        /// Makes rendering panic on this thread, for tests of the recovery on the direct path.
+        pub(super) static PANIC_WHILE_RENDERING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// An engine after the handshake, with the mock document open; returns it and the document's identifier.
+    fn engine_with_document() -> (Engine, u64) {
+        let mut engine = Engine::new(Config::default(), Arc::new(BlobStore::new()));
+        engine.handle(
+            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+            0,
+        );
+        let blob = engine.blobs().put_shell(b"").unwrap();
+        let opened = engine.handle(
+            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
+            0,
+        );
+        let opened: serde_json::Value = serde_json::from_str(&opened[0]).unwrap();
+        (engine, opened["payload"]["doc_id"].as_u64().unwrap())
+    }
+
+    fn tile_request(doc_id: u64) -> String {
+        format!(
+            r#"{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":100000,"height":100000}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_panic_while_rendering_a_tile_directly_becomes_an_error_and_a_fresh_session() {
+        let (mut engine, doc_id) = engine_with_document();
+        let request = tile_request(doc_id);
+        PANIC_WHILE_RENDERING.with(|flag| flag.set(true));
+        let outcome = engine.render_tile(request.as_bytes(), 4, 4, 0);
+        PANIC_WHILE_RENDERING.with(|flag| flag.set(false));
+        assert_eq!(outcome.pixels, Err(TileError::Internal));
+        assert_eq!(outcome.messages.len(), 1);
+        assert!(
+            outcome.messages[0].contains(r#""type":"engine.error""#)
+                && outcome.messages[0].contains(r#""recoverable":false"#),
+            "{:?}",
+            outcome.messages
+        );
+        // The session was discarded with its document; a new handshake works.
+        assert_eq!(
+            engine.render_tile(request.as_bytes(), 4, 4, 0).pixels,
+            Err(TileError::NotFound)
+        );
+        let (mut fresh, doc_id) = engine_with_document();
+        assert!(
+            fresh
+                .render_tile(tile_request(doc_id).as_bytes(), 4, 4, 0)
+                .pixels
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_direct_path_hashes_a_tile_only_for_a_recording() {
+        let (mut engine, doc_id) = engine_with_document();
+        let request = tile_request(doc_id);
+        let plain = engine.render_tile(request.as_bytes(), 4, 4, 0);
+        assert_eq!(plain.digest, None);
+        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        let recorded = engine.render_tile(request.as_bytes(), 4, 4, 0);
+        assert_eq!(
+            recorded.digest,
+            Some(digest::of_bytes(recorded.pixels.as_ref().unwrap()))
+        );
+    }
+
+    #[test]
+    fn debug_output_shows_no_document_content() {
+        let (mut engine, doc_id) = engine_with_document();
+        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        engine.handle(
+            format!(r#"{{"v":0,"id":4,"type":"input.text","payload":{{"doc_id":{doc_id},"text":"Confidential"}}}}"#).as_bytes(),
+            0,
+        );
+        let shown = format!("{engine:?}");
+        assert!(!shown.contains("Confidential"), "{shown}");
+        assert!(shown.contains("documents: 1"), "{shown}");
+        let outcome = engine.render_tile(tile_request(doc_id).as_bytes(), 2, 2, 0);
+        assert_eq!(
+            format!("{outcome:?}"),
+            format!(
+                "TileOutcome {{ pixels: Ok(16), digest: {:?}, messages: 0 }}",
+                outcome.digest
+            )
+        );
+    }
 }

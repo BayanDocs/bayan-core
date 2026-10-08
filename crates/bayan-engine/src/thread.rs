@@ -232,6 +232,15 @@ impl EngineThread {
         if self.shared.stopping.load(Ordering::SeqCst) {
             return Err(TileError::Internal);
         }
+        {
+            // Like a posted message, rendering can make the engine send messages (`engine.error` after a panic), so the sink can no longer change. Taking the sink's lock orders this against `set_sink`.
+            let _slot = self
+                .shared
+                .sink
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.shared.posted.store(true, Ordering::SeqCst);
+        }
         let (answer, pixels) = mpsc::sync_channel(1);
         // If the engine stops before it gets to the request, the queue and `answer` are dropped, and `recv` fails.
         self.jobs
@@ -402,6 +411,16 @@ mod tests {
     fn the_sink_cannot_change_after_the_first_post() {
         let (thread, _messages) = started();
         thread.post(b"{}".to_vec(), 0).unwrap();
+        assert_eq!(thread.set_sink(Arc::new(|_: &str| {})), Err(AlreadyPosted));
+    }
+
+    #[test]
+    fn the_sink_cannot_change_after_the_first_tile_either() {
+        let (thread, _messages) = started();
+        assert_eq!(
+            thread.render_tile(b"{}".to_vec(), 1, 1, 0),
+            Err(TileError::InvalidArgument)
+        );
         assert_eq!(thread.set_sink(Arc::new(|_: &str| {})), Err(AlreadyPosted));
     }
 

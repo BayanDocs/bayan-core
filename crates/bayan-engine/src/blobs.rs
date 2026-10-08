@@ -24,12 +24,22 @@ pub enum BlobError {
 }
 
 /// The blobs of one engine.
-#[derive(Debug)]
 pub struct BlobStore {
     inner: Mutex<Inner>,
 }
 
-#[derive(Debug)]
+/// Shows how many blobs there are and their total size, never their bytes, which can be document content (AGENTS.md §6).
+impl std::fmt::Debug for BlobStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.lock();
+        formatter
+            .debug_struct("BlobStore")
+            .field("blobs", &inner.blobs.len())
+            .field("total_bytes", &inner.total_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Inner {
     blobs: BTreeMap<BlobId, Arc<[u8]>>,
     total_bytes: usize,
@@ -186,6 +196,16 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_shows_no_bytes() {
+        let store = BlobStore::new();
+        store.put_shell(b"secret").unwrap();
+        assert_eq!(
+            format!("{store:?}"),
+            "BlobStore { blobs: 1, total_bytes: 6, .. }"
+        );
+    }
 
     #[test]
     fn numbers_shell_blobs_odd_and_engine_blobs_even() {

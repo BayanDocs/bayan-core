@@ -70,6 +70,20 @@ struct RecordedBlob {
     base64: String,
 }
 
+/// A recording as JSON, borrowed from a running recording to write it.
+#[derive(Serialize)]
+struct RecordingFileRef<'a> {
+    format: &'a str,
+    format_version: u32,
+    engine_version: &'a str,
+    protocol_version: u32,
+    layout_epoch: u32,
+    initial_state: &'a Snapshot,
+    blobs: Vec<RecordedBlob>,
+    entries: &'a [Entry],
+    truncated: bool,
+}
+
 /// A recording as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RecordingFile {
@@ -117,7 +131,6 @@ where
 }
 
 /// A recording being made.
-#[derive(Debug)]
 pub(crate) struct Recorder {
     initial_state: Snapshot,
     /// The host time of the first entry; times are relative to it.
@@ -127,6 +140,19 @@ pub(crate) struct Recorder {
     /// An upper bound of the recording's size as JSON.
     size: usize,
     truncated: bool,
+}
+
+/// Shows the recording's size, never its messages or blobs, which hold document content (AGENTS.md §6).
+impl fmt::Debug for Recorder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Recorder")
+            .field("entries", &self.entries.len())
+            .field("blobs", &self.blobs.len())
+            .field("size", &self.size)
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The size of a value as JSON.
@@ -234,16 +260,16 @@ impl Recorder {
         self.push(entry, received_ms, Vec::new());
     }
 
-    /// Ends the recording and returns it as JSON, with its number of entries and whether it was truncated.
-    pub(crate) fn finish(self) -> Result<(Vec<u8>, u32, bool), ErrorInfo> {
+    /// Writes the recording as JSON, with its number of entries and whether it was truncated. The recording itself is left as it is, so it can go on if the JSON cannot be stored.
+    pub(crate) fn finish(&self) -> Result<(Vec<u8>, u32, bool), ErrorInfo> {
         let entries = u32::try_from(self.entries.len()).unwrap_or(u32::MAX);
-        let file = RecordingFile {
-            format: FORMAT.to_owned(),
+        let file = RecordingFileRef {
+            format: FORMAT,
             format_version: FORMAT_VERSION,
-            engine_version: ENGINE_VERSION.to_owned(),
+            engine_version: ENGINE_VERSION,
             protocol_version: PROTOCOL_VERSION,
             layout_epoch: LAYOUT_EPOCH,
-            initial_state: self.initial_state,
+            initial_state: &self.initial_state,
             blobs: self
                 .blobs
                 .iter()
@@ -252,7 +278,7 @@ impl Recorder {
                     base64: base64::encode(bytes),
                 })
                 .collect(),
-            entries: self.entries,
+            entries: &self.entries,
             truncated: self.truncated,
         };
         let json = serde_json::to_vec(&file).map_err(|_| ErrorInfo::new(ErrorCode::Internal))?;
@@ -350,9 +376,11 @@ fn replay_with_budget(
                 let (Some(width), Some(height)) = (entry.width, entry.height) else {
                     return Err(invalid());
                 };
-                match engine.render_tile(&bytes, width, height, entry.t_ms).pixels {
-                    Ok(pixels) => digest::of_bytes(&pixels),
-                    Err(error) => format!("error:{}", error.as_str()),
+                let outcome = engine.render_tile(&bytes, width, height, entry.t_ms);
+                match (outcome.pixels, outcome.digest) {
+                    (Ok(_), Some(digest)) => digest,
+                    (Ok(pixels), None) => digest::of_bytes(&pixels),
+                    (Err(error), _) => format!("error:{}", error.as_str()),
                 }
             }
         };

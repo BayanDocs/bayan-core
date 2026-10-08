@@ -401,3 +401,33 @@ fn a_message_the_host_could_not_serialize_is_answered_like_an_oversized_one() {
     let stopped = send(&mut engine, &request(5, "diag.record.stop", json!({})));
     assert_eq!(ok_payload(&stopped, 5)["truncated"], json!(true));
 }
+
+#[test]
+fn a_full_blob_store_does_not_lose_the_recording() {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    send(
+        &mut engine,
+        &request(4, "query.a11y", json!({ "doc_id": doc_id })),
+    );
+    // The shell holds as many blobs as may exist at once.
+    let mut held = Vec::new();
+    while let Ok(blob) = engine.blobs().put_shell(b"") {
+        held.push(blob);
+    }
+    let refused = send(&mut engine, &request(5, "diag.record.stop", json!({})));
+    assert_eq!(error_code(&refused, 5), "limit_exceeded");
+    // The recording keeps running; once the shell releases a blob, stopping works.
+    assert!(engine.blobs().release(held.pop().unwrap()));
+    let stopped = send(&mut engine, &request(6, "diag.record.stop", json!({})));
+    let stopped = ok_payload(&stopped, 6);
+    // The query, and the stop that could not be stored, which a replay answers with not_recording instead.
+    assert_eq!(stopped["entries"], json!(2));
+    let recording = engine
+        .blobs()
+        .take(stopped["blob"].as_u64().unwrap())
+        .unwrap();
+    let report = replay(Config::default(), &recording).unwrap();
+    assert_eq!(report.first_difference, Some(1));
+}

@@ -83,7 +83,11 @@ pub(crate) fn rasterize<'a>(
     let width = usize::try_from(geometry.width).ok()?;
     let height = usize::try_from(geometry.height).ok()?;
     let row_bytes = width.checked_mul(4)?;
-    let mut pixels = vec![0_u8; row_bytes.checked_mul(height)?];
+    let size = row_bytes.checked_mul(height)?;
+    // A tile can need 64 MiB. If that much memory cannot be had, the tile fails (`internal`) instead of the allocation aborting the process.
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(size).ok()?;
+    pixels.resize(size, 0);
     let area = i128::from(geometry.rect.width) * i128::from(geometry.rect.height);
     for shape in shapes {
         let Some(columns) = span(

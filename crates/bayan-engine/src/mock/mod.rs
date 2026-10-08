@@ -242,7 +242,7 @@ impl MockDocument {
         }
     }
 
-    /// The editable line's accessibility node.
+    /// The editable line's accessibility node. The line neither wraps nor scrolls, so characters past its frame (after about the 99th) are not drawn; their boxes continue beyond the frame's right edge, possibly beyond the page (spec §6.6).
     pub(crate) fn editable_node(&self) -> A11yNode {
         let layout = fixed();
         let area = text_area(layout.editable.rect);

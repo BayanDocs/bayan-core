@@ -151,6 +151,12 @@ fn type_of_kind(kind: &str, object: &Map<String, Value>) -> Result<String, Strin
                 Some(values) if values.is_object() => {
                     Ok(format!("{{ [key: string]: {} }}", type_of(values)?))
                 }
+                // An object that allows any field would need a type this generator does not write; `Record<string, never>` would forbid every field instead.
+                Some(Value::Bool(true)) => Err(
+                    "the TypeScript generator cannot declare an object with arbitrary fields (additionalProperties: true)"
+                        .to_owned(),
+                ),
+                // No fields: the protocol's empty payloads.
                 _ => Ok("Record<string, never>".to_owned()),
             }
         }
@@ -274,9 +280,11 @@ export type RequestType = keyof Requests;
 /** The types of the events the engine sends. */
 export type EventType = keyof Events;
 
-/** A message from the shell to the engine (spec §4). Without `id`, the engine sends no reply. */
+/** A message from the shell to the engine (spec §4). Without `id`, the engine sends no reply. `payload` may be left out when every field of it is optional. */
 export type EngineRequest<T extends RequestType = RequestType> = {
-  [K in T]: { v: ProtocolVersion; id?: number; type: K; payload: Requests[K] };
+  [K in T]: { v: ProtocolVersion; id?: number; type: K } & ({} extends Requests[K]
+    ? { payload?: Requests[K] }
+    : { payload: Requests[K] });
 }[T];
 
 /** A successful reply to a request of type `T` (spec §4). */
@@ -455,6 +463,7 @@ mod tests {
             json!({"$ref": "https://example.org/other"}),
             json!(false),
             json!({"type": "tuple"}),
+            json!({"type": "object", "additionalProperties": true}),
         ] {
             assert!(type_of(&schema).is_err(), "{schema}");
         }
