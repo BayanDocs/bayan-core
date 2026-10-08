@@ -1,13 +1,21 @@
 //! A panic inside a message handler produces `engine.error`, and the engine stays usable (CORE-007 AC-3, engine protocol §12, ADR-0006 §4).
+//!
+//! The tests that make the engine panic, and the one that starts the engine thread, run on the host only. The gate also runs the tests in WebAssembly (wasm32-wasip1), where a panic aborts the whole test program instead of unwinding, so the engine cannot catch it, and no thread can be started. The web worker host recovers from such a panic by replacing the WebAssembly instance instead (engine protocol §3.2); the tests that need no panic run in WebAssembly too.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use crate::support::{engine_with, error_code, events, ok_payload, open_document, request, send};
+#[cfg(not(target_arch = "wasm32"))]
 use bayan_engine::blobs::BlobStore;
 use bayan_engine::config::Config;
+#[cfg(not(target_arch = "wasm32"))]
 use bayan_engine::recording::replay;
+#[cfg(not(target_arch = "wasm32"))]
 use bayan_engine::thread::EngineThread;
 use serde_json::{Value, json};
 
@@ -15,6 +23,8 @@ fn panicking() -> Config {
     Config { allow_panic: true }
 }
 
+// Host only: it makes the engine panic (see the module documentation).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_forced_panic_becomes_an_error_and_a_fresh_session() {
     let mut engine = engine_with(panicking());
@@ -49,6 +59,8 @@ fn a_forced_panic_becomes_an_error_and_a_fresh_session() {
     assert_eq!(ok_payload(&tree, 5)["root"]["role"], json!("document"));
 }
 
+// Host only: it makes the engine panic (see the module documentation).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_panic_without_a_request_identifier_is_still_reported() {
     let mut engine = engine_with(panicking());
@@ -97,6 +109,8 @@ fn without_the_test_switch_diag_panic_is_refused() {
     assert!(ok_payload(&manifest, 4)["commands"].is_array());
 }
 
+// Host only: it makes the engine panic (see the module documentation).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn event_numbers_keep_increasing_across_a_panic() {
     let mut engine = engine_with(panicking());
@@ -114,6 +128,8 @@ fn event_numbers_keep_increasing_across_a_panic() {
     assert_eq!(panic[0]["seq"].as_u64(), Some(last_before + 1));
 }
 
+// Host only: it makes the engine panic (see the module documentation).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_recording_reproduces_a_panic() {
     let mut engine = engine_with(panicking());
@@ -148,6 +164,8 @@ fn a_recording_reproduces_a_panic() {
     );
 }
 
+// Host only: it starts the engine thread and makes the engine panic (see the module documentation).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_engine_thread_survives_a_panic() {
     let blobs = Arc::new(BlobStore::new());

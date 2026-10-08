@@ -57,8 +57,9 @@ enum Job {
     },
     /// Wakes the engine thread so it notices that it is stopping.
     Stop,
-    /// A panic outside the engine's own recovery, for tests; `answer` stands for a tile request waiting for the job.
+    /// A panic outside the engine's own recovery, for tests; `answer` stands for a tile request waiting for the job. Host only, like the tests that send it.
     #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
     Panic {
         answer: SyncSender<Result<Vec<u8>, TileError>>,
     },
@@ -140,6 +141,7 @@ fn perform(engine: &mut Engine, job: Job) -> Vec<String> {
         }
         Job::Stop => Vec::new(),
         #[cfg(test)]
+        #[cfg(not(target_arch = "wasm32"))]
         Job::Panic { answer: _answer } => {
             panic!("a panic outside the engine's own recovery, for a test")
         }
@@ -292,7 +294,9 @@ impl Drop for EngineThread {
     }
 }
 
+// Host only: these tests start the engine thread, and WebAssembly (wasm32-wasip1, where the gate also runs the tests) has no threads. The condition is a second attribute, not part of `cfg(all(test, …))`, because Clippy treats a module as test code, where `unwrap()` is allowed, only under a plain `#[cfg(test)]`.
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;

@@ -160,6 +160,8 @@ fn numbers_are_found_outside_strings_only() {
     assert_eq!(numbers, ["-12.5e3", "0", "7"]);
 }
 
+// Host only: in WebAssembly (wasm32-wasip1) a panic aborts the whole test program instead of unwinding, so the engine cannot catch it.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_panic_count_sees_panics_the_engine_catches() {
     let mut engine = crate::support::engine_with(Config { allow_panic: true });
