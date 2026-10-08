@@ -11,7 +11,7 @@
 //! 5. **N1.** A story that does not end with a paragraph end gets one.
 //! 6. **N4.** A block-level atom that is not at a block position splits the paragraph: a paragraph end with the containing paragraph's properties is inserted before it.
 //!
-//! Then, once every story is normalized: **N5 for marks**, a comment highlight (`cmt:<id>`) whose comment is not in the view is removed, and text that differed only by it is merged; and **N8** (proposed), missing final-section properties get defaults, so I7 holds.
+//! Then, once every story is normalized: **N5 for marks**, a comment highlight (`cmt:<id>`) whose comment is not in the view is removed, and text that differed only by it is merged; and **N8** (proposed), final-section properties that are missing, not integers, or outside what OOXML allows (a page size that is not positive, a negative left or right margin) get defaults, so I7 holds.
 //!
 //! Structure that normalization adds has identifiers derived deterministically from its context, so that every replica derives the same identifiers, and writing it into the CRDT later ("materialization", see [`Report::virtual_paragraph_ends`]) leaves the view unchanged. A derived paragraph identifier never takes one that a stored atom binds, wherever that atom stands, so that a derived paragraph end never takes over a stored one.
 
@@ -28,7 +28,7 @@ use crate::{AtomKind, EntityId, Props};
 /// The deepest nesting of tables the view shows: a table whose atom lies in a story nested this many tables deep is dropped. Without a limit a hostile document could nest tables until the recursion exhausts the stack.
 pub const MAX_TABLE_DEPTH: usize = 32;
 
-/// The final-section properties that I7 requires, with the defaults that N8 supplies (twips: A4 portrait, 2.54 cm margins).
+/// The final-section properties that I7 requires, with the defaults that N8 supplies (twips: A4 portrait, 2.54 cm margins). The defaults are provisional until a Word Behavior Note records what Word assumes for a document without them, because they change layout.
 pub const SECTION_DEFAULTS: [(&str, i64); 6] = [
     ("pgSz.w", 11_906),
     ("pgSz.h", 16_838),
@@ -683,13 +683,22 @@ impl<'a> Normalizer<'a> {
             let valid = section
                 .get(key)
                 .and_then(Value::as_int)
-                .is_some_and(|value| value > 0);
+                .is_some_and(|value| section_value_allowed(key, value));
             if !valid {
                 section.insert(key.to_owned(), Value::Int(default));
                 self.report.n8 += 1;
             }
         }
         self.view.section = section;
+    }
+}
+
+/// Whether `value` is allowed for the final-section property `key`, as OOXML allows it: page sizes are positive, left and right margins are not negative (`ST_TwipsMeasure`), and top and bottom margins may be negative (`ST_SignedTwipsMeasure`, text that may overlap the header or footer).
+fn section_value_allowed(key: &str, value: i64) -> bool {
+    match key {
+        "pgSz.w" | "pgSz.h" => value > 0,
+        "pgMar.left" | "pgMar.right" => value >= 0,
+        _ => true,
     }
 }
 
