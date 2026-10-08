@@ -138,6 +138,46 @@ fn concurrent_row_operations_merge() {
 }
 
 #[test]
+fn a_row_stored_twice_gains_and_loses_one_cell_per_column_operation() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "x").unwrap();
+    let table = a.insert_table(MAIN, 0, 2, 2).unwrap();
+    let mut b = replica_of(&a, 2);
+    // Both replicas delete the second row and both undo: each undo inserts it again, so the stored list holds it twice, and the view shows it once (N7).
+    a.delete_row(table, 1).unwrap();
+    b.delete_row(table, 1).unwrap();
+    sync_both(&mut a, &mut b);
+    assert!(a.undo().unwrap());
+    assert!(b.undo().unwrap());
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.table_shape(table).unwrap(), [2, 2, 2]);
+    let shape = |document: &Document| -> Vec<usize> {
+        let view = valid_view(document);
+        view.tables[&table]
+            .rows
+            .iter()
+            .map(|row| view.rows[row].cells.len())
+            .collect()
+    };
+    assert_eq!(shape(&a), [2, 2]);
+    // Before the fix, deleting a column deleted the doubled row's cell twice and then failed, leaving its deletions pending for the next edit's undo step (found by the full convergence run).
+    a.delete_column(table, 1).unwrap();
+    assert!(!a.has_pending_changes());
+    assert_eq!(shape(&a), [1, 1]);
+    a.insert_column(table, 1).unwrap();
+    assert_eq!(shape(&a), [2, 2]);
+    a.insert_text(MAIN, 2, "y").unwrap();
+    assert!(a.undo().unwrap());
+    assert_eq!(shape(&a), [2, 2]);
+    assert!(a.undo().unwrap());
+    assert_eq!(shape(&a), [1, 1]);
+    assert!(a.undo().unwrap());
+    assert_eq!(shape(&a), [2, 2]);
+    sync_both(&mut a, &mut b);
+    assert_eq!(valid_view(&a), valid_view(&b));
+}
+
+#[test]
 fn comments_fields_objects_and_bookmarks() {
     let mut a = document(1);
     a.insert_text(MAIN, 0, "Hello world").unwrap();

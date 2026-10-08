@@ -292,7 +292,7 @@ impl Document {
         Ok(self.rows_list(table)?.items())
     }
 
-    /// The number of cells of every stored row of a stored table, in row order (rows that do not exist are left out).
+    /// The number of cells of every stored row of a stored table, in row order (rows that do not exist are left out, and a row that the stored list holds twice counts twice).
     ///
     /// # Errors
     ///
@@ -582,18 +582,14 @@ impl Document {
         Ok(())
     }
 
-    /// Inserts a column before column `index` of `table`: a new cell in every row, at `index` or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends).
+    /// Inserts a column before column `index` of `table`: a new cell in every row, at `index` or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends). A row that the stored state lists twice gets one cell, as the view shows it once.
     ///
     /// # Errors
     ///
     /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], or the errors of the CRDT.
     pub fn insert_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let rows: Vec<_> = self
-            .table_row_ids(table)?
-            .into_iter()
-            .filter_map(|row| self.cells_list(row))
-            .collect();
+        let rows = self.cell_lists(table)?;
         let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
         if index > widest {
             return Err(EditError::InvalidPosition {
@@ -613,18 +609,14 @@ impl Document {
         Ok(())
     }
 
-    /// Deletes column `index` of `table`: the cell at `index` of every row that has one and keeps at least one cell. Refused when no row has a cell at `index`, or when no row could lose one.
+    /// Deletes column `index` of `table`: the cell at `index` of every row that has one and keeps at least one cell. Refused when no row has a cell at `index`, or when no row could lose one. A row that the stored state lists twice loses one cell, as the view shows it once.
     ///
     /// # Errors
     ///
     /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], [`EditError::LastRowOrColumn`], or the errors of the CRDT.
     pub fn delete_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let rows: Vec<_> = self
-            .table_row_ids(table)?
-            .into_iter()
-            .filter_map(|row| self.cells_list(row))
-            .collect();
+        let rows = self.cell_lists(table)?;
         let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
         if index >= widest {
             return Err(EditError::InvalidPosition {
@@ -1206,6 +1198,17 @@ impl Document {
             .items()
             .iter()
             .filter_map(|item| item.as_str().and_then(EntityId::parse))
+            .collect())
+    }
+
+    /// The cell lists of the stored rows of `table`, each row once, where it first appears. The stored list of rows can hold a row twice (two replicas delete the same row and both undo), which the view shows once (N7); an operation that changed every entry would change that row twice, and a deletion could fail halfway.
+    fn cell_lists(&self, table: EntityId) -> Result<Vec<bayan_crdt::IdList>, EditError> {
+        let mut seen = BTreeSet::new();
+        Ok(self
+            .table_row_ids(table)?
+            .into_iter()
+            .filter(|row| seen.insert(*row))
+            .filter_map(|row| self.cells_list(row))
             .collect())
     }
 
