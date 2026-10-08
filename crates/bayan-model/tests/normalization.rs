@@ -766,6 +766,160 @@ fn many_tables_in_one_paragraph_are_split_in_linear_time() {
     );
 }
 
+/// N7 keeps the first of two atoms that reference the same entity in one story, not the last (review of CORE-004, item 21).
+#[test]
+fn a_repeated_reference_keeps_its_first_place() {
+    let paragraph = EntityId(0xA);
+    let mut raw = RawDocument::default();
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    raw.main = vec![
+        text("x"),
+        atom(AtomKind::ParagraphEnd, paragraph),
+        text("y"),
+        atom(AtomKind::ParagraphEnd, paragraph),
+    ];
+    let (view, report) = normalize(&raw);
+    assert_eq!(report.n7, 1);
+    assert_eq!(
+        view.main()[1],
+        Item::Atom {
+            kind: AtomKind::ParagraphEnd,
+            id: Some(paragraph),
+            marks: BTreeMap::new()
+        }
+    );
+    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "x\ny\n");
+}
+
+/// Which atoms keep their marks in the view, written out independently of `AtomKind::keeps_marks` (review of CORE-004, item 21): those with a glyph or an anchor keep them; paragraph ends (their formatting lives in the paragraph's properties), range delimiters and tables do not.
+#[test]
+fn atoms_keep_their_marks_exactly_when_they_have_a_glyph() {
+    let expected = [
+        (AtomKind::ParagraphEnd, false),
+        (AtomKind::Tab, true),
+        (AtomKind::FieldBegin, true),
+        (AtomKind::FieldSeparator, true),
+        (AtomKind::FieldEnd, true),
+        (AtomKind::ObjectAnchor, true),
+        (AtomKind::RangeStart, false),
+        (AtomKind::RangeEnd, false),
+        (AtomKind::TableBlock, false),
+        (AtomKind::CommentReference, true),
+    ];
+    assert_eq!(expected.len(), AtomKind::ALL.len());
+    let bold = || BTreeMap::from([("r:b".to_owned(), Value::Bool(true))]);
+    for (kind, keeps) in expected {
+        let entity = EntityId(0x10);
+        let mut raw = RawDocument::default();
+        let paragraph = EntityId(0xA);
+        raw.paragraphs.insert(paragraph, BTreeMap::new());
+        let mut marked = atom(kind, entity);
+        marked.marks.extend(bold());
+        // A complete field or range around the atom where its kind needs one, so that N2 and N3 keep it.
+        raw.main = match kind {
+            AtomKind::FieldBegin | AtomKind::FieldSeparator | AtomKind::FieldEnd => vec![
+                if kind == AtomKind::FieldBegin {
+                    marked.clone()
+                } else {
+                    atom(AtomKind::FieldBegin, entity)
+                },
+                if kind == AtomKind::FieldSeparator {
+                    marked.clone()
+                } else {
+                    atom(AtomKind::FieldSeparator, entity)
+                },
+                if kind == AtomKind::FieldEnd {
+                    marked.clone()
+                } else {
+                    atom(AtomKind::FieldEnd, entity)
+                },
+            ],
+            AtomKind::RangeStart => vec![marked, atom(AtomKind::RangeEnd, entity)],
+            AtomKind::RangeEnd => vec![atom(AtomKind::RangeStart, entity), marked],
+            _ => vec![marked],
+        };
+        raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
+        match kind {
+            AtomKind::ParagraphEnd => {
+                raw.main = vec![{
+                    let mut end = atom(AtomKind::ParagraphEnd, paragraph);
+                    end.marks.extend(bold());
+                    end
+                }];
+            }
+            AtomKind::FieldBegin | AtomKind::FieldSeparator | AtomKind::FieldEnd => {
+                raw.fields.insert(entity, BTreeMap::new());
+            }
+            AtomKind::ObjectAnchor => {
+                raw.objects.insert(entity, BTreeMap::new());
+            }
+            AtomKind::RangeStart | AtomKind::RangeEnd => {
+                raw.ranges.insert(entity, BTreeMap::new());
+            }
+            AtomKind::TableBlock => add_table(&mut raw, entity, EntityId(0x20), vec![]),
+            AtomKind::CommentReference => {
+                raw.comments.insert(
+                    entity,
+                    BTreeMap::from([(
+                        registry::STORY.to_owned(),
+                        Value::Str(EntityId(0x30).to_string()),
+                    )]),
+                );
+                raw.stories.insert(EntityId(0x30), vec![]);
+            }
+            AtomKind::Tab => {}
+        }
+        let (view, _) = normalize(&raw);
+        assert!(
+            check_invariants(&view).is_empty(),
+            "{kind:?}: {:?}",
+            check_invariants(&view)
+        );
+        let found = view
+            .main()
+            .iter()
+            .find(|item| item.is(kind))
+            .unwrap_or_else(|| panic!("{kind:?} left the view"));
+        let Item::Atom { marks, .. } = found else {
+            unreachable!("an atom")
+        };
+        assert_eq!(marks == &bold(), keeps, "{kind:?}");
+        assert_eq!(marks.is_empty(), !keeps, "{kind:?}");
+    }
+}
+
+/// A field nested in another field's code is part of that code: its result is hidden too (review of CORE-004, item 21).
+#[test]
+fn the_plain_text_hides_fields_nested_in_a_field_code() {
+    let [outer, inner] = [EntityId(0xF1), EntityId(0xF2)];
+    let paragraph = EntityId(0xA);
+    let mut raw = RawDocument::default();
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    raw.fields.insert(outer, BTreeMap::new());
+    raw.fields.insert(inner, BTreeMap::new());
+    // ⟦outer: IF ⟦inner: PAGE | 7⟧ = 1 | yes⟧
+    raw.main = vec![
+        text("<"),
+        atom(AtomKind::FieldBegin, outer),
+        text("IF "),
+        atom(AtomKind::FieldBegin, inner),
+        text("PAGE"),
+        atom(AtomKind::FieldSeparator, inner),
+        text("7"),
+        atom(AtomKind::FieldEnd, inner),
+        text(" = 1"),
+        atom(AtomKind::FieldSeparator, outer),
+        text("yes"),
+        atom(AtomKind::FieldEnd, outer),
+        text(">"),
+        atom(AtomKind::ParagraphEnd, paragraph),
+    ];
+    let (view, report) = normalize(&raw);
+    assert_eq!(report.n2, 0);
+    assert!(check_invariants(&view).is_empty());
+    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "<yes>\n");
+}
+
 /// Deeply nested field codes cost linear time in the plain text export too (the earlier version looked at every open field for every item).
 #[test]
 fn deeply_nested_field_codes_export_in_linear_time() {

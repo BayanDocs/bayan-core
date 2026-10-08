@@ -114,11 +114,12 @@ mod tests {
         assert_ne!(a, EntityId::derive(&[1, 2, 4]));
         assert_ne!(a, EntityId::derive(&[3, 2, 1]));
         assert_ne!(a, EntityId::derive(&[1, 2]));
-        // A fixed value, so a change of the function (which would change every derived identifier in stored documents) is noticed.
+        // Fixed values, computed independently of this code (with the same SplitMix64 steps in Python), so that a change of the function is noticed: materialization stores derived identifiers, and replicas that derived them differently would diverge.
         assert_eq!(
             EntityId::derive(&[]).to_string(),
-            EntityId::derive(&[]).to_string()
+            "1ac046dda8e86e2a7917b368db864fa2"
         );
+        assert_eq!(a.to_string(), "9fa49428625db450500bfbbae18b2df7");
     }
 
     #[test]
