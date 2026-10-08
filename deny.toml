@@ -46,7 +46,7 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
-# Dependencies come only from crates.io. A Git dependency needs its repository listed in `allow-git`, with a reason, and must name a fixed `tag` or `rev` (a commit), never a branch; `cargo xtask check-exact-pins` checks the same in the manifests. Cargo.lock records the exact commit either way.
+# Dependencies come only from crates.io. A Git dependency needs its repository listed in `allow-git`, with a reason, and must name a fixed `tag` or `rev` (a commit), never a branch; `cargo xtask check-exact-pins` checks the same in the manifests. Cargo.lock records the exact commit either way. `cargo xtask check-lockfile-age`, which runs before anything is built, refuses a Git dependency until a work package teaches it to judge the commit's age.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
