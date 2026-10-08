@@ -88,7 +88,8 @@ check_pins_match_repository() {
 setup_rust() {
   command -v rustup >/dev/null 2>&1 || die "rustup is not installed; install it from https://rustup.rs, then run this script again"
   # Inside the repository, rustup reads rust-toolchain.toml and installs whatever of that toolchain is missing.
-  (cd "$REPO_ROOT" && rustup toolchain install)
+  # --no-self-update: by default this command also updates rustup itself to its newest release, which can be less than 24 hours old (ADR-0017: no silent upgrades). The flag applies to this command only and leaves the machine's rustup settings alone.
+  (cd "$REPO_ROOT" && rustup toolchain install --no-self-update)
   log "Rust: $(cd "$REPO_ROOT" && rustc --version), with the components and targets of rust-toolchain.toml"
 }
 

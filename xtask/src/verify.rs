@@ -852,4 +852,28 @@ mod tests {
             "scripts/dev-setup.sh must install Node.js {NODE_VERSION}"
         );
     }
+
+    #[test]
+    fn the_setup_script_never_lets_rustup_update_itself() {
+        // `rustup toolchain install` and `rustup update` also update rustup itself, by default to its newest release, which can be less than 24 hours old (ADR-0017: no silent upgrades).
+        let script = include_str!("../../scripts/dev-setup.sh");
+        let installs: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| {
+                line.contains("rustup toolchain install") || line.contains("rustup update")
+            })
+            .collect();
+        assert!(
+            !installs.is_empty(),
+            "scripts/dev-setup.sh no longer installs the toolchain with rustup; update this test"
+        );
+        for line in installs {
+            assert!(
+                line.contains("--no-self-update"),
+                "scripts/dev-setup.sh must pass --no-self-update to rustup: {line}"
+            );
+        }
+    }
 }
