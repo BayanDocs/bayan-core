@@ -1,0 +1,2316 @@
+{
+  "$defs": {
+    "A11yCaret": {
+      "description": "The accessibility caret: a position in a node's text.",
+      "properties": {
+        "node": {
+          "description": "The node.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The position, in UTF-16 code units into the node's text.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "A11yChange": {
+      "description": "One change to the accessibility tree.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/A11yChangeKind",
+          "description": "What changed."
+        },
+        "node": {
+          "$ref": "#/$defs/A11yNode",
+          "description": "The new version of the node, children included."
+        }
+      },
+      "required": [
+        "kind",
+        "node"
+      ],
+      "type": "object"
+    },
+    "A11yChangeKind": {
+      "description": "The kind of an accessibility change.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The node replaces the node with the same `id`.",
+          "type": "string"
+        }
+      ]
+    },
+    "A11yNode": {
+      "description": "A node of the accessibility tree.",
+      "properties": {
+        "bounds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PageRect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The node's box."
+        },
+        "chars": {
+          "description": "The box of every character of `text`, on the page of `bounds`.",
+          "items": {
+            "$ref": "#/$defs/CharBox"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "children": {
+          "description": "The node's children, in reading order.",
+          "items": {
+            "$ref": "#/$defs/A11yNode"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "editable": {
+          "description": "Whether the user can edit the node's text.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "The node's identifier, stable for its lifetime.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "level": {
+          "description": "A heading's level, 1 to 9.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "An accessible name where the content does not provide one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/A11yRole",
+          "description": "The node's role."
+        },
+        "text": {
+          "description": "The node's own text, on nodes that hold text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "role"
+      ],
+      "type": "object"
+    },
+    "A11yRole": {
+      "description": "The role of an accessibility node.",
+      "oneOf": [
+        {
+          "const": "document",
+          "description": "The whole document.",
+          "type": "string"
+        },
+        {
+          "const": "heading",
+          "description": "A heading.",
+          "type": "string"
+        },
+        {
+          "const": "paragraph",
+          "description": "A paragraph.",
+          "type": "string"
+        },
+        {
+          "const": "list",
+          "description": "A list.",
+          "type": "string"
+        },
+        {
+          "const": "list_item",
+          "description": "An item of a list.",
+          "type": "string"
+        },
+        {
+          "const": "table",
+          "description": "A table.",
+          "type": "string"
+        },
+        {
+          "const": "row",
+          "description": "A row of a table.",
+          "type": "string"
+        },
+        {
+          "const": "column_header",
+          "description": "A header cell of a column.",
+          "type": "string"
+        },
+        {
+          "const": "cell",
+          "description": "A cell of a table.",
+          "type": "string"
+        }
+      ]
+    },
+    "A11yTree": {
+      "description": "The reply to `query.a11y`.",
+      "properties": {
+        "caret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/A11yCaret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The accessibility caret, or `null`."
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "root": {
+          "$ref": "#/$defs/A11yNode",
+          "description": "The requested subtree."
+        }
+      },
+      "required": [
+        "doc_id",
+        "root",
+        "caret"
+      ],
+      "type": "object"
+    },
+    "A11yUpdate": {
+      "description": "`a11y.update`: changes to the accessibility tree.",
+      "properties": {
+        "caret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/A11yCaret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The accessibility caret, or `null`."
+        },
+        "changes": {
+          "description": "The changes, in order.",
+          "items": {
+            "$ref": "#/$defs/A11yChange"
+          },
+          "type": "array"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "doc_id",
+        "changes",
+        "caret"
+      ],
+      "type": "object"
+    },
+    "ArgValue": {
+      "anyOf": [
+        {
+          "description": "A code or a short identifier, such as a message type.",
+          "type": "string"
+        },
+        {
+          "description": "A number.",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A flag.",
+          "type": "boolean"
+        },
+        {
+          "description": "A list of numbers.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "One value in the `args` of an error or warning: only codes and numbers, never document content (spec §12)."
+    },
+    "BlobRef": {
+      "description": "A blob: bulk bytes kept outside the JSON (spec §3). On the C interface, its identifier, a positive integer; on the web, the bytes themselves as an `ArrayBuffer` (spec §3.2).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer",
+      "x-bayan-web-type": "ArrayBuffer"
+    },
+    "Capabilities": {
+      "description": "What the shell can do.",
+      "properties": {
+        "accessibility": {
+          "default": false,
+          "description": "Whether the shell bridges the accessibility tree to the platform.",
+          "type": "boolean"
+        },
+        "clipboard_formats": {
+          "default": [],
+          "description": "The clipboard formats the shell can exchange, as MIME types.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ime": {
+          "default": false,
+          "description": "Whether the shell forwards input-method composition.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Caret": {
+      "description": "The caret.",
+      "properties": {
+        "page": {
+          "description": "The page it is on.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "Its rectangle, in page coordinates."
+        },
+        "visible": {
+          "description": "Whether the shell should show it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "page",
+        "rect",
+        "visible"
+      ],
+      "type": "object"
+    },
+    "CharBox": {
+      "description": "The box of one character.",
+      "properties": {
+        "end": {
+          "description": "The code unit after the character.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "The character's box, in page coordinates."
+        },
+        "start": {
+          "description": "The character's first UTF-16 code unit in the node's text.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "CompositionPhase": {
+      "description": "The phase of an input method composition.",
+      "oneOf": [
+        {
+          "const": "start",
+          "description": "A composition begins at the caret.",
+          "type": "string"
+        },
+        {
+          "const": "update",
+          "description": "The composition's text or selection changed.",
+          "type": "string"
+        },
+        {
+          "const": "end",
+          "description": "The composition ends; its text is discarded (committed text arrives as `input.text`).",
+          "type": "string"
+        }
+      ]
+    },
+    "DiagReplay": {
+      "description": "`diag.replay`: replays a recording.",
+      "properties": {
+        "blob": {
+          "$ref": "#/$defs/BlobRef",
+          "description": "The recording."
+        }
+      },
+      "required": [
+        "blob"
+      ],
+      "type": "object"
+    },
+    "DocClose": {
+      "description": "`doc.close`: closes a document.",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "doc_id"
+      ],
+      "type": "object"
+    },
+    "DocOpen": {
+      "description": "`doc.open`: opens a document from a blob.",
+      "properties": {
+        "blob": {
+          "$ref": "#/$defs/BlobRef",
+          "description": "The document's bytes. The v0 skeleton opens the mock document whatever they contain."
+        },
+        "file_name_hint": {
+          "default": null,
+          "description": "The file name, for format detection and display only; never logged.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format_hint": {
+          "default": null,
+          "description": "The format, if the shell knows it, such as `docx`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "blob"
+      ],
+      "type": "object"
+    },
+    "DocOpened": {
+      "description": "`doc.opened`: the reply to `doc.open`.",
+      "properties": {
+        "doc_id": {
+          "description": "The new document's identifier.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fonts": {
+          "$ref": "#/$defs/FontReport",
+          "description": "Fonts the document asks for that are missing."
+        },
+        "page_count_estimate": {
+          "description": "How many pages the document is expected to have.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "description": "Problems found while opening, as Fluent messages.",
+          "items": {
+            "$ref": "#/$defs/Warning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "page_count_estimate",
+        "warnings",
+        "fonts"
+      ],
+      "type": "object"
+    },
+    "Empty": {
+      "description": "A payload without fields: the payload of requests that need none, and the reply to requests that only succeed or fail.",
+      "type": "object"
+    },
+    "EngineError": {
+      "description": "`engine.error`: an error without a request to answer, or a panic (spec §12).",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArgValue"
+          },
+          "description": "Codes and numbers that explain the error; never document content.",
+          "type": "object"
+        },
+        "code": {
+          "$ref": "#/$defs/ErrorCode",
+          "description": "What went wrong, for programs."
+        },
+        "message_id": {
+          "description": "A Fluent message identifier, for people.",
+          "type": "string"
+        },
+        "recoverable": {
+          "description": "`true`: the engine kept its state. `false`: it discarded its session, and the shell starts a new one with `hello`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message_id",
+        "recoverable",
+        "args"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "What went wrong (spec §12).",
+      "oneOf": [
+        {
+          "const": "invalid_message",
+          "description": "Not a JSON object of the envelope's shape, or not UTF-8.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_protocol_version",
+          "description": "`v` is not 0, or `hello` offers no common version.",
+          "type": "string"
+        },
+        {
+          "const": "handshake_required",
+          "description": "A message other than `hello` before the handshake.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_message",
+          "description": "An unknown message type, or one v0 does not implement.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_request",
+          "description": "The payload does not have the message's shape, or a value is out of range.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "An unknown document, blob, page or node.",
+          "type": "string"
+        },
+        {
+          "const": "limit_exceeded",
+          "description": "A limit of spec §13.",
+          "type": "string"
+        },
+        {
+          "const": "already_recording",
+          "description": "`diag.record.start` while a recording is running.",
+          "type": "string"
+        },
+        {
+          "const": "not_recording",
+          "description": "`diag.record.stop` while no recording is running.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_recording",
+          "description": "`diag.replay` cannot read the recording.",
+          "type": "string"
+        },
+        {
+          "const": "recording_mismatch",
+          "description": "The recording comes from another engine version, protocol version or layout epoch.",
+          "type": "string"
+        },
+        {
+          "const": "not_allowed",
+          "description": "`diag.panic` without its test switch, or `diag.replay` while recording.",
+          "type": "string"
+        },
+        {
+          "const": "panic",
+          "description": "The engine panicked while handling the message.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Any other failure inside the engine.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorInfo": {
+      "description": "The error of a failed reply (spec §4).",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArgValue"
+          },
+          "description": "Codes and numbers that explain the error; never document content.",
+          "type": "object"
+        },
+        "code": {
+          "$ref": "#/$defs/ErrorCode",
+          "description": "What went wrong, for programs."
+        },
+        "message_id": {
+          "description": "A Fluent message identifier, for people.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message_id",
+        "args"
+      ],
+      "type": "object"
+    },
+    "Event": {
+      "description": "A message the engine sends without being asked (spec §4).",
+      "oneOf": [
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/ViewLayoutProgress"
+            },
+            "type": {
+              "const": "view.layout.progress"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/ViewPages"
+            },
+            "type": {
+              "const": "view.pages"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/RenderInvalidate"
+            },
+            "type": {
+              "const": "render.invalidate"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/OverlayUpdate"
+            },
+            "type": {
+              "const": "overlay.update"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/A11yUpdate"
+            },
+            "type": {
+              "const": "a11y.update"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/EngineError"
+            },
+            "type": {
+              "const": "engine.error"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "payload": {
+          "type": "object"
+        },
+        "seq": {
+          "description": "Increases by one with every event an engine instance sends.",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        },
+        "v": {
+          "const": 0,
+          "description": "The protocol version."
+        }
+      },
+      "required": [
+        "v",
+        "type",
+        "seq",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "FontReport": {
+      "description": "Fonts a document asks for that the engine does not have.",
+      "properties": {
+        "machine_dependent": {
+          "description": "Whether the layout depends on a font found only among the user's installed fonts (ADR-0004 §3).",
+          "type": "boolean"
+        },
+        "missing": {
+          "description": "The missing font families.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "missing",
+        "machine_dependent"
+      ],
+      "type": "object"
+    },
+    "Hello": {
+      "description": "`hello`: the shell starts a session (spec §5).",
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Capabilities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the shell can do."
+        },
+        "locale": {
+          "default": null,
+          "description": "The interface language, as a BCP 47 tag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol_versions": {
+          "description": "The protocol versions the shell speaks; must contain 0.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which shell this is."
+        },
+        "theme": {
+          "default": null,
+          "description": "The interface theme, such as `light` or `dark`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_versions"
+      ],
+      "type": "object"
+    },
+    "ImageBitmapRef": {
+      "description": "An `ImageBitmap` transferred from the web worker (spec §3.2); only in the TypeScript declarations.",
+      "type": "object",
+      "x-bayan-web-type": "ImageBitmap"
+    },
+    "InputComposition": {
+      "description": "`input.composition`: input method composition (pre-edit text).",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/$defs/CompositionPhase",
+          "description": "What happened."
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The input method's caret or selection within `text`."
+        },
+        "text": {
+          "default": "",
+          "description": "The composition's text (for `update`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id",
+        "phase"
+      ],
+      "type": "object"
+    },
+    "InputKey": {
+      "description": "`input.key`: a key press.",
+      "properties": {
+        "code": {
+          "default": "",
+          "description": "The physical key, as the DOM's `KeyboardEvent.code`, such as `KeyA`.",
+          "type": "string"
+        },
+        "composing": {
+          "default": false,
+          "description": "Whether an input method composition owns the key; the engine then ignores it.",
+          "type": "boolean"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "description": "The key's meaning, as the DOM's `KeyboardEvent.key`, such as `Backspace` or `ArrowLeft`.",
+          "type": "string"
+        },
+        "modifiers": {
+          "$ref": "#/$defs/Modifiers",
+          "default": {
+            "alt": false,
+            "ctrl": false,
+            "meta": false,
+            "shift": false
+          },
+          "description": "The modifier keys held."
+        },
+        "repeat": {
+          "default": false,
+          "description": "Whether the key repeats because it is held down.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "doc_id",
+        "key"
+      ],
+      "type": "object"
+    },
+    "InputPointer": {
+      "description": "`input.pointer`: a mouse, pen or touch event.",
+      "properties": {
+        "button": {
+          "default": 0,
+          "description": "The button, numbered as the DOM's `button`: 0 is the primary button.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "clicks": {
+          "default": 0,
+          "description": "The click count: 2 for a double click.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/PointerKind",
+          "description": "What happened."
+        },
+        "modifiers": {
+          "$ref": "#/$defs/Modifiers",
+          "default": {
+            "alt": false,
+            "ctrl": false,
+            "meta": false,
+            "shift": false
+          },
+          "description": "The modifier keys held."
+        },
+        "pointer_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PointerType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The kind of pointer."
+        },
+        "x": {
+          "description": "The horizontal position, in device-independent pixels from the view origin.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "The vertical position, in device-independent pixels from the view origin.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "doc_id",
+        "kind",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "InputText": {
+      "description": "`input.text`: committed text.",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "The text, inserted at the caret.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id",
+        "text"
+      ],
+      "type": "object"
+    },
+    "Modifiers": {
+      "description": "The modifier keys held during an input event.",
+      "properties": {
+        "alt": {
+          "default": false,
+          "description": "Alt (Option on macOS).",
+          "type": "boolean"
+        },
+        "ctrl": {
+          "default": false,
+          "description": "Control.",
+          "type": "boolean"
+        },
+        "meta": {
+          "default": false,
+          "description": "Meta (Command on macOS, the Windows key on Windows).",
+          "type": "boolean"
+        },
+        "shift": {
+          "default": false,
+          "description": "Shift.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "OverlayUpdate": {
+      "description": "`overlay.update`: what the shell draws over the tiles (spec §6.3).",
+      "properties": {
+        "caret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Caret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The caret, or `null` when there is none."
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "highlights": {
+          "description": "Find highlights (Phase 2); always empty in v0.",
+          "items": true,
+          "type": "array"
+        },
+        "remote": {
+          "description": "Other people's cursors (Phase 3); always empty in v0.",
+          "items": true,
+          "type": "array"
+        },
+        "selection": {
+          "description": "The selection's rectangles, per page.",
+          "items": {
+            "$ref": "#/$defs/SelectionRects"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "caret",
+        "selection",
+        "remote",
+        "highlights"
+      ],
+      "type": "object"
+    },
+    "PageInfo": {
+      "description": "One page of `view.pages`.",
+      "properties": {
+        "height": {
+          "description": "The page's height.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "index": {
+          "description": "The page's index, counting from 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "section": {
+          "description": "The index of the page's section.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "The page's width.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "x": {
+          "description": "The page's left edge in view space.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "y": {
+          "description": "The page's top edge in view space.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "width",
+        "height",
+        "section",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "PageRect": {
+      "description": "A rectangle on a page, in that page's coordinates.",
+      "properties": {
+        "page": {
+          "description": "The page's index, counting from 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "The rectangle, in BLU from the page's top-left corner."
+        }
+      },
+      "required": [
+        "page",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "PointerKind": {
+      "description": "What a pointer did.",
+      "oneOf": [
+        {
+          "const": "down",
+          "description": "Pressed.",
+          "type": "string"
+        },
+        {
+          "const": "move",
+          "description": "Moved.",
+          "type": "string"
+        },
+        {
+          "const": "up",
+          "description": "Released.",
+          "type": "string"
+        },
+        {
+          "const": "cancel",
+          "description": "The platform cancelled the gesture.",
+          "type": "string"
+        }
+      ]
+    },
+    "PointerType": {
+      "description": "The kind of pointer.",
+      "oneOf": [
+        {
+          "const": "mouse",
+          "description": "A mouse or touchpad.",
+          "type": "string"
+        },
+        {
+          "const": "pen",
+          "description": "A pen or stylus.",
+          "type": "string"
+        },
+        {
+          "const": "touch",
+          "description": "A finger on a touch screen.",
+          "type": "string"
+        }
+      ]
+    },
+    "QueryA11y": {
+      "description": "`query.a11y`: asks for the accessibility tree.",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "default": null,
+          "description": "The node whose subtree to return; the whole document when omitted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "doc_id"
+      ],
+      "type": "object"
+    },
+    "RecordStopped": {
+      "description": "The reply to `diag.record.stop`.",
+      "properties": {
+        "blob": {
+          "$ref": "#/$defs/BlobRef",
+          "description": "The recording (spec §10), as a blob that the shell releases."
+        },
+        "entries": {
+          "description": "The number of entries.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether a limit stopped the recording early.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blob",
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "Rect": {
+      "description": "A rectangle in BLU (1/25,400 point, ADR-0005).",
+      "properties": {
+        "height": {
+          "description": "The height; positive.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "width": {
+          "description": "The width; positive.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "x": {
+          "description": "The left edge.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "y": {
+          "description": "The top edge.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "RenderInvalidate": {
+      "description": "`render.invalidate`: parts of pages whose tiles the shell must request again.",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "regions": {
+          "description": "The changed regions, in page coordinates.",
+          "items": {
+            "$ref": "#/$defs/PageRect"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "regions"
+      ],
+      "type": "object"
+    },
+    "RenderMode": {
+      "description": "Which rasterizer renders a tile (ADR-0011 §2–§3).",
+      "oneOf": [
+        {
+          "const": "reference",
+          "description": "The bit-exact reference rasterizer.",
+          "type": "string"
+        },
+        {
+          "const": "interactive",
+          "description": "The interactive rasterizer.",
+          "type": "string"
+        }
+      ]
+    },
+    "RenderTile": {
+      "description": "`render.tile`: asks for the pixels of part of a page (spec §6.4).",
+      "properties": {
+        "device_scale": {
+          "default": null,
+          "description": "Physical pixels per device-independent pixel, a hint for later rasterizers; it does not change the pixels.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "description": "The tile's height in pixels, 1 to 4,096.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenderMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The rasterizer to use (ADR-0011 §3); both give the same pixels in v0."
+        },
+        "page": {
+          "description": "The page's index.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "The part of the page, in page coordinates."
+        },
+        "width": {
+          "description": "The tile's width in pixels, 1 to 4,096.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "zoom": {
+          "default": null,
+          "description": "The zoom factor, a hint for later rasterizers; it does not change the pixels.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "doc_id",
+        "page",
+        "rect",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "RenderTileReply": {
+      "description": "The reply to `render.tile` in the message form, on the C interface.",
+      "properties": {
+        "blob": {
+          "$ref": "#/$defs/BlobRef",
+          "description": "The pixels, premultiplied RGBA8, rows from top to bottom, as a blob that the shell releases."
+        },
+        "hash": {
+          "description": "The digest of the pixels, `fnv1a64:` and 16 hexadecimal digits (spec §10).",
+          "type": "string"
+        },
+        "height": {
+          "description": "The tile's height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stride": {
+          "description": "Bytes from the start of one row to the next: 4 × width.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "The tile's width in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "stride",
+        "hash",
+        "blob"
+      ],
+      "type": "object"
+    },
+    "RenderTileWebReply": {
+      "description": "The reply to `render.tile` as the web worker host delivers it (spec §3.2): the pixels as an `ImageBitmap`. This type exists for the TypeScript declarations; no JSON has this shape.",
+      "properties": {
+        "bitmap": {
+          "$ref": "#/$defs/ImageBitmapRef",
+          "description": "The pixels."
+        },
+        "hash": {
+          "description": "The digest of the engine's premultiplied pixels (spec §10).",
+          "type": "string"
+        },
+        "height": {
+          "description": "The tile's height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "The tile's width in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "hash",
+        "bitmap"
+      ],
+      "type": "object"
+    },
+    "ReplayReport": {
+      "description": "The reply to `diag.replay`.",
+      "properties": {
+        "entries": {
+          "description": "The number of entries replayed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "first_difference": {
+          "description": "The index of the first entry that did not, or `null`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identical": {
+          "description": "Whether every entry produced exactly what it produced when it was recorded.",
+          "type": "boolean"
+        },
+        "tiles": {
+          "description": "Every tile rendered during the replay.",
+          "items": {
+            "$ref": "#/$defs/ReplayTile"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries",
+        "identical",
+        "first_difference",
+        "tiles"
+      ],
+      "type": "object"
+    },
+    "ReplayTile": {
+      "description": "A tile rendered during a replay.",
+      "properties": {
+        "entry": {
+          "description": "The index of the entry that rendered it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hash": {
+          "description": "The digest of the pixels (spec §10).",
+          "type": "string"
+        },
+        "height": {
+          "description": "The height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "page": {
+          "description": "The page.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "The width in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry",
+        "page",
+        "width",
+        "height",
+        "hash"
+      ],
+      "type": "object"
+    },
+    "Reply": {
+      "description": "The engine's reply to a request with an `id` (spec §4).",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ReplyOk"
+        },
+        {
+          "$ref": "#/$defs/ReplyError"
+        }
+      ]
+    },
+    "ReplyError": {
+      "description": "A failed reply.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorInfo"
+        },
+        "ok": {
+          "const": false
+        },
+        "re": {
+          "description": "A request identifier, below 2^53.",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "v": {
+          "const": 0,
+          "description": "The protocol version."
+        }
+      },
+      "required": [
+        "v",
+        "re",
+        "ok",
+        "error"
+      ],
+      "type": "object"
+    },
+    "ReplyOk": {
+      "description": "A successful reply. Its payload has the reply type that `x-bayan-messages` lists for the request.",
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "payload": {
+          "type": "object"
+        },
+        "re": {
+          "description": "A request identifier, below 2^53.",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "description": "The reply's name, where the specification gives one (`welcome`, `doc.opened`).",
+          "type": "string"
+        },
+        "v": {
+          "const": 0,
+          "description": "The protocol version."
+        }
+      },
+      "required": [
+        "v",
+        "re",
+        "ok",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "Request": {
+      "description": "A message from the shell to the engine (spec §4). Without `id`, the engine sends no reply.",
+      "oneOf": [
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/Hello"
+            },
+            "type": {
+              "const": "hello"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/DocOpen"
+            },
+            "type": {
+              "const": "doc.open"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/DocClose"
+            },
+            "type": {
+              "const": "doc.close"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/ViewSet"
+            },
+            "type": {
+              "const": "view.set"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/RenderTile"
+            },
+            "type": {
+              "const": "render.tile"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/InputPointer"
+            },
+            "type": {
+              "const": "input.pointer"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/InputKey"
+            },
+            "type": {
+              "const": "input.key"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/InputText"
+            },
+            "type": {
+              "const": "input.text"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/InputComposition"
+            },
+            "type": {
+              "const": "input.composition"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/QueryA11y"
+            },
+            "type": {
+              "const": "query.a11y"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/UiManifestRequest"
+            },
+            "type": {
+              "const": "ui.manifest"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/Empty"
+            },
+            "type": {
+              "const": "diag.record.start"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/Empty"
+            },
+            "type": {
+              "const": "diag.record.stop"
+            }
+          }
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/DiagReplay"
+            },
+            "type": {
+              "const": "diag.replay"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/Empty"
+            },
+            "type": {
+              "const": "diag.panic"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "id": {
+          "description": "A request identifier, below 2^53.",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "payload": {
+          "type": "object"
+        },
+        "type": {
+          "type": "string"
+        },
+        "v": {
+          "const": 0,
+          "description": "The protocol version."
+        }
+      },
+      "required": [
+        "v",
+        "type"
+      ],
+      "type": "object"
+    },
+    "SelectionRects": {
+      "description": "Selection rectangles on one page.",
+      "properties": {
+        "page": {
+          "description": "The page.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rects": {
+          "description": "The rectangles, in page coordinates.",
+          "items": {
+            "$ref": "#/$defs/Rect"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "page",
+        "rects"
+      ],
+      "type": "object"
+    },
+    "ShellInfo": {
+      "description": "Which shell started the session.",
+      "properties": {
+        "name": {
+          "default": "",
+          "description": "The shell's name, such as `bayan-desktop`.",
+          "type": "string"
+        },
+        "platform": {
+          "default": "",
+          "description": "The operating system or browser it runs on.",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "description": "The shell's version.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TextRange": {
+      "description": "A range of UTF-16 code units.",
+      "properties": {
+        "end": {
+          "description": "The code unit after the last one; equal to `start` for an empty range (a caret).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "The first code unit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "UiCommand": {
+      "description": "A command of the UI manifest.",
+      "properties": {
+        "id": {
+          "description": "The command's identifier, such as `format.bold.toggle`.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Its label, formatted.",
+          "type": "string"
+        },
+        "shortcut": {
+          "description": "Its default shortcut, such as `Ctrl+B`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "UiGroup": {
+      "description": "A group of a ribbon tab.",
+      "properties": {
+        "commands": {
+          "description": "The identifiers of its commands, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "The group's identifier.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Its label, formatted.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "commands"
+      ],
+      "type": "object"
+    },
+    "UiManifest": {
+      "description": "The UI manifest: a stub in v0 (spec §6.8).",
+      "properties": {
+        "commands": {
+          "description": "The commands.",
+          "items": {
+            "$ref": "#/$defs/UiCommand"
+          },
+          "type": "array"
+        },
+        "locale": {
+          "description": "The language of the strings.",
+          "type": "string"
+        },
+        "manifest_version": {
+          "description": "The manifest format's version: 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ribbon": {
+          "$ref": "#/$defs/UiRibbon",
+          "description": "The ribbon."
+        }
+      },
+      "required": [
+        "manifest_version",
+        "locale",
+        "commands",
+        "ribbon"
+      ],
+      "type": "object"
+    },
+    "UiManifestRequest": {
+      "description": "`ui.manifest`: asks for the UI manifest.",
+      "properties": {
+        "locale": {
+          "default": null,
+          "description": "The language of the strings, as a BCP 47 tag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UiRibbon": {
+      "description": "The ribbon.",
+      "properties": {
+        "tabs": {
+          "description": "The tabs, in order.",
+          "items": {
+            "$ref": "#/$defs/UiTab"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tabs"
+      ],
+      "type": "object"
+    },
+    "UiTab": {
+      "description": "A ribbon tab.",
+      "properties": {
+        "groups": {
+          "description": "Its groups, in order.",
+          "items": {
+            "$ref": "#/$defs/UiGroup"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "The tab's identifier.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Its label, formatted.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "groups"
+      ],
+      "type": "object"
+    },
+    "ViewLayoutProgress": {
+      "description": "`view.layout.progress`: how far layout has come.",
+      "properties": {
+        "complete": {
+          "description": "Whether layout is complete.",
+          "type": "boolean"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "page_count_estimate": {
+          "description": "How many pages the document is expected to have.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pages_laid_out": {
+          "description": "The number of pages laid out so far.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "doc_id",
+        "pages_laid_out",
+        "page_count_estimate",
+        "complete"
+      ],
+      "type": "object"
+    },
+    "ViewMode": {
+      "description": "How pages are shown.",
+      "oneOf": [
+        {
+          "const": "print",
+          "description": "Print layout: pages as they print.",
+          "type": "string"
+        },
+        {
+          "const": "web",
+          "description": "Web layout.",
+          "type": "string"
+        },
+        {
+          "const": "draft",
+          "description": "Draft view.",
+          "type": "string"
+        },
+        {
+          "const": "focus",
+          "description": "Focus mode (ADR-0019 §4).",
+          "type": "string"
+        }
+      ]
+    },
+    "ViewPages": {
+      "description": "`view.pages`: the document's pages and where they sit in view space (spec §7).",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pages": {
+          "description": "The pages, in order.",
+          "items": {
+            "$ref": "#/$defs/PageInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "pages"
+      ],
+      "type": "object"
+    },
+    "ViewSet": {
+      "description": "`view.set`: tells the engine what the shell shows.",
+      "properties": {
+        "device_scale": {
+          "description": "Physical pixels per device-independent pixel.",
+          "format": "double",
+          "type": "number"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/ViewMode",
+          "description": "The view mode."
+        },
+        "show_formatting_marks": {
+          "default": false,
+          "description": "Whether to show paragraph marks and other formatting marks.",
+          "type": "boolean"
+        },
+        "viewport": {
+          "$ref": "#/$defs/Viewport",
+          "description": "The visible part of the page area, in device-independent pixels from the view origin."
+        },
+        "zoom": {
+          "description": "The zoom factor: 1 shows a document at its real size.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "doc_id",
+        "viewport",
+        "zoom",
+        "device_scale",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Viewport": {
+      "description": "A rectangle in device-independent pixels.",
+      "properties": {
+        "height": {
+          "description": "The height.",
+          "format": "double",
+          "type": "number"
+        },
+        "width": {
+          "description": "The width.",
+          "format": "double",
+          "type": "number"
+        },
+        "x": {
+          "description": "The left edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "The top edge.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A problem found while opening a document.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArgValue"
+          },
+          "description": "Codes and numbers for the message.",
+          "type": "object"
+        },
+        "message_id": {
+          "description": "A Fluent message identifier.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id",
+        "args"
+      ],
+      "type": "object"
+    },
+    "Welcome": {
+      "description": "`welcome`: the reply to `hello`.",
+      "properties": {
+        "engine_version": {
+          "description": "The core's semantic version.",
+          "type": "string"
+        },
+        "features": {
+          "description": "What this engine offers, such as `mock_document`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "layout_epoch": {
+          "description": "The layout epoch (ADR-0004 §4).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol_version": {
+          "description": "The protocol version of the session: 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "engine_version",
+        "layout_epoch",
+        "features"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:bayandocs:engine-protocol:v0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Every message of engine protocol v0 (BayanDocs docs repository, specs/engine-protocol.md), generated from the engine's Rust types. A message is a request, a reply or an event.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Request"
+    },
+    {
+      "$ref": "#/$defs/Reply"
+    },
+    {
+      "$ref": "#/$defs/Event"
+    }
+  ],
+  "title": "BayanDocs engine protocol, version 0",
+  "x-bayan-messages": [
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/Hello",
+      "reply": "#/$defs/Welcome",
+      "reply_type": "welcome",
+      "type": "hello"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/DocOpen",
+      "reply": "#/$defs/DocOpened",
+      "reply_type": "doc.opened",
+      "type": "doc.open"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/DocClose",
+      "reply": "#/$defs/Empty",
+      "type": "doc.close"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/ViewSet",
+      "reply": "#/$defs/Empty",
+      "type": "view.set"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/ViewLayoutProgress",
+      "type": "view.layout.progress"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/ViewPages",
+      "type": "view.pages"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/RenderInvalidate",
+      "type": "render.invalidate"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/RenderTile",
+      "reply": "#/$defs/RenderTileReply",
+      "type": "render.tile",
+      "web_reply": "#/$defs/RenderTileWebReply"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/OverlayUpdate",
+      "type": "overlay.update"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/InputPointer",
+      "reply": "#/$defs/Empty",
+      "type": "input.pointer"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/InputKey",
+      "reply": "#/$defs/Empty",
+      "type": "input.key"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/InputText",
+      "reply": "#/$defs/Empty",
+      "type": "input.text"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/InputComposition",
+      "reply": "#/$defs/Empty",
+      "type": "input.composition"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/QueryA11y",
+      "reply": "#/$defs/A11yTree",
+      "type": "query.a11y"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/A11yUpdate",
+      "type": "a11y.update"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/UiManifestRequest",
+      "reply": "#/$defs/UiManifest",
+      "type": "ui.manifest"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/Empty",
+      "reply": "#/$defs/Empty",
+      "type": "diag.record.start"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/Empty",
+      "reply": "#/$defs/RecordStopped",
+      "type": "diag.record.stop"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/DiagReplay",
+      "reply": "#/$defs/ReplayReport",
+      "type": "diag.replay"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/Empty",
+      "reply": "#/$defs/Empty",
+      "type": "diag.panic"
+    },
+    {
+      "direction": "to_shell",
+      "payload": "#/$defs/EngineError",
+      "type": "engine.error"
+    }
+  ],
+  "x-bayan-protocol-version": 0
+}

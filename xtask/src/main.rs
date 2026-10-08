@@ -3,6 +3,7 @@
 //! Build automation for bayan-core, run as `cargo xtask <command>` (the alias is defined in `.cargo/config.toml`). It uses only the Rust standard library, so the tool that checks the workspace's dependencies brings none of its own.
 //!
 //! - `cargo xtask verify` runs the verification gate: every check a change must pass before it is pushed, the same locally and in CI. See `verify.rs` and the "Verification gate" section of AGENTS.md.
+//! - `cargo xtask sdk`, `cargo xtask wasm-package` and `cargo xtask c-driver` build the engine's artifacts for the shells, the C SDK and the WebAssembly package, and run the C test driver against the SDK; `cargo xtask miri` runs bayan-ffi's tests under Miri (`artifacts.rs`, work package CORE-007).
 //!
 //! - `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age [--base <revision>]` run the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003; see `supply_chain/`). The gate runs both in its supply-chain step.
 //!
@@ -15,9 +16,11 @@
     reason = "xtask reports its progress to the person or CI job running it"
 )]
 
+mod artifacts;
 mod canary;
 mod flags;
 mod json;
+mod notices;
 mod policy;
 mod process;
 mod sources;
@@ -45,6 +48,20 @@ Commands:
            least 24 hours before the commit that added it, and before now
            (ADR-0017 rule 4). Needs git and curl; uses the network only when
            Cargo.lock changed.
+  sdk [--target <triple>] [--out <folder>]
+           Build the engine's C SDK (static and dynamic library, C header, JSON Schema,
+           licence notices) for the host or a target, by default into
+           target/artifacts/bayan-core-sdk-<triple>.
+  wasm-package [--out <folder>]
+           Build the engine's WebAssembly package for the web shell (module, glue, worker
+           host, schema, TypeScript declarations, test page, licence notices), by default
+           into target/artifacts/bayan-core-wasm. Needs wasm-bindgen-cli at the version of
+           the wasm-bindgen crate in Cargo.lock (scripts/dev-setup.sh installs it).
+  c-driver [--sdk <folder>]
+           Compile the C test driver against the SDK, linked statically and dynamically,
+           and run both. Uses cc (or $CC), or MSVC's cl on Windows.
+  miri     Run bayan-ffi's unit tests under Miri, on the nightly toolchain that
+           scripts/dev-setup.sh installs with it.
   help     Show this message.";
 
 fn main() -> ExitCode {
@@ -61,6 +78,10 @@ fn main() -> ExitCode {
         ["check-lockfile-age", "--base", base] => standalone(|report| {
             supply_chain::lockfile_age::check(&workspace_root(), Some(base), report)
         }),
+        ["sdk", rest @ ..] => artifacts::sdk(rest),
+        ["wasm-package", rest @ ..] => artifacts::wasm_package(rest),
+        ["c-driver", rest @ ..] => artifacts::c_driver(rest),
+        ["miri", rest @ ..] => artifacts::miri(rest),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             ExitCode::SUCCESS

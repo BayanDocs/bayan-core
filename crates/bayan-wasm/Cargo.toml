@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+bayan-engine = { path = "../bayan-engine" }
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
 # A binding crate must contain unsafe code, and Cargo cannot override a single inherited lint, so this crate keeps its own copy of the workspace lint tables (root Cargo.toml) with one difference: `unsafe_code` is "deny" instead of "forbid". `cargo xtask verify` fails if the copy drifts from the original. Unsafe code is allowed only where `#[expect(unsafe_code, reason = "…")]` marks it, and every `unsafe` block needs a `// SAFETY:` comment (ADR-0006 §2).
 [lints.rust]
 # The only difference from the workspace tables: unsafe code is denied, not forbidden, so it can be allowed where it is unavoidable.
