@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bayan_model::simulation::{Config, Failure, Stats, plan, run, shrink};
+use bayan_model::simulation::{Config, Failure, REFUSAL_REASONS, Stats, plan, run, shrink};
 
 /// The outcome of one run.
 struct Outcome {
@@ -46,14 +46,21 @@ pub fn converge(runs: usize, threads: usize, seed: u64, config: &Config) -> Resu
                     let elapsed = run_started.elapsed();
                     match &result {
                         Ok(stats) => println!(
-                            "run {index} seed {run_seed:#x}: ok in {} ms (applied {}, refused {}, delivered {}, undo/redo {}, repairs N1-N7 {:?}, main {} atoms)",
+                            "run {index} seed {run_seed:#x}: ok in {} ms (applied {}, refused {} [{}], skipped {}, targets shown {} hidden {}, delivered {}, undo/redo {}, materializations {}, repairs N1-N7 {:?} of which highlights {}, main {} atoms, view fingerprint {:016x})",
                             elapsed.as_millis(),
                             stats.applied,
                             stats.refused,
+                            refusals(&stats.refusals),
+                            stats.skipped,
+                            stats.visible_targets,
+                            stats.hidden_targets,
                             stats.delivered,
                             stats.undone,
+                            stats.materializations,
                             stats.repairs,
-                            stats.main_len
+                            stats.highlights,
+                            stats.main_len,
+                            stats.fingerprint
                         ),
                         Err(failure) => println!("run {index} seed {run_seed:#x}: FAILED {failure}"),
                     }
@@ -82,11 +89,19 @@ pub fn converge(runs: usize, threads: usize, seed: u64, config: &Config) -> Resu
             Ok(stats) => {
                 totals.applied += stats.applied;
                 totals.refused += stats.refused;
+                for (total, count) in totals.refusals.iter_mut().zip(stats.refusals) {
+                    *total += count;
+                }
+                totals.skipped += stats.skipped;
+                totals.visible_targets += stats.visible_targets;
+                totals.hidden_targets += stats.hidden_targets;
                 totals.delivered += stats.delivered;
                 totals.undone += stats.undone;
+                totals.materializations += stats.materializations;
                 for (total, count) in totals.repairs.iter_mut().zip(stats.repairs) {
                     *total += count;
                 }
+                totals.highlights += stats.highlights;
             }
             Err(failure) => failures.push((outcome.seed, failure.clone())),
         }
@@ -95,14 +110,20 @@ pub fn converge(runs: usize, threads: usize, seed: u64, config: &Config) -> Resu
     let median = times.get(times.len() / 2).copied().unwrap_or_default();
     let slowest = times.last().copied().unwrap_or_default();
     println!(
-        "summary: {} of {} runs converged to identical views satisfying I1-I7 (deterministic, idempotent); {} operations applied, {} refused, {} messages delivered, {} undo/redo steps; repairs needed in final views N1-N7 {:?}; run time median {} ms, slowest {} ms; total {} s",
+        "summary: {} of {} runs converged to identical views satisfying I1-I7, also on a replica loaded from the final snapshot, with idempotent normalization and no materialization that changed a view; {} operations applied, {} refused [{}], {} skipped; targets the view showed {}, hidden {}; {} messages delivered, {} undo/redo steps, {} materializations; repairs needed in final views N1-N7 {:?}, of which comment highlights {}; run time median {} ms, slowest {} ms; total {} s",
         outcomes.len() - failures.len(),
         outcomes.len(),
         totals.applied,
         totals.refused,
+        refusals(&totals.refusals),
+        totals.skipped,
+        totals.visible_targets,
+        totals.hidden_targets,
         totals.delivered,
         totals.undone,
+        totals.materializations,
         totals.repairs,
+        totals.highlights,
         median.as_millis(),
         slowest.as_millis(),
         started.elapsed().as_secs()
@@ -120,4 +141,15 @@ pub fn converge(runs: usize, threads: usize, seed: u64, config: &Config) -> Resu
         );
     }
     Err(format!("{} runs failed", failures.len()))
+}
+
+/// The refusal counts that are not zero, with their reasons.
+fn refusals(counts: &[usize; REFUSAL_REASONS.len()]) -> String {
+    REFUSAL_REASONS
+        .iter()
+        .zip(counts)
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| format!("{reason} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

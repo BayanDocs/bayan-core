@@ -82,6 +82,8 @@ pub struct Report {
     pub n4: usize,
     /// N5: atoms and list items whose entity is missing, and comment highlights whose comment is not in the view, dropped.
     pub n5: usize,
+    /// Of `n5`: comment highlights dropped (one per text item or atom that carried one).
+    pub highlights: usize,
     /// N6: rows without cells and tables without rows, omitted.
     pub n6: usize,
     /// N7: atoms and list items that reference an entity already referenced earlier, dropped.
@@ -458,7 +460,6 @@ impl<'a> Normalizer<'a> {
                     kept.push(piece);
                     if !ends.get(&id).is_some_and(|end| *end > index) {
                         self.report.n3 += 1;
-                        self.seen_atoms.insert((AtomKind::RangeEnd, id));
                         kept.push(Piece::Atom {
                             kind: AtomKind::RangeEnd,
                             id: Some(id),
@@ -667,6 +668,7 @@ impl<'a> Normalizer<'a> {
                 marks.retain(|key, _| !dangling(key));
                 if marks.len() != before {
                     self.report.n5 += before - marks.len();
+                    self.report.highlights += before - marks.len();
                     changed = true;
                 }
             }

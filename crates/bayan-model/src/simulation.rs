@@ -1,12 +1,12 @@
 //! Seeded random editing by several replicas, for the convergence tests and the spike's long runs (CORE-004 AC-1).
 //!
-//! A run is a list of [`Action`]s generated from a seed: replicas edit, send each other updates over links that delay and reorder them, are cut off by partitions and healed, and undo and redo. Every random choice inside an action is a raw number resolved against the replica's state when the action runs, so that any sub-list of a run is a valid run too; that is what lets [`shrink`] cut a failing run down to a few actions. At the end the network heals, every message is delivered, the replicas synchronize fully, and [`run`] checks that every replica shows the same view, that it satisfies the invariants I1–I7, and that normalizing is deterministic and idempotent.
+//! A run is a list of [`Action`]s generated from a seed: replicas edit, send each other updates over links that delay and reorder them, are cut off by partitions and healed, and undo and redo. Every random choice inside an action is a raw number resolved against the replica's state when the action runs, so that any sub-list of a run is a valid run too; that is what lets [`shrink`] cut a failing run down to a few actions. Operations mostly target what the replica's view shows, and now and then a story or table that only the stored state holds, because concurrent edits reach those too. Every materialization is checked to leave the view unchanged. At the end the network heals, every message is delivered, the replicas synchronize fully, and [`run`] checks that every replica shows the same view, that it satisfies the invariants I1–I7, that a replica loaded from the final snapshot shows it too, and that normalizing is idempotent.
 
 use std::fmt;
 
 use bayan_crdt::{ImportLimits, Value, VersionVector};
 
-use crate::{AtomKind, Document, EntityId, View, check_invariants, marks, normalize};
+use crate::{AtomKind, Document, EditError, EntityId, View, check_invariants, marks, normalize};
 
 /// A seeded pseudo-random number generator (SplitMix64): fast, reproducible and identical on every platform. Not cryptographic.
 #[derive(Debug, Clone)]
@@ -258,21 +258,88 @@ impl fmt::Display for Failure {
     }
 }
 
+/// The reasons an operation can be refused, as [`Stats::refusals`] counts them.
+pub const REFUSAL_REASONS: [&str; 15] = [
+    "InvalidPosition",
+    "NotABlockPosition",
+    "WouldBreakBlockStructure",
+    "WouldUnbalance",
+    "WouldCreateCycle",
+    "LastRowOrColumn",
+    "NotAParagraphEnd",
+    "InvalidText",
+    "InvalidKey",
+    "NoSuchStory",
+    "NoSuchTable",
+    "NoSuchParagraph",
+    "Detached",
+    "Crdt",
+    "Import",
+];
+
+/// The index of `error` in [`REFUSAL_REASONS`].
+const fn refusal_index(error: &EditError) -> usize {
+    match error {
+        EditError::InvalidPosition { .. } => 0,
+        EditError::NotABlockPosition => 1,
+        EditError::WouldBreakBlockStructure => 2,
+        EditError::WouldUnbalance => 3,
+        EditError::WouldCreateCycle => 4,
+        EditError::LastRowOrColumn => 5,
+        EditError::NotAParagraphEnd => 6,
+        EditError::InvalidText => 7,
+        EditError::InvalidKey => 8,
+        EditError::NoSuchStory(_) => 9,
+        EditError::NoSuchTable(_) => 10,
+        EditError::NoSuchParagraph(_) => 11,
+        EditError::Detached => 12,
+        EditError::Crdt(_) => 13,
+        EditError::Import(_) => 14,
+    }
+}
+
 /// What a successful run did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Operations applied.
     pub applied: usize,
-    /// Operations the replica refused (the generator does not know the state, so some do not fit it).
+    /// Operations the replica refused: the generator resolves its numbers against the state, but cannot know every rule, and concurrent changes move positions.
     pub refused: usize,
+    /// Refused operations by reason, in the order of [`REFUSAL_REASONS`].
+    pub refusals: [usize; 15],
+    /// Operations not attempted because the state offered nothing to apply them to (no table, no paragraph end to merge, a story too short for a range, a row move onto itself, moving content onto its own start or end).
+    pub skipped: usize,
+    /// Attempted operations whose story or table the replica's view showed.
+    pub visible_targets: usize,
+    /// Attempted operations whose story or table only the stored state held (picked on purpose for a tenth of the operations).
+    pub hidden_targets: usize,
     /// Messages delivered.
     pub delivered: usize,
     /// Undo and redo steps performed.
     pub undone: usize,
+    /// Undo and redo calls that failed; [`run`] fails if there are any.
+    pub undo_errors: usize,
+    /// Materializations performed by all replicas, each checked to leave the view unchanged.
+    pub materializations: usize,
     /// Normalization repairs in the final view, per rule N1–N7.
     pub repairs: [usize; 7],
+    /// Of the N5 repairs: comment highlights whose comment had left the view.
+    pub highlights: usize,
     /// Atoms in the final main story.
     pub main_len: usize,
+    /// The [`fingerprint`] of the final view: the same run gives the same fingerprint on every platform.
+    pub fingerprint: u64,
+}
+
+/// A fingerprint of a view: the 64-bit FNV-1a hash of its debug form, which is the same on every platform for the same view. Runs on different platforms (natively and in WebAssembly) compare their final views through it (ADR-0025 §1).
+#[must_use]
+pub fn fingerprint(view: &View) -> u64 {
+    let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+    for byte in format!("{view:?}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01B3);
+    }
+    hash
 }
 
 struct Message {
@@ -290,6 +357,9 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
     let fail = |step: Option<usize>, reason: String| Failure { step, reason };
     let replicas = config.replicas.max(1);
     let mut documents = initial_replicas(seed, replicas).map_err(|reason| fail(None, reason))?;
+    for document in &mut documents {
+        document.check_materializations();
+    }
     let mut sent: Vec<Vec<VersionVector>> = vec![vec![VersionVector::new(); replicas]; replicas];
     let mut queue: Vec<Message> = Vec::new();
     let mut partitioned: Option<usize> = None;
@@ -304,10 +374,19 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
                 let Some(document) = documents.get_mut(replica) else {
                     continue;
                 };
-                if edit(document, kind, params) {
-                    stats.applied += 1;
-                } else {
-                    stats.refused += 1;
+                let attempt = edit(document, kind, params);
+                match attempt.outcome {
+                    Outcome::Applied => stats.applied += 1,
+                    Outcome::Refused(reason) => {
+                        stats.refused += 1;
+                        stats.refusals[reason] += 1;
+                    }
+                    Outcome::Skipped => stats.skipped += 1,
+                }
+                match attempt.visible {
+                    Some(true) => stats.visible_targets += 1,
+                    Some(false) => stats.hidden_targets += 1,
+                    None => {}
                 }
             }
             Action::Send { from, to } => {
@@ -337,19 +416,36 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
             Action::Partition { replica } => partitioned = Some(replica % replicas),
             Action::Heal => partitioned = None,
             Action::Undo { replica } => {
-                if let Some(document) = documents.get_mut(replica)
-                    && document.undo().unwrap_or(false)
-                {
-                    stats.undone += 1;
+                if let Some(document) = documents.get_mut(replica) {
+                    match document.undo() {
+                        Ok(true) => stats.undone += 1,
+                        Ok(false) => {}
+                        Err(_) => stats.undo_errors += 1,
+                    }
                 }
             }
             Action::Redo { replica } => {
-                if let Some(document) = documents.get_mut(replica)
-                    && document.redo().unwrap_or(false)
-                {
-                    stats.undone += 1;
+                if let Some(document) = documents.get_mut(replica) {
+                    match document.redo() {
+                        Ok(true) => stats.undone += 1,
+                        Ok(false) => {}
+                        Err(_) => stats.undo_errors += 1,
+                    }
                 }
             }
+        }
+        if stats.undo_errors > 0 {
+            return Err(fail(Some(step), "an undo or redo failed".to_owned()));
+        }
+        if documents.iter().any(|document| {
+            document
+                .materialization_check()
+                .is_some_and(|check| check.changed_view > 0)
+        }) {
+            return Err(fail(
+                Some(step),
+                "a materialization changed the view".to_owned(),
+            ));
         }
         if config.check_every > 0 && step % config.check_every == config.check_every - 1 {
             let document = &documents[step / config.check_every % replicas];
@@ -395,10 +491,20 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
         }
     }
     check_view(&view).map_err(|reason| fail(None, reason))?;
-    if normalize(&documents[0].raw()).0 != view {
+    // A replica that starts from the final snapshot (another peer, decoding the snapshot instead of receiving the changes one by one) shows the same view.
+    let snapshot = documents[0].export_snapshot().map_err(|error| {
+        fail(
+            None,
+            format!("exporting the final snapshot failed: {error}"),
+        )
+    })?;
+    let peer = u64::try_from(replicas).unwrap_or(u64::MAX - 1) + 1;
+    let fresh = Document::load(&snapshot, peer, seed, &ImportLimits::LOCAL_SNAPSHOT)
+        .map_err(|error| fail(None, format!("loading the final snapshot failed: {error}")))?;
+    if fresh.view() != view {
         return Err(fail(
             None,
-            "normalizing twice gave different views".to_owned(),
+            "a replica loaded from the final snapshot shows a different view".to_owned(),
         ));
     }
     let (again, repaired) = normalize(&view.to_raw());
@@ -422,6 +528,13 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
     stats.repairs = [
         report.n1, report.n2, report.n3, report.n4, report.n5, report.n6, report.n7,
     ];
+    stats.highlights = report.highlights;
+    stats.fingerprint = fingerprint(&view);
+    stats.materializations = documents
+        .iter()
+        .filter_map(Document::materialization_check)
+        .map(|check| check.performed)
+        .sum();
     stats.main_len = view.main().len();
     Ok(stats)
 }
@@ -502,38 +615,74 @@ pub fn random_edit(document: &mut Document, rng: &mut Rng) -> bool {
         rng.next_u64(),
         rng.next_u64(),
     ];
-    edit(document, kind, params)
+    matches!(edit(document, kind, params).outcome, Outcome::Applied)
 }
 
-/// Performs one editing operation, resolving the raw parameters against the replica's state. Returns whether it was applied.
-fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> bool {
+/// How an editing operation of a run ended.
+enum Outcome {
+    Applied,
+    /// Refused, with the index of the reason in [`REFUSAL_REASONS`].
+    Refused(usize),
+    /// Not attempted: the state offered nothing to apply it to.
+    Skipped,
+}
+
+/// One editing operation of a run: how it ended, and whether its story or table was in the view (`None` when it was skipped before one was chosen).
+struct Attempt {
+    outcome: Outcome,
+    visible: Option<bool>,
+}
+
+/// Performs one editing operation, resolving the raw parameters against the replica's state: its story or table is one the view shows nine times in ten, and one that only the stored state holds otherwise; positions are positions in the stored story.
+fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> Attempt {
     let [a, b, c, d] = params;
-    // Listing the stories costs time, so only when an operation needs it.
-    let any_story = |document: &Document, pick: u64| {
-        let stories = document.stories();
-        stories[below(pick, stories.len())]
+    // The view, normalized only when a choice needs it (the main story is always in the view).
+    let mut cached: Option<View> = None;
+    let mut view =
+        |document: &Document| -> View { cached.get_or_insert_with(|| document.view()).clone() };
+    // A story: the main story most of the time, else a cell or comment story the view shows, and now and then any stored story.
+    let mut pick_story = |document: &Document, pick: u64| -> (EntityId, bool) {
+        let view = view(document);
+        let stories: Vec<EntityId> = if below(pick, 10) < 9 {
+            view.stories.keys().copied().collect()
+        } else {
+            document.stories()
+        };
+        let story = stories
+            .get(below(pick >> 8, stories.len()))
+            .copied()
+            .unwrap_or(EntityId::MAIN_STORY);
+        (story, view.stories.contains_key(&story))
     };
-    // The main story most of the time, another story (cell or comment) otherwise.
-    let story = if below(a, 10) < 6 {
-        EntityId::MAIN_STORY
+    let (story, story_visible) = if below(a, 10) < 6 {
+        (EntityId::MAIN_STORY, true)
     } else {
-        any_story(document, a >> 8)
+        pick_story(document, a >> 4)
     };
     let len = document.story_len(story).unwrap_or(0);
+    let skipped = |visible: Option<bool>| Attempt {
+        outcome: Outcome::Skipped,
+        visible,
+    };
     if len == 0 {
-        return false;
+        return skipped(None);
     }
+    let story_visible = Some(story_visible);
+    // A position before the final paragraph end, and a non-empty range that ends before it (`None` when the story holds nothing but its final paragraph end).
     let pos = below(b, len);
-    let span =
-        |start: usize, max: usize| start..(start + 1 + below(c, max)).min(len.saturating_sub(1));
-    let table = || {
-        let tables = document.tables();
-        tables.get(below(d, tables.len())).copied()
+    let range = |max: usize| -> Option<std::ops::Range<usize>> {
+        let last = len.checked_sub(1).filter(|last| *last > 0)?;
+        let start = below(b, last);
+        Some(start..(start + 1 + below(c, max)).min(last))
     };
     let text = TEXTS[below(c, TEXTS.len())];
+    let mut visible = story_visible;
     let result = match kind {
         Kind::InsertText => document.insert_text(story, pos, text),
-        Kind::Delete => document.delete(story, span(below(b, len.saturating_sub(1)), 6)),
+        Kind::Delete => match range(6) {
+            Some(range) => document.delete(story, range),
+            None => return skipped(visible),
+        },
         Kind::Format => {
             let (key, value) = match below(d, 4) {
                 0 => (marks::BOLD, Value::Bool(true)),
@@ -551,7 +700,7 @@ fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> bool {
             let ends = paragraph_ends(document, story);
             match ends.get(below(c, ends.len())) {
                 Some(end) => document.merge_paragraph(story, *end),
-                None => return false,
+                None => return skipped(visible),
             }
         }
         Kind::ParagraphProperty => {
@@ -562,7 +711,7 @@ fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> bool {
                     "jc",
                     &Value::from(["left", "center", "both"][below(d, 3)]),
                 ),
-                None => return false,
+                None => return skipped(visible),
             }
         }
         Kind::InsertTable => {
@@ -571,49 +720,85 @@ fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> bool {
                 Some(pos) => document
                     .insert_table(story, *pos, 1 + below(d, 3), 1 + below(d >> 8, 3))
                     .map(|_| ()),
-                None => return false,
+                None => return skipped(visible),
             }
         }
-        Kind::InsertRow => match table() {
-            Some(table) => document.insert_row(table, below(c, 4)).map(|_| ()),
-            None => return false,
+        Kind::InsertRow
+        | Kind::DeleteRow
+        | Kind::MoveRow
+        | Kind::InsertColumn
+        | Kind::DeleteColumn => {
+            // A table, chosen like a story, with the number of cells of each of its rows.
+            let shown = view(document).tables;
+            let tables: Vec<EntityId> = if below(d, 10) < 9 {
+                shown.keys().copied().collect()
+            } else {
+                document.tables()
+            };
+            let Some((table, shape)) = tables
+                .get(below(d >> 4, tables.len()))
+                .and_then(|table| Some((*table, document.table_shape(*table).ok()?)))
+            else {
+                return skipped(None);
+            };
+            visible = Some(shown.contains_key(&table));
+            let rows = shape.len();
+            let widest = shape.iter().copied().max().unwrap_or(0);
+            match kind {
+                Kind::InsertRow => document.insert_row(table, below(c, rows + 1)).map(|_| ()),
+                Kind::DeleteRow => document.delete_row(table, below(c, rows)),
+                Kind::MoveRow => {
+                    if rows < 2 {
+                        return skipped(visible);
+                    }
+                    let from = below(c, rows);
+                    // Another row than `from`: a move onto itself changes nothing.
+                    let to = (from + 1 + below(c >> 8, rows - 1)) % rows;
+                    document.move_row(table, from, to)
+                }
+                Kind::InsertColumn => document.insert_column(table, below(c, widest + 1)),
+                _ => document.delete_column(table, below(c, widest)),
+            }
+        }
+        Kind::Comment => match range(20) {
+            Some(range) => document
+                .add_comment(story, range, "Reviewer", text)
+                .map(|_| ()),
+            None => return skipped(visible),
         },
-        Kind::DeleteRow => match table() {
-            Some(table) => document.delete_row(table, below(c, 4)),
-            None => return false,
-        },
-        Kind::MoveRow => match table() {
-            Some(table) => document.move_row(table, below(c, 4), below(c >> 8, 4)),
-            None => return false,
-        },
-        Kind::InsertColumn => match table() {
-            Some(table) => document.insert_column(table, below(c, 4)),
-            None => return false,
-        },
-        Kind::DeleteColumn => match table() {
-            Some(table) => document.delete_column(table, below(c, 4)),
-            None => return false,
-        },
-        Kind::Comment => document
-            .add_comment(story, span(pos, 20), "Reviewer", text)
-            .map(|_| ()),
         Kind::Field => document.insert_field(story, pos, "PAGE", text).map(|_| ()),
         Kind::Object => document.insert_object(story, pos).map(|_| ()),
-        Kind::Bookmark => document
-            .insert_bookmark(story, span(pos, 20), "mark")
-            .map(|_| ()),
+        Kind::Bookmark => {
+            let start = below(b, len);
+            let end = (start + below(c, 20)).min(len.saturating_sub(1));
+            document
+                .insert_bookmark(story, start.min(end)..end, "mark")
+                .map(|_| ())
+        }
         Kind::Move => {
             let target = if below(d, 3) == 0 {
-                any_story(document, d >> 8)
+                pick_story(document, d >> 8).0
             } else {
                 story
             };
             let target_len = document.story_len(target).unwrap_or(0);
-            let range = span(below(b, len.saturating_sub(1)), 8);
-            document.move_range(story, range, target, below(d >> 16, target_len))
+            let Some(range) = range(8) else {
+                return skipped(visible);
+            };
+            let to_pos = below(d >> 16, target_len);
+            if target == story && (to_pos == range.start || to_pos == range.end) {
+                return skipped(visible);
+            }
+            document.move_range(story, range, target, to_pos)
         }
     };
-    result.is_ok()
+    Attempt {
+        outcome: match result {
+            Ok(()) => Outcome::Applied,
+            Err(error) => Outcome::Refused(refusal_index(&error)),
+        },
+        visible,
+    }
 }
 
 /// The positions of the paragraph ends of a story that may be merged (all but the last).
@@ -645,9 +830,15 @@ fn block_positions(document: &Document, story: EntityId) -> Vec<usize> {
         .collect()
 }
 
-/// Shrinks a failing run: removes chunks of actions (halves, quarters, … single actions) as long as the run still fails, trying at most `budget` runs. Returns the smallest failing list found.
+/// Shrinks a failing run: removes chunks of actions (halves, quarters, … single actions) as long as the run still fails for the same reason (not some other failure the shorter run happens to hit), trying at most `budget` runs. Returns the smallest failing list found, or the actions unchanged if they do not fail.
 #[must_use]
 pub fn shrink(seed: u64, actions: &[Action], config: &Config, budget: usize) -> Vec<Action> {
+    let Err(original) = run(seed, actions, config) else {
+        return actions.to_vec();
+    };
+    let same_failure = |candidate: &[Action]| {
+        run(seed, candidate, config).is_err_and(|failure| failure.reason == original.reason)
+    };
     let mut current = actions.to_vec();
     let mut attempts = 0;
     let mut chunk = current.len() / 2;
@@ -659,7 +850,7 @@ pub fn shrink(seed: u64, actions: &[Action], config: &Config, budget: usize) -> 
             let mut candidate = current[..start].to_vec();
             candidate.extend_from_slice(&current[end..]);
             attempts += 1;
-            if run(seed, &candidate, config).is_err() {
+            if same_failure(&candidate) {
                 current = candidate;
                 removed_any = true;
             } else {

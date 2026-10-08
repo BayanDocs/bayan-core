@@ -290,6 +290,20 @@ impl Document {
         Ok(self.rows_list(table)?.items())
     }
 
+    /// The number of cells of every stored row of a stored table, in row order (rows that do not exist are left out).
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoSuchTable`].
+    pub fn table_shape(&self, table: EntityId) -> Result<Vec<usize>, EditError> {
+        Ok(self
+            .table_row_ids(table)?
+            .into_iter()
+            .filter_map(|row| self.cells_list(row))
+            .map(|cells| cells.len())
+            .collect())
+    }
+
     // ----- Text -----
 
     /// Inserts `text` at `pos` of `story`. Text may not contain control characters, may not follow the final paragraph end, and may not be typed at the block position right before a table.

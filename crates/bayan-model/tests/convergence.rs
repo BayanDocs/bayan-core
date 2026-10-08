@@ -11,6 +11,11 @@ fn setting(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// The repairs that only concurrency can make necessary, now that local operations keep fields and ranges whole: N2, N3, N4, N6 and N7 (of the rules N1–N7 in `Stats::repairs`).
+fn concurrent_repairs(repairs: &[usize; 7]) -> usize {
+    repairs[1] + repairs[2] + repairs[3] + repairs[5] + repairs[6]
+}
+
 #[test]
 fn replicas_converge_to_identical_valid_views() {
     let runs = setting("BAYAN_CONVERGENCE_RUNS", 6);
@@ -19,20 +24,25 @@ fn replicas_converge_to_identical_valid_views() {
         operations: setting("BAYAN_CONVERGENCE_OPERATIONS", 400),
         check_every: 100,
     };
-    let mut repairs = [0_usize; 7];
+    // The same plans on one replica alone: what local operations need repaired without any concurrency.
+    let alone = Config {
+        replicas: 1,
+        ..config
+    };
+    let (mut concurrent, mut baseline) = (0_usize, 0_usize);
     for index in 0..runs {
         let seed = 0xC0DE_0004_0000_0000 + u64::try_from(index).unwrap_or(0);
         let actions = plan(seed, &config);
         match run(seed, &actions, &config) {
             Ok(stats) => {
-                for (total, count) in repairs.iter_mut().zip(stats.repairs) {
-                    *total += count;
-                }
+                println!("seed {seed:#x}: {stats:?}");
+                concurrent += concurrent_repairs(&stats.repairs);
                 assert!(
                     stats.applied > config.operations / 3,
                     "seed {seed:#x}: only {} operations applied",
                     stats.applied
                 );
+                assert_eq!(stats.undo_errors, 0, "seed {seed:#x}");
             }
             Err(failure) => {
                 let shrunk = shrink(seed, &actions, &config, 2_000);
@@ -43,10 +53,16 @@ fn replicas_converge_to_identical_valid_views() {
                 );
             }
         }
+        let single = run(seed, &plan(seed, &alone), &alone)
+            .unwrap_or_else(|failure| panic!("seed {seed:#x} on one replica: {failure}"));
+        baseline += concurrent_repairs(&single.repairs);
     }
-    // Concurrent edits did produce states that needed repairing, so the views were not trivially valid.
+    // Concurrent edits did produce states that needed repairing beyond what one replica alone needs, so the views were not trivially valid.
+    println!(
+        "repairs only concurrency causes (N2, N3, N4, N6, N7): {concurrent} with three replicas, {baseline} with one"
+    );
     assert!(
-        repairs.iter().sum::<usize>() > 0,
-        "no run needed any normalization: {repairs:?}"
+        concurrent > baseline,
+        "the concurrent runs needed no more repairs than one replica alone: {concurrent} against {baseline}"
     );
 }
