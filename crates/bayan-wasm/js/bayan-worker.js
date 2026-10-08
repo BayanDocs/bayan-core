@@ -3,12 +3,16 @@
 // Run it as a module worker: new Worker(new URL("bayan-worker.js", base), { type: "module" }). It loads the engine
 // (bayan_wasm.js and bayan_wasm_bg.wasm, next to this file), relays protocol messages between the main thread and the
 // engine one at a time and in order, carries blobs as ArrayBuffers, delivers tiles as ImageBitmaps, and replaces the
-// engine when it panics. It has no dependencies, logs nothing and never looks inside documents.
+// engine when it panics. It has no dependencies and never looks inside documents. It logs nothing itself; only
+// wasm-bindgen's glue warns on the console, without any content, if the module is not served as application/wasm.
 //
 // SPDX-FileCopyrightText: 2026 BayanDocs contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
 
 import init, { WasmEngine, __wbg_reset_state, engineVersion, maxBlobBytes, maxMessageBytes } from "./bayan_wasm.js";
+
+/** The largest request and blob identifier, 2⁵³ − 1 (§4); it also stands in for a blob's identifier while a message's size is checked. */
+const MAX_ID = Number.MAX_SAFE_INTEGER;
 
 /** The engine, once it is loaded. */
 let engine = null;
@@ -51,6 +55,12 @@ function isObject(value) {
   return typeof value === "object" && value !== null;
 }
 
+/** The request identifier of a message, read by the engine's own rule (§4), or NaN if it has none. */
+function requestId(message) {
+  const id = isObject(message) ? message.id : undefined;
+  return Number.isSafeInteger(id) && id >= 1 ? id : Number.NaN;
+}
+
 /** Loads the engine and answers "ready", or "failed" with a fixed reason. */
 async function start(control) {
   try {
@@ -60,6 +70,10 @@ async function start(control) {
   }
   try {
     const wasmUrl = new URL(control.wasm_url ?? "bayan_wasm_bg.wasm", import.meta.url);
+    // The engine comes only from where this script came from.
+    if (wasmUrl.origin !== new URL(import.meta.url).origin) {
+      return fail("load_failed");
+    }
     await init({ module_or_path: wasmUrl });
   } catch {
     return fail("load_failed");
@@ -84,30 +98,36 @@ async function relay(message, receivedMs) {
   if (state !== "ready") {
     return;
   }
-  // The message as it arrived, to report a panic while its blob is stored (an ArrayBuffer becomes {} in JSON).
-  let text = toJson(message);
+  const id = requestId(message);
   try {
-    // UTF-8 is never shorter than JavaScript's UTF-16 length, so a longer text is over the engine's limit (§13). It is
-    // answered without copying it into the engine's memory, which would grow to hold it and never shrink again.
-    if (text.length > maxMessageBytes()) {
-      const id = isObject(message) && typeof message.id === "number" ? message.id : Number.NaN;
-      for (const answer of JSON.parse(engine.refuseOversized(id))) {
-        deliver(answer);
-      }
+    const bytes = takeBlob(message);
+    let text = toJson(message);
+    // A message JSON cannot hold, such as one with a BigInt, is answered without the engine (§3.2).
+    if (text === null) {
+      deliverAll(engine.refuseUnreadable(id));
       return;
     }
-    const blob = storeBlob(message);
-    if (blob !== null) {
+    // A message over the limit is answered without copying it into the engine's memory, which would grow to hold it
+    // and never shrink again (§13). Its size is measured with a stand-in for the blob's identifier as long as any.
+    if (overLimit(text)) {
+      deliverAll(engine.refuseOversized(id));
+      return;
+    }
+    let blob = null;
+    if (bytes !== null) {
+      // A blob over the limit is refused before it is copied into the engine's memory, as blob 0 (§3.1).
+      blob = bytes.byteLength > maxBlobBytes() ? 0 : engine.blobPut(bytes);
+      message.payload.blob = blob;
       text = toJson(message);
     }
     const answers = JSON.parse(engine.post(text, receivedMs));
     if (blob) {
       engine.blobRelease(blob);
     }
-    const tileRequest = isObject(message) && message.type === "render.tile" ? message.id : undefined;
+    const tileRequest = isObject(message) && message.type === "render.tile" && !Number.isNaN(id);
     for (const answer of answers) {
-      if (tileRequest !== undefined && answer.re === tileRequest && answer.ok === true) {
-        await deliverTile(answer, text);
+      if (tileRequest && answer.re === id && answer.ok === true) {
+        await deliverTile(answer, id);
       } else {
         deliver(answer);
       }
@@ -115,33 +135,81 @@ async function relay(message, receivedMs) {
   } catch {
     // A panic stops the WebAssembly instance (it traps), and anything else thrown from inside the engine leaves it
     // in an unknown state, so either way the instance is replaced (§3.2, §12).
-    restart(text);
+    restart(id);
   }
 }
 
-/** The message as JSON text. A value JSON cannot hold becomes text the engine refuses as invalid_message (§12). */
+/** The message as JSON text, or null if JSON cannot hold it. */
 function toJson(message) {
   try {
-    return JSON.stringify(message) ?? "";
+    return JSON.stringify(message) ?? null;
   } catch {
-    return "";
+    return null;
   }
 }
 
 /**
- * Moves an ArrayBuffer in `payload.blob` into a new blob and puts the blob's identifier in its place. Returns the
- * identifier, or null if the message has no ArrayBuffer there. A buffer that cannot be stored becomes blob 0, which
- * the engine answers with limit_exceeded (§3.1).
+ * Takes the bytes of a blob that a message carries in `payload.blob` (an ArrayBuffer, a SharedArrayBuffer, or a view
+ * of one such as a Uint8Array) and puts the largest identifier in its place, so the message's size can be checked
+ * before the bytes are copied into the engine. Returns the bytes, or null if the message carries no blob.
  */
-function storeBlob(message) {
+function takeBlob(message) {
   const payload = isObject(message) ? message.payload : undefined;
-  if (!isObject(payload) || !(payload.blob instanceof ArrayBuffer)) {
+  if (!isObject(payload)) {
     return null;
   }
-  const buffer = payload.blob;
-  // A buffer over the limit is refused before it is copied into the engine's memory (§13).
-  payload.blob = buffer.byteLength > maxBlobBytes() ? 0 : engine.blobPut(new Uint8Array(buffer));
-  return payload.blob;
+  const value = payload.blob;
+  let bytes = null;
+  if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
+    bytes = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (bytes !== null) {
+    payload.blob = MAX_ID;
+  }
+  return bytes;
+}
+
+/**
+ * Whether text is longer than the engine's message limit (§13) in UTF-8, the form in which wasm-bindgen copies it
+ * into the engine (a lone surrogate becomes U+FFFD, 3 bytes). Each UTF-16 code unit takes 1 to 3 bytes, so only
+ * lengths in between need counting.
+ */
+function overLimit(text) {
+  const limit = maxMessageBytes();
+  if (text.length > limit) {
+    return true;
+  }
+  if (text.length * 3 <= limit) {
+    return false;
+  }
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      // A surrogate pair: one character of 4 bytes.
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+    if (bytes > limit) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Delivers the engine's answers, given as the text of a JSON array. */
+function deliverAll(answersJson) {
+  for (const answer of JSON.parse(answersJson)) {
+    deliver(answer);
+  }
 }
 
 /** Sends one of the engine's messages to the main thread; a blob it names travels as a transferred ArrayBuffer. */
@@ -158,9 +226,12 @@ function deliver(answer) {
   self.postMessage(answer);
 }
 
-/** Delivers the reply to render.tile with an ImageBitmap in place of the blob and stride (§3.2, §6.4). */
-async function deliverTile(answer, requestText) {
-  const { width, height, stride, hash, blob } = answer.payload;
+/**
+ * Delivers the reply to render.tile request `id` with an ImageBitmap in place of the blob and stride (§3.2, §6.4).
+ * Every other field of the reply is kept, so fields that later versions add (§9) reach the web shell too.
+ */
+async function deliverTile(answer, id) {
+  const { width, height, stride, blob } = answer.payload;
   const bytes = engine.blobTake(blob);
   let bitmap;
   try {
@@ -170,13 +241,13 @@ async function deliverTile(answer, requestText) {
     bitmap = await createImageBitmap(new ImageData(unpremultiply(bytes, stride, width, height), width, height));
   } catch {
     // The engine is fine; only the browser could not make the bitmap. The request gets the error internal.
-    for (const failure of JSON.parse(engine.reportHostFailure(requestText))) {
-      deliver(failure);
-    }
+    deliverAll(engine.reportHostFailure(id));
     return;
   }
-  const reply = { v: answer.v, re: answer.re, ok: true, payload: { width, height, hash, bitmap } };
-  self.postMessage(reply, [bitmap]);
+  const payload = { ...answer.payload, bitmap };
+  delete payload.blob;
+  delete payload.stride;
+  self.postMessage({ ...answer, payload }, [bitmap]);
 }
 
 /**
@@ -207,18 +278,17 @@ function unpremultiply(source, stride, width, height) {
 }
 
 /**
- * Replaces an engine that panicked with a new one from the same configuration, and lets the new one answer the
- * message that caused the panic (§3.2). The old engine object belongs to the discarded instance: it must not be used
- * or freed (wasm-bindgen refuses calls on it, and its finalizer leaves the new instance alone).
+ * Replaces an engine that panicked with a new one from the same configuration, and lets the new one answer request
+ * `id`, the message that caused the panic (§3.2). Only the identifier is passed, so the new instance never copies or
+ * parses that message again. The old engine object belongs to the discarded instance: it must not be used or freed
+ * (wasm-bindgen refuses calls on it, and its finalizer leaves the new instance alone).
  */
-function restart(messageText) {
+function restart(id) {
   engine = null;
   try {
     __wbg_reset_state();
     engine = new WasmEngine(configText);
-    for (const answer of JSON.parse(engine.reportPanic(messageText))) {
-      deliver(answer);
-    }
+    deliverAll(engine.reportPanic(id));
   } catch {
     fail("restart_failed");
   }

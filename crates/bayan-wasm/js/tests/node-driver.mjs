@@ -19,6 +19,10 @@ const host = pathToFileURL(path.join(packageDir, "bayan-worker.js")).href;
 const scope = new URL("./worker-scope.mjs", import.meta.url);
 /** The width of a tile whose ImageBitmap the fake scope refuses to create. */
 const FAILING_BITMAP_WIDTH = 7;
+/** The width of a tile whose ImageBitmap the fake scope creates only after a while. */
+const SLOW_BITMAP_WIDTH = 9;
+/** The engine's message limit (§13). */
+const MESSAGE_LIMIT = 16 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
 
 /** 1 DIP (device-independent pixel, 1/96 inch) is 19,050 BLU at zoom 1 (§7). */
@@ -30,7 +34,9 @@ class Shell {
     this.inbox = [];
     this.wake = () => {};
     this.failure = null;
-    this.worker = new Worker(scope, { workerData: { host, failBitmapWidth: FAILING_BITMAP_WIDTH } });
+    this.worker = new Worker(scope, {
+      workerData: { host, failBitmapWidth: FAILING_BITMAP_WIDTH, slowBitmapWidth: SLOW_BITMAP_WIDTH },
+    });
     this.worker.on("message", (message) => {
       this.inbox.push(message);
       this.wake();
@@ -87,6 +93,14 @@ class Shell {
     return this.reply(id);
   }
 
+  /** The size of the engine's WebAssembly memory in bytes, as the fake scope reports it. */
+  async memory() {
+    this.send({ "bayan-test": "memory" });
+    const { bytes } = await this.take((message) => message["bayan-test"] === "memory", "memory size");
+    assert.ok(Number.isInteger(bytes), "the test scope found no engine instance");
+    return bytes;
+  }
+
   close() {
     return this.worker.terminate();
   }
@@ -109,6 +123,23 @@ function fnv1a64(bytes) {
     hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
   }
   return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
+}
+
+/**
+ * Premultiplies straight RGBA, the inverse of the worker host's conversion: for every alpha from 1 to 254 and every
+ * premultiplied value, un-premultiplying and premultiplying again gives the value back exactly.
+ */
+function premultiply(pixels) {
+  const result = new Uint8Array(pixels.length);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const value = pixels[index + channel];
+      result[index + channel] = alpha === 0 || alpha === 255 ? value : Math.round((value * alpha) / 255);
+    }
+    result[index + 3] = alpha;
+  }
+  return result;
 }
 
 /** A 64 × 64 pixel tile one inch inside page 0, at zoom 1: entirely on the page, so every pixel is opaque. */
@@ -211,17 +242,60 @@ async function main() {
       assert.equal(ok(await shell.request(14, "render.tile", tileRequest(1))).hash, tileHash);
     });
 
+    await check("partly covered pixels arrive un-premultiplied, and premultiplying them gives the engine's bytes", async () => {
+      // 13 × 7 pixels whose top-left pixel is centred on the page's top-left corner: the corner pixel is a quarter
+      // on the page, the rest of the first row and column half, and the others whole, so the alphas are 64, 128 and
+      // 255. The tile is not square, so a mix-up of rows and columns or of the stride would show.
+      const half = BLU_PER_DIP / 2;
+      const request = {
+        doc_id: 1,
+        page: 0,
+        rect: { x: -half, y: -half, width: 13 * BLU_PER_DIP, height: 7 * BLU_PER_DIP },
+        width: 13,
+        height: 7,
+      };
+      const tile = ok(await shell.request(18, "render.tile", request));
+      const pixels = tile.bitmap.data;
+      assert.equal(pixels.length, 13 * 7 * 4);
+      const alphas = new Set(pixels.filter((_, index) => index % 4 === 3));
+      assert.deepEqual([...alphas].sort((a, b) => a - b), [64, 128, 255]);
+      assert.equal(pixels[3], 64);
+      assert.equal(pixels[4 * 1 + 3], 128);
+      assert.equal(pixels[4 * 13 + 3], 128);
+      assert.equal(pixels[4 * 14 + 3], 255);
+      assert.equal(fnv1a64(premultiply(pixels)), tile.hash);
+    });
+
     await check("a message over 16 MiB is answered with limit_exceeded without reaching the engine", async () => {
       const text = "x".repeat(17 * 1024 * 1024);
       const error = errorOf(await shell.request(16, "input.text", { doc_id: 1, text }));
       assert.equal(error.code, "limit_exceeded");
       assert.equal(error.args.limit, "message_size");
+      // Sizes count in UTF-8, as the engine receives them: 6 Mi of "あ" are 18 MiB, though only 6 Mi UTF-16 units.
+      const wide = errorOf(await shell.request(19, "input.text", { doc_id: 1, text: "あ".repeat(6 * 1024 * 1024) }));
+      assert.equal(wide.code, "limit_exceeded");
+      assert.equal(wide.args.limit, "message_size");
+      // Just under the limit in UTF-8, the message reaches the engine, which refuses the text for the editable line.
+      const fits = "あ".repeat(Math.floor((MESSAGE_LIMIT - 100) / 3));
+      const refused = errorOf(await shell.request(31, "input.text", { doc_id: 1, text: fits }));
+      assert.equal(refused.code, "limit_exceeded");
+      assert.equal(refused.args.limit, "text_length");
       // The engine is unaffected.
       assert.equal(ok(await shell.request(17, "render.tile", tileRequest(1))).hash, tileHash);
     });
 
+    await check("a blob may also arrive as a view of an ArrayBuffer", async () => {
+      const buffer = bytesOf("--document--");
+      const opened = await shell.request(32, "doc.open", { blob: new Uint8Array(buffer, 2, 8) });
+      assert.equal(opened.type, "doc.opened");
+      ok(await shell.request(33, "doc.close", { doc_id: ok(opened).doc_id }));
+    });
+
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
+      // With a request identifier, the refusal is the reply.
       shell.send({ v: 0, id: 15, type: "hello", payload: { protocol_versions: [0n] } });
+      assert.equal(errorOf(await shell.reply(15)).code, "invalid_message");
+      shell.send({ v: 0, type: "hello", payload: { protocol_versions: [0n] } });
       const event = await shell.event("engine.error");
       assert.equal(event.payload.code, "invalid_message");
       assert.equal(event.payload.recoverable, true);
@@ -232,12 +306,18 @@ async function main() {
     await check("later control messages are ignored, and answers keep their order", async () => {
       shell.send({ worker: "init", config: { test: { allow_panic: false } } });
       shell.send({ worker: "something else" });
+      // Tiles whose bitmaps take a while, between quick queries: no answer may overtake an earlier one.
       for (let id = 20; id < 30; id += 1) {
-        shell.send({ v: 0, id, type: "query.a11y", payload: { doc_id: 1 } });
+        if (id % 2 === 0) {
+          shell.send({ v: 0, id, type: "render.tile", payload: tileRequest(1, SLOW_BITMAP_WIDTH) });
+        } else {
+          shell.send({ v: 0, id, type: "query.a11y", payload: { doc_id: 1 } });
+        }
       }
       for (let id = 20; id < 30; id += 1) {
         const next = await shell.take(() => true, "any message");
         assert.equal(next.re, id);
+        assert.equal(next.ok, true, JSON.stringify(next));
       }
       // Still the configuration from the first init: panics are allowed.
       assert.equal(errorOf(await shell.request(30, "diag.panic")).code, "panic");
@@ -263,10 +343,34 @@ async function main() {
     }
   });
 
+  await check("a large unknown field costs the engine about the size of its message, once", async () => {
+    const fresh = new Shell();
+    try {
+      fresh.send({ v: 0, id: 1, type: "hello", payload: { protocol_versions: [0] } });
+      assert.equal((await fresh.status()).worker, "ready");
+      ok(await fresh.reply(1));
+      const before = await fresh.memory();
+      // About 14 MiB of JSON: 7 Mi zeros in a field the engine does not know.
+      const payload = { locale: "en", junk: new Array(7 * 1024 * 1024).fill(0) };
+      const size = JSON.stringify(payload).length;
+      assert.ok(size > 14 * 1024 * 1024 && size < MESSAGE_LIMIT);
+      ok(await fresh.request(2, "ui.manifest", payload));
+      const grown = (await fresh.memory()) - before;
+      // Reading it into a generic JSON tree took more than 10 times its size; skipping the field takes nothing beyond
+      // the message's own copy.
+      assert.ok(grown < 2 * size, `the engine's memory grew by ${grown} bytes for a ${size}-byte message`);
+      console.log(`  (the engine's memory grew by ${(grown / 1048576).toFixed(1)} MiB for a ${(size / 1048576).toFixed(1)} MiB message)`);
+    } finally {
+      await fresh.close();
+    }
+  });
+
   await check("an invalid configuration or a missing engine fails with a fixed reason", async () => {
     for (const [init, reason] of [
       [{ worker: "init", config: { test: { allow_panics: true } } }, "invalid_config"],
       [{ worker: "init", wasm_url: "missing.wasm" }, "load_failed"],
+      // Another origin serves the same module in this test, but the worker host loads the engine only from its own.
+      [{ worker: "init", wasm_url: "https://cdn.example/bayan_wasm_bg.wasm" }, "load_failed"],
     ]) {
       const failing = new Shell();
       try {
