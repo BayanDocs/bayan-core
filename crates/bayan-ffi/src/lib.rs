@@ -6,10 +6,10 @@
 //!
 //! **Rules for callers** (also in the header):
 //!
-//! - All JSON is UTF-8 and is passed with an explicit length; it is not NUL-terminated. Pointers passed to the engine are borrowed for the duration of the call only.
-//! - The engine runs on its own thread and calls the message callback on that thread, one message at a time. The `json` pointer given to the callback is valid only during the call: copy the bytes and hand them to your own thread.
+//! - All JSON is UTF-8 and is passed with an explicit length; it is not NUL-terminated. Pointers passed to the engine are borrowed for the duration of the call only, and an input pointer must point to that many initialized bytes (written, not only allocated).
+//! - The engine runs on its own thread and calls the message callback on that thread, one message at a time. The `json` pointer given to the callback is valid only during the call: copy the bytes and hand them to your own thread. The callback must never block waiting for a thread of the shell, which may itself be waiting for the engine.
 //! - Never call an engine synchronously from inside a callback (spec §8): `bayan_render_tile` returns `BAYAN_STATUS_WRONG_THREAD` inside any engine's callback, because it would wait for the thread it runs on, or for another engine that may be waiting for this one. Posting from inside the callback is allowed.
-//! - Every function may be called from any thread, also from several threads at once, except `bayan_engine_free`: it must be the last call on an engine, made when no thread other than the engine's own callback is inside a call on that engine. It stops the engine; after it returns, the callback is never called again.
+//! - Every function may be called from any thread, also from several threads at once, except `bayan_engine_free`: it must be the last call on an engine, made when no thread other than the engine's own callback is inside a call on that engine. It stops the engine; after it returns, the callback is never called again. A callback may free only its own engine: freeing another one waits for that engine's thread, which may be waiting for this one.
 //! - No function lets a Rust panic escape; failures are reported through return values and `engine.error` messages. The callback must not let a C++ exception escape either.
 //! - Panics inside the engine are not printed, because their messages could quote document content: the first `bayan_engine_new` installs a panic hook that stays silent for the engine's threads and calls, and hands every other panic in the process to the hook installed before.
 //!
@@ -156,7 +156,7 @@ pub extern "C" fn bayan_version() -> *const c_char {
 ///
 /// # Safety
 ///
-/// Unless `config_len` is 0, `config_json` must point to `config_len` readable bytes.
+/// Unless `config_len` is 0, `config_json` must point to `config_len` initialized, readable bytes.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and reads memory that C passes in"
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn bayan_engine_new(
 ) -> *mut BayanEngine {
     guarded(ptr::null_mut(), || {
         silence_engine_panics();
-        // SAFETY: the caller guarantees `config_len` readable bytes at `config_json` for the duration of this call.
+        // SAFETY: the caller guarantees `config_len` initialized, readable bytes at `config_json` for the duration of this call.
         let Some(json) =
             (unsafe { pointers::borrowed(config_json, config_len, MAX_MESSAGE_BYTES) })
         else {
@@ -189,11 +189,11 @@ pub unsafe extern "C" fn bayan_engine_new(
     })
 }
 
-/// Stops and destroys an engine; accepts NULL. Called from any other thread, it waits until the engine thread has stopped; meanwhile the callback may still be running, and if it calls `bayan_engine_post` that call fails with `BAYAN_STATUS_INTERNAL_ERROR`. Called from inside the engine's own callback, it returns at once and the engine thread finishes by itself. Either way, the callback is never called again after this returns.
+/// Stops and destroys an engine; accepts NULL. Called from any other thread, it waits until the engine thread has stopped; meanwhile the callback may still be running, and a `bayan_engine_post` it makes then fails with `BAYAN_STATUS_INTERNAL_ERROR`, or, if it comes just before the engine starts stopping, succeeds but is never handled. Called from inside the engine's own callback, it returns at once and the engine thread finishes by itself. Either way, the callback is never called again after this returns. A callback must not free another engine: that waits for the other engine's thread, which may be waiting for this one.
 ///
 /// # Safety
 ///
-/// `engine` must be NULL or a pointer that `bayan_engine_new` returned and that was not freed yet. This must be the last call on the engine: apart from the engine's own callback, no other thread may be inside a call on it (a callback that frees the engine must first make sure of that), and the engine must not be used afterwards.
+/// `engine` must be NULL or a pointer that `bayan_engine_new` returned and that was not freed yet. This must be the last call on the engine: apart from the engine's own callback, no other thread may be inside a call on it (a callback that frees the engine must first make sure of that), and the engine must not be used afterwards. Called from inside a callback, `engine` must be that callback's own engine.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and takes back ownership of a pointer given to C"
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn bayan_engine_set_callback(
 ///
 /// # Safety
 ///
-/// `engine` must be a live engine, and `json` must point to `json_len` readable bytes.
+/// `engine` must be a live engine, and `json` must point to `json_len` initialized, readable bytes.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and reads memory that C passes in"
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn bayan_engine_post(
     if json_len == 0 {
         return BAYAN_STATUS_INVALID_ARGUMENT;
     }
-    // SAFETY: the caller guarantees `json_len` readable bytes at `json` for the duration of this call.
+    // SAFETY: the caller guarantees `json_len` initialized, readable bytes at `json` for the duration of this call.
     let Some(message) = (unsafe { pointers::borrowed(json, json_len, MAX_MESSAGE_BYTES) }) else {
         return BAYAN_STATUS_INVALID_ARGUMENT;
     };
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn bayan_engine_post(
 ///
 /// # Safety
 ///
-/// `engine` must be a live engine, and unless `len` is 0, `bytes` must point to `len` readable bytes.
+/// `engine` must be a live engine, and unless `len` is 0, `bytes` must point to `len` initialized, readable bytes.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and reads memory that C passes in"
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn bayan_blob_put(
     let Some(engine) = (unsafe { engine.as_ref() }) else {
         return 0;
     };
-    // SAFETY: the caller guarantees `len` readable bytes at `bytes` for the duration of this call.
+    // SAFETY: the caller guarantees `len` initialized, readable bytes at `bytes` for the duration of this call.
     let Some(bytes) = (unsafe { pointers::borrowed(bytes, len, MAX_BLOB_BYTES) }) else {
         return 0;
     };
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn bayan_blob_release(
 ///
 /// # Safety
 ///
-/// `engine` must be a live engine, `request_json` must point to `request_len` readable bytes, and `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call.
+/// `engine` must be a live engine, `request_json` must point to `request_len` initialized, readable bytes, and `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and reads and writes memory that C passes in"
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn bayan_render_tile(
     if out_capacity < needed {
         return BAYAN_STATUS_BUFFER_TOO_SMALL;
     }
-    // SAFETY: the caller guarantees `request_len` readable bytes at `request_json` for the duration of this call.
+    // SAFETY: the caller guarantees `request_len` initialized, readable bytes at `request_json` for the duration of this call.
     let Some(request) =
         (unsafe { pointers::borrowed(request_json, request_len, MAX_MESSAGE_BYTES) })
     else {

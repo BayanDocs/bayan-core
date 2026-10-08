@@ -8,7 +8,7 @@ use std::ptr;
 ///
 /// # Safety
 ///
-/// Unless `bytes` is null or `length` is 0, `bytes` must point to `length` readable bytes that nothing writes to until the returned slice is dropped.
+/// Unless `bytes` is null or `length` is 0, `bytes` must point to `length` initialized, readable bytes that nothing writes to until the returned slice is dropped (a Rust slice over memory that was never written is undefined behaviour).
 #[expect(
     unsafe_code,
     reason = "reads or writes memory that C passes in, as the C interface requires (ADR-0006 §2)"
@@ -27,7 +27,7 @@ pub(crate) unsafe fn borrowed<'a>(
     if bytes.is_null() {
         return None;
     }
-    // SAFETY: `bytes` is not null and, as the caller guarantees, points to `length` readable bytes that stay unchanged while the slice lives. A `u8` needs no alignment, and `length` is at most `limit`, which the callers keep far below `isize::MAX`.
+    // SAFETY: `bytes` is not null and, as the caller guarantees, points to `length` initialized, readable bytes that stay unchanged while the slice lives. A `u8` needs no alignment, and `length` is at most `limit`, which the callers keep far below `isize::MAX`.
     Some(unsafe { std::slice::from_raw_parts(bytes, length) })
 }
 
