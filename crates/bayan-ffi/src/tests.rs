@@ -42,7 +42,7 @@ impl Collector {
 }
 
 /// The callback the tests register: `user_data` is a `Collector`.
-unsafe extern "C" fn collect(user_data: *mut c_void, json: *const u8, json_len: usize) {
+unsafe extern "C-unwind" fn collect(user_data: *mut c_void, json: *const u8, json_len: usize) {
     // SAFETY: the tests register this callback with a pointer to a `Collector` that outlives the engine.
     let collector = unsafe { &*user_data.cast::<Collector>() };
     // SAFETY: the engine passes `json_len` readable bytes that stay valid during this call.
@@ -350,7 +350,7 @@ fn a_panic_in_a_handler_becomes_engine_error_and_the_engine_stays_usable() {
 }
 
 /// A callback that tries to render a tile from inside the callback, and records the status.
-unsafe extern "C" fn render_from_callback(
+unsafe extern "C-unwind" fn render_from_callback(
     user_data: *mut c_void,
     _json: *const u8,
     _json_len: usize,
@@ -429,7 +429,7 @@ fn calling_back_into_the_engine_from_the_callback_is_refused_instead_of_deadlock
 }
 
 /// A callback that frees the engine from inside the callback.
-unsafe extern "C" fn free_from_callback(
+unsafe extern "C-unwind" fn free_from_callback(
     user_data: *mut c_void,
     _json: *const u8,
     _json_len: usize,
@@ -522,7 +522,7 @@ struct Poster {
 }
 
 /// A callback that answers every message by posting another one, so the engine thread keeps calling it.
-unsafe extern "C" fn post_from_callback(
+unsafe extern "C-unwind" fn post_from_callback(
     user_data: *mut c_void,
     _json: *const u8,
     _json_len: usize,
@@ -535,7 +535,7 @@ unsafe extern "C" fn post_from_callback(
 }
 
 #[test]
-fn freeing_while_the_callback_posts_is_safe_and_the_late_posts_fail() {
+fn freeing_while_the_callback_posts_is_safe() {
     let poster = Poster {
         engine: AtomicPtr::new(ptr::null_mut()),
         statuses: Mutex::new(Vec::new()),
@@ -610,4 +610,89 @@ fn empty_blobs_and_callback_registration_behave_as_the_header_says() {
     assert_eq!(late, BAYAN_STATUS_INVALID_ARGUMENT);
     free(engine);
     assert!(replaced.messages.lock().unwrap().is_empty());
+}
+
+/// A callback that records whether a panic at this point would count as the engine's: `user_data` is an `AtomicU8`, set to 1 for yes and 2 for no.
+unsafe extern "C-unwind" fn record_quietness(
+    user_data: *mut c_void,
+    _json: *const u8,
+    _json_len: usize,
+) {
+    // SAFETY: the test registers this callback with a pointer to an `AtomicU8` that outlives the engine.
+    let seen = unsafe { &*user_data.cast::<std::sync::atomic::AtomicU8>() };
+    seen.store(if is_engine_panic() { 1 } else { 2 }, Ordering::SeqCst);
+}
+
+#[test]
+fn panics_inside_the_shell_s_callback_are_the_shell_s() {
+    // The callback runs on the engine thread, but it is the shell's code: if it is written in Rust and panics, the panic is printed as usual, and the process stops (the callback must not unwind).
+    let seen = std::sync::atomic::AtomicU8::new(0);
+    // SAFETY: a null configuration of length 0 means the defaults.
+    let engine = unsafe { bayan_engine_new(ptr::null(), 0) };
+    let data = ptr::from_ref(&seen).cast_mut().cast::<c_void>();
+    // SAFETY: `engine` is live, and `seen` outlives it.
+    let status = unsafe { bayan_engine_set_callback(engine, Some(record_quietness), data) };
+    assert_eq!(status, BAYAN_STATUS_OK);
+    assert_eq!(post(engine, "{}"), BAYAN_STATUS_OK);
+    let start = std::time::Instant::now();
+    while seen.load(Ordering::SeqCst) == 0 {
+        assert!(start.elapsed() < Duration::from_secs(20), "no callback");
+        std::thread::yield_now();
+    }
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    free(engine);
+}
+
+#[test]
+fn blobs_and_tiles_are_written_into_buffers_that_were_never_initialized() {
+    // A shell's buffers may be fresh memory, such as a new QImage's pixels: the engine writes them through raw pointers and never reads them (checked by Miri).
+    let collector = Collector::default();
+    let engine = start("", &collector);
+    let doc_id = open(engine, &collector);
+    let blob = put(engine, b"some bytes");
+    let mut out = Box::<[u8]>::new_uninit_slice(10);
+    let mut length = 0_usize;
+    // SAFETY: `engine` is live, and `out` has room for 10 bytes, which the engine only writes.
+    let status = unsafe {
+        bayan_blob_get(
+            engine,
+            blob,
+            out.as_mut_ptr().cast::<u8>(),
+            out.len(),
+            &raw mut length,
+        )
+    };
+    assert_eq!((status, length), (BAYAN_STATUS_OK, 10));
+    // SAFETY: the engine wrote all 10 bytes.
+    let out = unsafe { out.assume_init() };
+    assert_eq!(&*out, b"some bytes");
+    // A tile of 3 x 2 pixels whose rows start 16 bytes apart: the 4 bytes after the first row stay uninitialized and are never read.
+    let (width, height, stride) = (3_u32, 2_u32, 16_usize);
+    let capacity = stride + 12;
+    let mut tile = Box::<[u8]>::new_uninit_slice(capacity);
+    let request = page_request(doc_id);
+    // SAFETY: `engine` is live, `request` is readable, and `tile` has room for `capacity` bytes, which the engine only writes.
+    let status = unsafe {
+        bayan_render_tile(
+            engine,
+            request.as_ptr(),
+            request.len(),
+            tile.as_mut_ptr().cast::<u8>(),
+            capacity,
+            width,
+            height,
+            stride,
+        )
+    };
+    assert_eq!(status, BAYAN_STATUS_OK);
+    for start in [0, stride] {
+        let pixels: Vec<u8> = tile[start..start + 12]
+            .iter()
+            // SAFETY: the engine wrote the 12 bytes of each row.
+            .map(|byte| unsafe { byte.assume_init() })
+            .collect();
+        // Every pixel lies on the page, so it is opaque.
+        assert!(pixels.chunks(4).all(|pixel| pixel[3] == 255), "{pixels:?}");
+    }
+    free(engine);
 }

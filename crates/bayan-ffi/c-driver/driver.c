@@ -1,6 +1,6 @@
 /*
  * The C test driver of the bayan-core C SDK (work package CORE-007): a plain C11 program that uses the engine only
- * through bayan_ffi.h, the way a shell does, and goes through handshake → open → render a tile → record → replay,
+ * through bayan_ffi.h, the way a shell does, and goes through handshake -> open -> render a tile -> record -> replay,
  * then the panic path. `cargo xtask c-driver` builds it twice, linked against the static and against the dynamic
  * library, and runs both.
  *
@@ -113,7 +113,7 @@ typedef struct {
   size_t capacity;
 } Collector;
 
-/* The message callback: runs on the engine thread, copies the message and wakes the main thread (spec §3.1, §8). */
+/* The message callback: runs on the engine thread, copies the message and wakes the main thread (spec section 3.1, section 8). */
 static void on_message(void *user_data, const uint8_t *json, size_t json_len) {
   Collector *collector = (Collector *)user_data;
   char *copy = (char *)allocate(json_len + 1);
@@ -156,7 +156,7 @@ static char *wait_for(Collector *collector, const char *needle) {
   }
 }
 
-/* The reply to request `id`: replies start {"v":0,"re":<id>, (spec §4). */
+/* The reply to request `id`: replies start {"v":0,"re":<id>, (spec section 4). */
 static char *wait_reply(Collector *collector, unsigned id) {
   char needle[32];
   snprintf(needle, sizeof needle, "\"re\":%u,", id);
@@ -187,7 +187,7 @@ static size_t occurrences(const char *text, const char *needle) {
   return count;
 }
 
-/* ---- The engine's digest, FNV-1a 64 (spec §10) ------------------------------------------------------------------ */
+/* ---- The engine's digest, FNV-1a 64 (spec section 10) ------------------------------------------------------------------ */
 
 #define FNV_OFFSET UINT64_C(0xcbf29ce484222325)
 #define FNV_PRIME UINT64_C(0x100000001b3)
@@ -220,7 +220,7 @@ static uint8_t *take_blob(BayanEngine *engine, BayanBlobId blob, size_t *length)
   return bytes;
 }
 
-/* 1 device-independent pixel is 19,050 BLU at zoom 1 (spec §7). The tile is 64 × 64 pixels, one inch (96 pixels)
+/* 1 device-independent pixel is 19,050 BLU at zoom 1 (spec section 7). The tile is 64 * 64 pixels, one inch (96 pixels)
  * inside page 0, so it lies entirely on the page and every pixel is opaque: the same tile as the Node.js driver's. */
 #define TILE_SIDE 64
 #define TILE_REQUEST                                                                                                  \

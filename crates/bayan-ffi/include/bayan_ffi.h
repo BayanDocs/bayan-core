@@ -1,5 +1,5 @@
 /*
- * bayan_ffi.h: the C interface between a BayanDocs shell and the engine (engine protocol v0, docs repository: specs/engine-protocol.md §3.1).
+ * bayan_ffi.h: the C interface between a BayanDocs shell and the engine (engine protocol v0, docs repository: specs/engine-protocol.md section 3.1).
  *
  * Rules for callers:
  * - All JSON is UTF-8 and is passed with an explicit length; it is not NUL-terminated.
@@ -8,7 +8,7 @@
  * - The engine runs on its own thread and calls the message callback on that thread, one message at a time.
  * - The json pointer given to the callback is valid only during the call: copy the bytes and hand them to your own thread.
  *   The callback must never block waiting for a thread of the shell, which may itself be waiting for the engine.
- * - Never call an engine synchronously from inside a callback (spec §8): bayan_render_tile returns
+ * - Never call an engine synchronously from inside a callback (spec section 8): bayan_render_tile returns
  *   BAYAN_STATUS_WRONG_THREAD inside any engine's callback, because it would wait for the thread it runs on, or for
  *   another engine that may be waiting for this one. Posting from the callback is allowed.
  * - Every function may be called from any thread, also from several threads at once, except bayan_engine_free:
@@ -60,7 +60,7 @@ typedef uint64_t BayanBlobId;
 #define BAYAN_STATUS_OK 0
 
 /*
- A null pointer, a malformed request, or a size outside the engine's limits (spec §13).
+ A null pointer, a malformed request, or a size outside the engine's limits (spec section 13).
  */
 #define BAYAN_STATUS_INVALID_ARGUMENT 1
 
@@ -80,7 +80,7 @@ typedef uint64_t BayanBlobId;
 #define BAYAN_STATUS_INTERNAL_ERROR 4
 
 /*
- Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec §8).
+ Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec section 8).
  */
 #define BAYAN_STATUS_WRONG_THREAD 5
 
@@ -94,7 +94,7 @@ extern "C" {
 const char *bayan_version(void);
 
 /*
- Creates an engine from a JSON configuration object of `config_len` bytes (spec §3.3); a null pointer with length 0 means the defaults. Starts the engine thread. Returns NULL if the configuration is invalid or the thread cannot start.
+ Creates an engine from a JSON configuration object of `config_len` bytes (spec section 3.3); a null pointer with length 0 means the defaults. Starts the engine thread. Returns NULL if the configuration is invalid or the thread cannot start.
 
  # Safety
 
@@ -124,7 +124,7 @@ BayanStatus bayan_engine_set_callback(BayanEngine *engine,
                                       void *user_data);
 
 /*
- Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec §4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
+ Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
 
  # Safety
 
@@ -135,7 +135,7 @@ BayanStatus bayan_engine_post(BayanEngine *engine,
                               size_t json_len);
 
 /*
- Copies `len` bytes into a new blob and returns its identifier, or 0 if `engine` is NULL, `bytes` is NULL while `len` is not 0, the blob is larger than 64 MiB, or there are too many blobs (spec §13). An empty blob is allowed; then `bytes` may be NULL.
+ Copies `len` bytes into a new blob and returns its identifier, or 0 if `engine` is NULL, `bytes` is NULL while `len` is not 0, the blob is larger than 64 MiB, or there are too many blobs (spec section 13). An empty blob is allowed; then `bytes` may be NULL.
 
  # Safety
 
@@ -168,12 +168,12 @@ BayanStatus bayan_blob_get(BayanEngine *engine,
 BayanStatus bayan_blob_release(BayanEngine *engine, BayanBlobId blob);
 
 /*
- Renders a tile into a caller-provided buffer of premultiplied RGBA8 pixels, rows from top to bottom, and returns when it is done (spec §3.1, §6.4).
+ Renders a tile into a caller-provided buffer of premultiplied RGBA8 pixels, rows from top to bottom, and returns when it is done (spec section 3.1, section 6.4).
 
  - `request_json`: a `render.tile` payload of `request_len` bytes: `doc_id`, `page`, `rect` (x, y, width and height in BLU), and optionally `zoom`, `device_scale` and `mode`. If it has `width` and `height`, they must equal the parameters.
  - `width`, `height`: the tile's size in pixels, 1 to 4,096 each.
- - `stride`: the distance between the starts of two rows, in bytes; at least 4 × `width`. The bytes between rows are left untouched.
- - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` × (`height` − 1) + 4 × `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
+ - `stride`: the distance between the starts of two rows, in bytes; at least 4 * `width`. The bytes between rows are left untouched.
+ - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` * (`height` - 1) + 4 * `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
 
  The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock.
 

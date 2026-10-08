@@ -85,3 +85,62 @@ fn the_header_declares_exactly_the_functions_of_the_specification() {
         assert!(header.contains(status), "the header lacks `{status}`");
     }
 }
+
+#[test]
+fn the_header_is_ascii() {
+    // MSVC reads a header in the system's code page and warns (C4819) about any character it cannot represent there, which fails builds with /WX on, say, a Japanese or Chinese Windows.
+    let header = generated_header();
+    let offending: Vec<&str> = header.lines().filter(|line| !line.is_ascii()).collect();
+    assert!(offending.is_empty(), "non-ASCII lines: {offending:#?}");
+}
+
+#[test]
+fn the_header_declares_the_prototypes_of_the_specification() {
+    // Engine protocol §3.1 lists these declarations; the C SDK's users rely on every parameter type, not just the names.
+    let header = generated_header();
+    let mut code = String::new();
+    let mut in_comment = false;
+    for line in header.lines() {
+        let trimmed = line.trim();
+        if in_comment {
+            in_comment = !trimmed.contains("*/");
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            in_comment = !trimmed.contains("*/");
+            continue;
+        }
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("extern \"C\"")
+            || trimmed.starts_with('}')
+        {
+            continue;
+        }
+        code.push_str(trimmed);
+        code.push(' ');
+    }
+    let declarations: Vec<String> = code
+        .split(';')
+        .map(|declaration| declaration.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|declaration| !declaration.is_empty())
+        .collect();
+    assert_eq!(
+        declarations,
+        [
+            "typedef struct BayanEngine BayanEngine",
+            "typedef int32_t BayanStatus",
+            "typedef void (*BayanMessageCallback)(void *user_data, const uint8_t *json, size_t json_len)",
+            "typedef uint64_t BayanBlobId",
+            "const char *bayan_version(void)",
+            "BayanEngine *bayan_engine_new(const uint8_t *config_json, size_t config_len)",
+            "void bayan_engine_free(BayanEngine *engine)",
+            "BayanStatus bayan_engine_set_callback(BayanEngine *engine, BayanMessageCallback callback, void *user_data)",
+            "BayanStatus bayan_engine_post(BayanEngine *engine, const uint8_t *json, size_t json_len)",
+            "BayanBlobId bayan_blob_put(BayanEngine *engine, const uint8_t *bytes, size_t len)",
+            "BayanStatus bayan_blob_get(BayanEngine *engine, BayanBlobId blob, uint8_t *out, size_t out_capacity, size_t *out_len)",
+            "BayanStatus bayan_blob_release(BayanEngine *engine, BayanBlobId blob)",
+            "BayanStatus bayan_render_tile(BayanEngine *engine, const uint8_t *request_json, size_t request_len, uint8_t *rgba_out, size_t out_capacity, uint32_t width, uint32_t height, size_t stride)",
+        ]
+    );
+}

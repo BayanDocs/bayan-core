@@ -49,7 +49,7 @@ pub struct BayanEngine {
 }
 
 impl BayanEngine {
-    /// Milliseconds since the engine was created, the clock of its recordings (spec §10).
+    /// Milliseconds since the engine was created, the clock of its recordings (spec section 10).
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
@@ -63,7 +63,7 @@ pub type BayanStatus = i32;
 
 /// The call succeeded.
 pub const BAYAN_STATUS_OK: BayanStatus = 0;
-/// A null pointer, a malformed request, or a size outside the engine's limits (spec §13).
+/// A null pointer, a malformed request, or a size outside the engine's limits (spec section 13).
 pub const BAYAN_STATUS_INVALID_ARGUMENT: BayanStatus = 1;
 /// An unknown blob, document or page.
 pub const BAYAN_STATUS_NOT_FOUND: BayanStatus = 2;
@@ -71,12 +71,12 @@ pub const BAYAN_STATUS_NOT_FOUND: BayanStatus = 2;
 pub const BAYAN_STATUS_BUFFER_TOO_SMALL: BayanStatus = 3;
 /// The engine failed or is stopping; it also reports an engine.error message when it can.
 pub const BAYAN_STATUS_INTERNAL_ERROR: BayanStatus = 4;
-/// Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec §8).
+/// Called from inside any engine's callback, where the function would wait for the engine thread it runs on, or for another engine that may be waiting for this one (spec section 8).
 pub const BAYAN_STATUS_WRONG_THREAD: BayanStatus = 5;
 
 /// Receives one message from the engine (a reply or an event, as UTF-8 JSON of `json_len` bytes), on the engine thread. `json` is valid only during the call.
 pub type BayanMessageCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, json: *const u8, json_len: usize)>;
+    Option<unsafe extern "C-unwind" fn(user_data: *mut c_void, json: *const u8, json_len: usize)>;
 
 /// The engine's semantic version, NUL-terminated.
 const VERSION: &CStr =
@@ -88,7 +88,8 @@ const VERSION: &CStr =
 /// The shell's callback and its user data, handed to the engine thread.
 #[derive(Clone, Copy)]
 struct Callback {
-    function: unsafe extern "C" fn(user_data: *mut c_void, json: *const u8, json_len: usize),
+    // `C-unwind`, not `C`: if the shell breaks the rule that its callback must not let a C++ exception escape, the exception may then reach Rust code, where `deliver` stops the process. Through a `C` function pointer, any unwinding is undefined behaviour.
+    function: unsafe extern "C-unwind" fn(user_data: *mut c_void, json: *const u8, json_len: usize),
     user_data: *mut c_void,
 }
 
@@ -109,17 +110,28 @@ unsafe impl Sync for Callback {}
 impl Callback {
     #[expect(unsafe_code, reason = "calls the shell's C callback")]
     fn deliver(&self, message: &str) {
-        // SAFETY: the shell registered `function` for exactly this signature and promised that it may be called on the engine thread with `user_data` (bayan_ffi.h); `message` stays valid for the whole call, which is all the callback may rely on.
-        unsafe { (self.function)(self.user_data, message.as_ptr(), message.len()) };
+        let outer = IN_CALLBACK.with(|in_callback| in_callback.replace(true));
+        let call = || {
+            // SAFETY: the shell registered `function` for exactly this signature and promised that it may be called on the engine thread with `user_data` (bayan_ffi.h); `message` stays valid for the whole call, which is all the callback may rely on.
+            unsafe { (self.function)(self.user_data, message.as_ptr(), message.len()) };
+        };
+        let unwound = catch_unwind(AssertUnwindSafe(call)).is_err();
+        IN_CALLBACK.with(|in_callback| in_callback.set(outer));
+        if unwound {
+            // The callback unwound, which it must not do (bayan_ffi.h): a C++ exception escaped it, or a panic in a callback written in Rust. The shell is in an unknown state, and unwinding further would end the engine thread without a word, so the process stops here, on purpose.
+            std::process::abort();
+        }
     }
 }
 
 thread_local! {
     /// Whether this thread is inside one of the C functions.
     static IN_CALL: Cell<bool> = const { Cell::new(false) };
+    /// Whether this thread is inside the shell's callback, whose panics, if it is written in Rust, are the shell's to report.
+    static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Runs `body`, turning a panic into `fallback`, so no panic can cross into C (ADR-0006 §4).
+/// Runs `body`, turning a panic into `fallback`, so no panic can cross into C (ADR-0006 section 4).
 fn guarded<T>(fallback: T, body: impl FnOnce() -> T) -> T {
     let outer = IN_CALL.with(|in_call| in_call.replace(true));
     let result = catch_unwind(AssertUnwindSafe(body)).unwrap_or(fallback);
@@ -127,7 +139,7 @@ fn guarded<T>(fallback: T, body: impl FnOnce() -> T) -> T {
     result
 }
 
-/// Keeps the engine's panics off the host's standard error. Rust's default panic hook prints a panic's message, which could quote document content, and desktop environments may keep a program's standard error in the system log (AGENTS.md §6). The engine reports its panics as `engine.error` instead, so the hook installed here prints nothing for a panic on an engine thread or inside one of the C functions, and hands every other panic of the process to the hook that was installed before it. It is installed once, by the first `bayan_engine_new`.
+/// Keeps the engine's panics off the host's standard error. Rust's default panic hook prints a panic's message, which could quote document content, and desktop environments may keep a program's standard error in the system log (AGENTS.md section 6). The engine reports its panics as `engine.error` instead, so the hook installed here prints nothing for a panic on an engine thread or inside one of the C functions, and hands every other panic of the process to the hook that was installed before it. It is installed once, by the first `bayan_engine_new`.
 fn silence_engine_panics() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
@@ -140,9 +152,11 @@ fn silence_engine_panics() {
     });
 }
 
-/// Whether the current thread is an engine thread, or is inside one of the C functions. Reads only thread-local flags, which a panic hook may do even while a thread is ending.
+/// Whether a panic happens in the engine: inside one of the C functions, or on an engine thread outside the shell's callback. Reads only thread-local flags, which a panic hook may do even while a thread is ending.
 fn is_engine_panic() -> bool {
-    on_engine_thread() || IN_CALL.try_with(Cell::get).unwrap_or(false)
+    let flag =
+        |key: &'static std::thread::LocalKey<Cell<bool>>| key.try_with(Cell::get).unwrap_or(false);
+    flag(&IN_CALL) || (on_engine_thread() && !flag(&IN_CALLBACK))
 }
 
 /// Returns the engine's semantic version, as a static NUL-terminated string.
@@ -152,7 +166,7 @@ pub extern "C" fn bayan_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
-/// Creates an engine from a JSON configuration object of `config_len` bytes (spec §3.3); a null pointer with length 0 means the defaults. Starts the engine thread. Returns NULL if the configuration is invalid or the thread cannot start.
+/// Creates an engine from a JSON configuration object of `config_len` bytes (spec section 3.3); a null pointer with length 0 means the defaults. Starts the engine thread. Returns NULL if the configuration is invalid or the thread cannot start.
 ///
 /// # Safety
 ///
@@ -248,7 +262,7 @@ pub unsafe extern "C" fn bayan_engine_set_callback(
     })
 }
 
-/// Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec §4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
+/// Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
 ///
 /// # Safety
 ///
@@ -282,7 +296,7 @@ pub unsafe extern "C" fn bayan_engine_post(
     })
 }
 
-/// Copies `len` bytes into a new blob and returns its identifier, or 0 if `engine` is NULL, `bytes` is NULL while `len` is not 0, the blob is larger than 64 MiB, or there are too many blobs (spec §13). An empty blob is allowed; then `bytes` may be NULL.
+/// Copies `len` bytes into a new blob and returns its identifier, or 0 if `engine` is NULL, `bytes` is NULL while `len` is not 0, the blob is larger than 64 MiB, or there are too many blobs (spec section 13). An empty blob is allowed; then `bytes` may be NULL.
 ///
 /// # Safety
 ///
@@ -378,12 +392,12 @@ pub unsafe extern "C" fn bayan_blob_release(
     })
 }
 
-/// Renders a tile into a caller-provided buffer of premultiplied RGBA8 pixels, rows from top to bottom, and returns when it is done (spec §3.1, §6.4).
+/// Renders a tile into a caller-provided buffer of premultiplied RGBA8 pixels, rows from top to bottom, and returns when it is done (spec section 3.1, section 6.4).
 ///
 /// - `request_json`: a `render.tile` payload of `request_len` bytes: `doc_id`, `page`, `rect` (x, y, width and height in BLU), and optionally `zoom`, `device_scale` and `mode`. If it has `width` and `height`, they must equal the parameters.
 /// - `width`, `height`: the tile's size in pixels, 1 to 4,096 each.
-/// - `stride`: the distance between the starts of two rows, in bytes; at least 4 × `width`. The bytes between rows are left untouched.
-/// - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` × (`height` − 1) + 4 × `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
+/// - `stride`: the distance between the starts of two rows, in bytes; at least 4 * `width`. The bytes between rows are left untouched.
+/// - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` * (`height` - 1) + 4 * `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
 ///
 /// The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock.
 ///
@@ -439,6 +453,14 @@ pub unsafe extern "C" fn bayan_render_tile(
     let row = usize::try_from(width)
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
+    // The engine returns exactly `height` rows; anything else would leave rows of the caller's buffer unwritten.
+    if Some(pixels.len())
+        != usize::try_from(height)
+            .ok()
+            .and_then(|rows| rows.checked_mul(row))
+    {
+        return BAYAN_STATUS_INTERNAL_ERROR;
+    }
     // SAFETY: the caller guarantees that `rgba_out` points to `out_capacity` writable bytes that nothing else uses during this call; `write_rows` checks that the rows fit in them.
     if unsafe { pointers::write_rows(&pixels, row, rgba_out, out_capacity, stride) } {
         BAYAN_STATUS_OK
