@@ -349,35 +349,41 @@ fn import_refuses_blobs_beyond_the_limits() {
     assert_eq!(b.main_story().text(), "xxxxxxxxxx");
 }
 
-/// An update whose map entry is a value nested `depth` levels deep, written with the CRDT library directly, as a hostile replica could. Built on a thread with a large stack, and leaked, because the library both writes and frees such values recursively.
+/// An update whose map entry is a value nested `depth` levels deep, written with the CRDT library directly, as a hostile replica could. Leaked, because the library frees such values recursively.
+fn hostile_update_here(depth: usize, overwrite: bool) -> Vec<u8> {
+    let mut value = loro::LoroValue::I64(1);
+    for _ in 0..depth {
+        value = loro::LoroValue::List(vec![value].into());
+    }
+    let hostile = loro::LoroDoc::new();
+    hostile.set_peer_id(66).expect("a valid peer");
+    let map = hostile.get_map("paragraphs");
+    map.insert("deep", value).expect("writing the deep value");
+    if overwrite {
+        // The deep value then survives only in the history.
+        map.insert("deep", 1).expect("overwriting it");
+    }
+    hostile.commit();
+    let update = hostile
+        .export(loro::ExportMode::all_updates())
+        .expect("exporting the update");
+    std::mem::forget(hostile);
+    update
+}
+
+/// As [`hostile_update_here`], built on a thread with a large stack, because the library writes such values recursively too.
+#[cfg(not(target_arch = "wasm32"))]
 fn hostile_update(depth: usize, overwrite: bool) -> Vec<u8> {
     std::thread::Builder::new()
         .stack_size(1 << 30)
-        .spawn(move || {
-            let mut value = loro::LoroValue::I64(1);
-            for _ in 0..depth {
-                value = loro::LoroValue::List(vec![value].into());
-            }
-            let hostile = loro::LoroDoc::new();
-            hostile.set_peer_id(66).expect("a valid peer");
-            let map = hostile.get_map("paragraphs");
-            map.insert("deep", value).expect("writing the deep value");
-            if overwrite {
-                // The deep value then survives only in the history.
-                map.insert("deep", 1).expect("overwriting it");
-            }
-            hostile.commit();
-            let update = hostile
-                .export(loro::ExportMode::all_updates())
-                .expect("exporting the update");
-            std::mem::forget(hostile);
-            update
-        })
+        .spawn(move || hostile_update_here(depth, overwrite))
         .expect("a thread with a large stack")
         .join()
         .expect("building the hostile update")
 }
 
+// Host only: the test runs the import on a thread with a stack of a known size, and WebAssembly (wasm32-wasip1, where the gate also runs the tests) has no threads.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_deeply_nested_value_poisons_the_document_instead_of_crashing_it() {
     // 1,000 levels is far beyond MAX_VALUE_DEPTH but shallow enough for the library to decode on a 2 MiB stack in a debug build, so this test checks the logic: detect, poison, refuse, and leak instead of freeing. At about 20,000 levels the library's own decoder overflows such a stack before the adapter can look (CORE-004 report, "Resource limits"); the spike demonstrates the adapter's protection at depths where freeing would crash.
@@ -408,7 +414,7 @@ fn a_deeply_nested_value_poisons_the_document_instead_of_crashing_it() {
 
 #[test]
 fn shallow_nested_values_are_accepted() {
-    let update = hostile_update(bayan_crdt::MAX_VALUE_DEPTH - 1, false);
+    let update = hostile_update_here(bayan_crdt::MAX_VALUE_DEPTH - 1, false);
     let target = doc(2);
     target.import(&update, &ImportLimits::UPDATE).unwrap();
     assert!(!target.is_poisoned());
@@ -491,10 +497,15 @@ fn undoing_a_mark_leaves_it_on_text_inserted_inside_concurrently() {
 }
 
 /// Found by the CORE-004 fuzzer and minimized with `crdt-model minimize`: a valid update for the document in the base snapshot, and the same update with one byte changed (and its checksum recomputed, which anyone can do: it is not a signature). Loro 1.16.2 panics while importing the crafted one.
+#[cfg(not(target_arch = "wasm32"))]
 const PANIC_BASE: &[u8] = include_bytes!("fixtures/loro-panic-base.bin");
+#[cfg(not(target_arch = "wasm32"))]
 const PANIC_UPDATE: &[u8] = include_bytes!("fixtures/loro-panic-update.bin");
+#[cfg(not(target_arch = "wasm32"))]
 const PANIC_CRAFTED: &[u8] = include_bytes!("fixtures/loro-panic-crafted.bin");
 
+// Host only: in WebAssembly (wasm32-wasip1) a panic aborts the whole test program instead of unwinding, so the adapter cannot contain it there (the engine's host restarts an engine that aborts; CORE-004 report).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
     let load = || {
