@@ -304,6 +304,28 @@ fn undo_reverts_only_local_changes() {
 }
 
 #[test]
+fn pending_edits_join_the_next_commit_and_its_undo_step() {
+    let a = doc(1);
+    let mut undo = UndoManager::new(&a);
+    assert!(!a.has_pending_changes());
+    a.main_story().insert(0, "first").unwrap();
+    assert!(a.has_pending_changes());
+    a.commit();
+    assert!(!a.has_pending_changes());
+    // A write that no commit ends, like one an operation made before it failed, stays pending and becomes part of the next edit's change and undo step.
+    a.main_story().insert(5, " stray").unwrap();
+    assert!(a.has_pending_changes());
+    a.main_story().insert(0, ">").unwrap();
+    a.commit();
+    assert!(!a.has_pending_changes());
+    assert_eq!(undo.undo_count(), 2);
+    assert!(undo.undo().unwrap());
+    assert_eq!(a.main_story().text(), "first");
+    assert!(undo.undo().unwrap());
+    assert_eq!(a.main_story().text(), "");
+}
+
+#[test]
 fn import_refuses_blobs_beyond_the_limits() {
     let a = doc(1);
     for index in 0..10 {

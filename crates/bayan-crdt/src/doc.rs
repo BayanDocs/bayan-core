@@ -334,6 +334,12 @@ impl Doc {
         self.poison.is_set()
     }
 
+    /// Whether edits wait for the next commit: everything written since the last [`Doc::commit`] or [`Doc::commit_without_undo`]. Loro cannot abort a change, so whatever is pending becomes part of the next change and its undo step; an operation that fails must therefore leave nothing pending. False once the document is poisoned.
+    #[must_use]
+    pub fn has_pending_changes(&self) -> bool {
+        !self.is_poisoned() && self.loro.get_pending_txn_len() > 0
+    }
+
     /// Size counters (zero once the document is poisoned).
     #[must_use]
     pub fn stats(&self) -> DocStats {

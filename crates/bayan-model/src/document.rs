@@ -998,6 +998,12 @@ impl Document {
         self.undo.undo_count()
     }
 
+    /// Whether writes wait for the next commit. Every operation, applied or refused, leaves none: whatever were pending would become part of the next operation's change and undo step.
+    #[must_use]
+    pub fn has_pending_changes(&self) -> bool {
+        self.crdt.has_pending_changes()
+    }
+
     // ----- Internals -----
 
     /// Runs one operation on `story` as one transaction: materializes the story if it may need it, gives the operation the mapping from the positions the caller computed to the story after materialization, and commits if the operation succeeds. Operations check everything before they write, so a refused operation leaves nothing pending.
