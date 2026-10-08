@@ -383,7 +383,7 @@ fn bench_subset(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(),
     drop(read_subset(&b));
     let mut undo = UndoManager::new(&b);
     let main = b.main_story();
-    let paragraphs_registry = b.registry(registry::PARAGRAPHS);
+    let paragraphs_registry = b.registry(registry::PARAGRAPHS).map_err(err)?;
     let mut ids = Rng::new(EDIT_SEED ^ 1);
     let script = edit_script(EDIT_SEED, edits);
     let mut local = std::time::Duration::ZERO;
@@ -605,12 +605,13 @@ fn read_subset(doc: &Doc) -> (String, usize, usize, usize) {
             }
         }
     }
-    let entities = doc
-        .registry(registry::PARAGRAPHS)
-        .entries()
-        .values()
-        .filter(|map| !map.entries().is_empty())
-        .count();
+    let entities = doc.registry(registry::PARAGRAPHS).map_or(0, |paragraphs| {
+        paragraphs
+            .entries()
+            .values()
+            .filter(|map| !map.entries().is_empty())
+            .count()
+    });
     // The text after the last paragraph end is empty; drop the final line feed to match the canonical text.
     text.pop();
     (text, marks_read, blocks, entities)

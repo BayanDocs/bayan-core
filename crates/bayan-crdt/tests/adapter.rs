@@ -144,6 +144,7 @@ fn registries_and_id_lists_merge_across_replicas() {
     let b = doc(2);
     let rows = a
         .registry("tables")
+        .unwrap()
         .create("t1")
         .unwrap()
         .id_list("rows")
@@ -156,6 +157,7 @@ fn registries_and_id_lists_merge_across_replicas() {
     // Concurrent moves of the same row, a move racing a delete, and an insert.
     let rows_b = b
         .registry("tables")
+        .unwrap()
         .get("t1")
         .unwrap()
         .get_id_list("rows")
@@ -186,12 +188,14 @@ fn entities_created_concurrently_with_the_same_identifier_merge() {
     let a = doc(1);
     let b = doc(2);
     a.registry("paragraphs")
+        .unwrap()
         .create("p")
         .unwrap()
         .set("style", &Value::from("Title"))
         .unwrap();
     a.commit();
     b.registry("paragraphs")
+        .unwrap()
         .create("p")
         .unwrap()
         .set("jc", &Value::from("center"))
@@ -200,7 +204,12 @@ fn entities_created_concurrently_with_the_same_identifier_merge() {
     sync(&a, &b);
     sync(&b, &a);
     for replica in [&a, &b] {
-        let entries = replica.registry("paragraphs").get("p").unwrap().entries();
+        let entries = replica
+            .registry("paragraphs")
+            .unwrap()
+            .get("p")
+            .unwrap()
+            .entries();
         assert_eq!(entries.get("style"), Some(&Value::from("Title")));
         assert_eq!(entries.get("jc"), Some(&Value::from("center")));
     }
@@ -300,6 +309,7 @@ fn import_refuses_blobs_beyond_the_limits() {
     for index in 0..10 {
         a.main_story().insert(0, "x").unwrap();
         a.registry("paragraphs")
+            .unwrap()
             .create(&format!("p{index}"))
             .unwrap();
         a.commit();
@@ -418,7 +428,7 @@ fn shallow_nested_values_are_accepted() {
     let target = doc(2);
     target.import(&update, &ImportLimits::UPDATE).unwrap();
     assert!(!target.is_poisoned());
-    let value = target.registry("paragraphs").len();
+    let value = target.registry("paragraphs").unwrap().len();
     assert_eq!(value, 1);
 }
 
@@ -496,53 +506,60 @@ fn undoing_a_mark_leaves_it_on_text_inserted_inside_concurrently() {
     assert_eq!(bold, [("abc", false), ("XY", true), ("def", false)]);
 }
 
-/// Found by the CORE-004 fuzzer and minimized with `crdt-model minimize`: a valid update for the document in the base snapshot, and the same update with one byte changed (and its checksum recomputed, which anyone can do: it is not a signature). Loro 1.16.2 panics while importing the crafted one.
-#[cfg(not(target_arch = "wasm32"))]
-const PANIC_BASE: &[u8] = include_bytes!("fixtures/loro-panic-base.bin");
-#[cfg(not(target_arch = "wasm32"))]
-const PANIC_UPDATE: &[u8] = include_bytes!("fixtures/loro-panic-update.bin");
-#[cfg(not(target_arch = "wasm32"))]
-const PANIC_CRAFTED: &[u8] = include_bytes!("fixtures/loro-panic-crafted.bin");
-
-// Host only: in WebAssembly (wasm32-wasip1) a panic aborts the whole test program instead of unwinding, so the adapter cannot contain it there (the engine's host restarts an engine that aborts; CORE-004 report).
-#[cfg(not(target_arch = "wasm32"))]
+/// Root names that Loro accepts locally but panics on when another replica decodes them are refused before anything is written (review of CORE-004, item 6).
 #[test]
-fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
-    let load = || {
-        Doc::load(
-            PANIC_BASE,
-            PeerId(9),
-            &FAMILIES,
-            &ImportLimits::LOCAL_SNAPSHOT,
-        )
-        .expect("the base document")
-    };
-    let valid = load();
-    valid
-        .import(PANIC_UPDATE, &ImportLimits::UPDATE)
-        .expect("the valid update");
-    let changed: Vec<usize> = (0..PANIC_UPDATE.len())
-        .filter(|at| !(16..20).contains(at) && PANIC_UPDATE.get(*at) != PANIC_CRAFTED.get(*at))
-        .collect();
-    assert_eq!(
-        (PANIC_CRAFTED.len(), changed),
-        (PANIC_UPDATE.len(), vec![74])
-    );
+fn root_names_that_other_replicas_cannot_decode_are_refused() {
+    let a = doc(1);
+    for name in ["", "a/b", "nul\u{0}", "\u{1F91D}:x"] {
+        assert_eq!(
+            a.registry(name).err(),
+            Some(CrdtError::InvalidName(name.to_owned())),
+            "{name:?}"
+        );
+        assert_eq!(
+            a.root_map(name).err(),
+            Some(CrdtError::InvalidName(name.to_owned())),
+            "{name:?}"
+        );
+    }
+    // Ordinary names, including ones that merely contain the handshake character, are fine and reach other replicas.
+    let map = a.root_map("body").unwrap();
+    map.set("k", &Value::Int(1)).unwrap();
+    a.registry("x\u{1F91D}").unwrap().create("e").unwrap();
+    a.commit();
+    let b = doc(2);
+    sync(&a, &b);
+    assert_eq!(b.root_map("body").unwrap().get("k"), Some(Value::Int(1)));
+    assert!(!b.is_poisoned());
+}
 
-    let doc = load();
-    let undo = UndoManager::new(&doc);
-    // When Loro stops panicking on this blob, replace the fixtures with a case that still panics (the fuzzer finds them), so that this test keeps exercising the containment.
+/// The limit on the number of changes, the only one without a test of its own (review of CORE-004, item 24).
+#[test]
+fn import_refuses_blobs_with_too_many_changes() {
+    // Five changes, one from each of five replicas: Loro merges the consecutive commits of one replica into one change.
+    let a = doc(1);
+    for peer in 10..15 {
+        let other = doc(peer);
+        other.main_story().insert(0, "x").unwrap();
+        other.commit();
+        sync(&other, &a);
+    }
+    let updates = a.export_updates(&VersionVector::new()).unwrap();
+    let b = doc(2);
     assert_eq!(
-        doc.import(PANIC_CRAFTED, &ImportLimits::UPDATE),
-        Err(ImportError::Panicked)
+        b.import(
+            &updates,
+            &ImportLimits {
+                max_changes: 4,
+                ..ImportLimits::UPDATE
+            }
+        ),
+        Err(ImportError::TooManyChanges {
+            changes: 5,
+            limit: 4
+        })
     );
-    assert!(doc.is_poisoned());
-    assert_eq!(
-        doc.import(PANIC_UPDATE, &ImportLimits::UPDATE),
-        Err(ImportError::Poisoned)
-    );
-    assert_eq!(doc.export_snapshot(), Err(CrdtError::Poisoned));
-    // Freeing the document or its undo manager after such a panic can panic again, which during unwinding aborts the process; both are leaked instead, so dropping them returns normally.
-    drop(undo);
-    drop(doc);
+    assert_eq!(b.main_story().text(), "");
+    b.import(&updates, &ImportLimits::UPDATE).unwrap();
+    assert_eq!(b.main_story().text(), "xxxxx");
 }

@@ -14,6 +14,14 @@
 //! - [`IdList`]: movable lists of identifiers, for table rows and the cells of a row.
 //! - [`UndoManager`]: undo and redo of this replica's own changes only.
 //!
+//! ## Untrusted input
+//!
+//! Every blob from another replica, from storage or from the network goes through [`Doc::import`], within [`ImportLimits`]. The limits and checks there narrow what a hostile blob can do; they cannot make Loro 1.16.2 safe (CORE-004 report, §7 and §8):
+//!
+//! - **Panics.** Loro panics on many crafted blobs. [`Doc::import`] contains such a panic where panics unwind (native builds) and poisons the document: from then on it and every handle to it refuse to work ([`CrdtError::Poisoned`], or an empty value where a method returns no error), because the library's internal locks are poisoned and any further call would panic outside the containment. Where panics abort (WebAssembly), the engine stops and its host must restart it and reload the last good state.
+//! - **Panic messages.** Before the panic is contained, Rust's panic hook runs, and Loro's panic messages can quote document text. The adapter does not install a hook (it is process-wide): **a host must install a panic hook that never prints or records panic messages before it imports untrusted blobs** (docs AGENTS.md §6). bayan-ffi does so for panics inside the engine (CORE-007).
+//! - **Aborts.** Some blobs make Loro abort the process (allocation failures, stack exhaustion while decoding deeply nested values), which nothing inside the process can catch. The engine's hosts must isolate the import of untrusted blobs and restart an engine that aborts.
+//!
 //! ## Layer
 //!
 //! bayan-crdt belongs to the **Model and formats** layer.
@@ -29,6 +37,7 @@
 mod doc;
 mod import;
 mod map;
+mod poison;
 mod story;
 mod undo;
 mod value;
@@ -56,9 +65,11 @@ pub enum CrdtError {
     InvalidValue(&'static str),
     /// A mark family name is empty, contains a colon, or is repeated.
     InvalidFamily(String),
+    /// A root container name that the CRDT library refuses when another replica decodes it (see [`Doc::registry`]).
+    InvalidName(String),
     /// An import was refused.
     Import(ImportError),
-    /// The document was poisoned by a hostile import (see [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`]).
+    /// The document was poisoned by a hostile import (see [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`]); it and every handle to it refuse to work.
     Poisoned,
     /// The CRDT library refused the operation, with its explanation.
     Library(String),
@@ -78,6 +89,7 @@ impl fmt::Display for CrdtError {
             }
             Self::InvalidValue(reason) => write!(formatter, "invalid value: {reason}"),
             Self::InvalidFamily(name) => write!(formatter, "invalid mark family name `{name}`"),
+            Self::InvalidName(name) => write!(formatter, "invalid root container name `{name}`"),
             Self::Import(error) => write!(formatter, "import refused: {error}"),
             Self::Poisoned => formatter.write_str("the document was poisoned by a hostile import"),
             Self::Library(reason) => write!(formatter, "the CRDT library refused: {reason}"),

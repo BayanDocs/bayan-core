@@ -11,7 +11,12 @@ use crate::value::{MAX_VALUE_DEPTH, loro_depth_exceeds};
 
 /// Resource limits for one import.
 ///
-/// The checks run in two stages. Before anything is decoded, the adapter reads the blob's header (format, number of changes, and the range of operations of each replica) and rejects blobs that are too big, in a format it does not accept, or that announce too much work. After a successful import, if [`ImportLimits::inspect_values`] is set, it walks every value that the imported changes contain (map entries, list items, mark values), without recursion, and rejects the import if one is nested deeper than [`MAX_VALUE_DEPTH`]: the CRDT library frees and copies such values recursively, so a deeply nested value can exhaust the stack later, for example when the document is dropped (see [`ImportError::ValueTooDeep`]).
+/// The checks run in two stages, and neither makes the CRDT library safe against a crafted blob (CORE-004 report, §8):
+///
+/// 1. **Before the import**, the adapter asks the library for the blob's metadata (its format, number of changes, and range of operations of each replica) and refuses blobs that are too big, in a format it does not accept, or that announce too much work. Obtaining that metadata is not a cheap header read: for an update, Loro 1.16.2 decodes every change of the blob into a throwaway document (`LoroDoc::decode_import_blob_meta`), and the import itself then decodes them a second time; for a snapshot it decodes the index of its history. A crafted blob can therefore make the library panic, run out of memory or exhaust the stack already here, and decoding a deeply nested value recurses once per level.
+/// 2. **After a successful import**, if [`ImportLimits::inspect_values`] is set, the adapter walks every value that the imported changes contain (map entries, list items, mark values), without recursion, and rejects the import if one is nested deeper than [`MAX_VALUE_DEPTH`]: the library frees and copies such values recursively, so a deeply nested value can exhaust the stack later, for example when the document is dropped (see [`ImportError::ValueTooDeep`]). This catches only values shallow enough for the library to decode in the first place.
+///
+/// The size limit bounds the work of an import, not the nesting depth of its values: each level costs a couple of bytes, so the 1 MiB of [`ImportLimits::UPDATE`] can carry hundreds of thousands of levels, far more than the library can decode on an 8 MiB stack. Nothing inside the process contains a stack overflow, so the engine's hosts must isolate the import of untrusted blobs (see the crate documentation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportLimits {
     /// The largest blob accepted, in bytes.
@@ -23,11 +28,13 @@ pub struct ImportLimits {
     /// Whether full snapshots are accepted, or only incremental updates.
     pub accept_snapshots: bool,
     /// Whether to inspect the values of the imported changes after the import.
+    ///
+    /// Only the changes that the import applied are inspected. A change that waits for a dependency this replica has not received yet ([`ImportReport::pending`]) is inspected only when a later import applies it; until then a deep value can sit in the document's queue of pending changes, from which dropping the document would free it recursively. The sync layer can close this gap by delivering changes in causal order, or by treating pending blobs from untrusted peers as suspect (CORE-004 report, §8).
     pub inspect_values: bool,
 }
 
 impl ImportLimits {
-    /// Limits for an incremental update received from another replica: at most 1 MiB, 100,000 changes and 2,000,000 operations, no snapshots, values inspected. (A document is shared initially as a series of updates; the size limit keeps the nesting depth that one blob can carry within what the engine's stack can afford, see the CORE-004 report.)
+    /// Limits for an incremental update received from another replica: at most 1 MiB, 100,000 changes and 2,000,000 operations, no snapshots, values inspected. (A document is shared initially as a series of updates.)
     pub const UPDATE: Self = Self {
         max_bytes: 1 << 20,
         max_changes: 100_000,
@@ -135,7 +142,7 @@ impl fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
-/// Checks a blob's header against the limits, before anything is decoded.
+/// Checks a blob against the limits before it is imported, from the metadata that the CRDT library reports for it, which it obtains by decoding the blob (every change of an update; see [`ImportLimits`]).
 pub(crate) fn check_header(
     bytes: &[u8],
     limits: &ImportLimits,
@@ -146,7 +153,7 @@ pub(crate) fn check_header(
             limit: limits.max_bytes,
         });
     }
-    // Reads the header and verifies the checksum; outdated formats (whose decoders are not fuzzed by us) are refused here.
+    // Verifies the checksum and decodes the blob's metadata; outdated formats (whose decoders are not fuzzed by us) are refused here.
     let meta = LoroDoc::decode_import_blob_meta(bytes, true)
         .map_err(|error| ImportError::Malformed(error.to_string()))?;
     if meta.mode.is_snapshot() && !limits.accept_snapshots {

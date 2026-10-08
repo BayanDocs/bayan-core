@@ -92,14 +92,14 @@ impl RawDocument {
             .into_iter()
             .filter_map(|(key, story)| Some((EntityId::parse(&key)?, story.runs())))
             .collect();
-        let tables = read_entities(&doc.registry(registry::TABLES), |map| RawTable {
+        let tables = read_entities(doc, registry::TABLES, |map| RawTable {
             props: map.entries(),
             rows: map
                 .get_id_list(registry::ROWS_KEY)
                 .map(|list| list.items())
                 .unwrap_or_default(),
         });
-        let rows = read_entities(&doc.registry(registry::ROWS), |map| RawRow {
+        let rows = read_entities(doc, registry::ROWS, |map| RawRow {
             props: map.entries(),
             cells: map
                 .get_id_list(registry::CELLS_KEY)
@@ -109,15 +109,18 @@ impl RawDocument {
         Self {
             main: doc.main_story().runs(),
             stories,
-            paragraphs: read_props(&doc.registry(registry::PARAGRAPHS)),
+            paragraphs: read_props(doc, registry::PARAGRAPHS),
             tables,
             rows,
-            cells: read_props(&doc.registry(registry::CELLS)),
-            objects: read_props(&doc.registry(registry::OBJECTS)),
-            fields: read_props(&doc.registry(registry::FIELDS)),
-            comments: read_props(&doc.registry(registry::COMMENTS)),
-            ranges: read_props(&doc.registry(registry::RANGES)),
-            body: doc.root_map(registry::BODY).entries(),
+            cells: read_props(doc, registry::CELLS),
+            objects: read_props(doc, registry::OBJECTS),
+            fields: read_props(doc, registry::FIELDS),
+            comments: read_props(doc, registry::COMMENTS),
+            ranges: read_props(doc, registry::RANGES),
+            body: doc
+                .root_map(registry::BODY)
+                .map(|body| body.entries())
+                .unwrap_or_default(),
         }
     }
 
@@ -149,17 +152,46 @@ impl RawDocument {
     }
 }
 
-fn read_props(registry: &Registry) -> BTreeMap<EntityId, Props> {
-    read_entities(registry, bayan_crdt::PropertyMap::entries)
+fn read_props(doc: &Doc, name: &str) -> BTreeMap<EntityId, Props> {
+    read_entities(doc, name, bayan_crdt::PropertyMap::entries)
 }
 
+/// Every entity of the registry `name`, read with `read`; none when the document refuses the registry (it is poisoned; the names of [`registry`] are all valid).
 fn read_entities<T>(
-    registry: &Registry,
+    doc: &Doc,
+    name: &str,
     read: impl Fn(&bayan_crdt::PropertyMap) -> T,
 ) -> BTreeMap<EntityId, T> {
-    registry
-        .entries()
+    doc.registry(name)
+        .map(|registry: Registry| registry.entries())
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|(key, map)| Some((EntityId::parse(&key)?, read(&map))))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use bayan_crdt::{Doc, PeerId};
+
+    use super::registry;
+
+    /// The adapter refuses root names that other replicas could not decode; the model's names are all accepted.
+    #[test]
+    fn every_registry_name_is_a_valid_root_name() {
+        let doc = Doc::new(PeerId(1), &crate::marks::FAMILIES).expect("a document");
+        for name in [
+            registry::PARAGRAPHS,
+            registry::TABLES,
+            registry::ROWS,
+            registry::CELLS,
+            registry::OBJECTS,
+            registry::FIELDS,
+            registry::COMMENTS,
+            registry::RANGES,
+        ] {
+            assert!(doc.registry(name).is_ok(), "{name}");
+        }
+        assert!(doc.root_map(registry::BODY).is_ok());
+    }
 }

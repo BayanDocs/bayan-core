@@ -38,7 +38,7 @@ fn entity(
 ) -> Result<PropertyMap, String> {
     let map = doc
         .registry(registry_name)
-        .create(&id.to_string())
+        .and_then(|registry| registry.create(&id.to_string()))
         .map_err(|error| error.to_string())?;
     for (key, value) in props {
         map.set(key, value).map_err(|error| error.to_string())?;
@@ -253,7 +253,7 @@ pub fn full(shape: &Shape) -> Result<(Doc, Contents), String> {
             doc.commit();
         }
     }
-    let body = doc.root_map(registry::BODY);
+    let body = doc.root_map(registry::BODY).map_err(err)?;
     for (key, value) in bayan_model::SECTION_DEFAULTS {
         body.set(key, &Value::Int(value)).map_err(err)?;
     }
@@ -332,7 +332,7 @@ pub fn subset(shape: &Shape) -> Result<(Doc, Contents), String> {
         }
         let paragraph_id = ids.hex_id();
         doc.registry(registry::PARAGRAPHS)
-            .create(&paragraph_id)
+            .and_then(|paragraphs| paragraphs.create(&paragraph_id))
             .and_then(|map| map.set("type", &Value::from("paragraph")))
             .map_err(err)?;
         main.insert_atom(

@@ -145,7 +145,7 @@ impl Document {
             PARAGRAPH_END,
             &encode_binding(AtomKind::ParagraphEnd, paragraph),
         )?;
-        let body = document.crdt.root_map(registry::BODY);
+        let body = document.crdt.root_map(registry::BODY)?;
         for (key, value) in SECTION_DEFAULTS {
             body.set(key, &Value::Int(value))?;
         }
@@ -273,9 +273,9 @@ impl Document {
     /// The identifiers of every stored table.
     #[must_use]
     pub fn tables(&self) -> Vec<EntityId> {
-        self.crdt
-            .registry(registry::TABLES)
-            .ids()
+        self.registry(registry::TABLES)
+            .map(|tables| tables.ids())
+            .unwrap_or_default()
             .iter()
             .filter_map(|key| EntityId::parse(key))
             .collect()
@@ -466,8 +466,7 @@ impl Document {
     ) -> Result<(), EditError> {
         self.check_attached()?;
         let map = self
-            .crdt
-            .registry(registry::PARAGRAPHS)
+            .registry(registry::PARAGRAPHS)?
             .get(&paragraph.to_string())
             .ok_or(EditError::NoSuchParagraph(paragraph))?;
         map.set(key, value)?;
@@ -499,8 +498,7 @@ impl Document {
             }
             let table = document.ids.next_id();
             let map = document
-                .crdt
-                .registry(registry::TABLES)
+                .registry(registry::TABLES)?
                 .create(&table.to_string())?;
             map.set("style", &Value::from("TableGrid"))?;
             let list = map.id_list(registry::ROWS_KEY)?;
@@ -675,8 +673,7 @@ impl Document {
             let comment = document.ids.next_id();
             let comment_story = document.new_story(text)?;
             let map = document
-                .crdt
-                .registry(registry::COMMENTS)
+                .registry(registry::COMMENTS)?
                 .create(&comment.to_string())?;
             map.set("author", &Value::from(author))?;
             map.set(registry::STORY, &Value::Str(comment_story.to_string()))?;
@@ -718,8 +715,7 @@ impl Document {
             }
             let field = document.ids.next_id();
             document
-                .crdt
-                .registry(registry::FIELDS)
+                .registry(registry::FIELDS)?
                 .create(&field.to_string())?
                 .set("instr", &Value::from(instruction))?;
             document.crdt.commit_without_undo();
@@ -750,8 +746,7 @@ impl Document {
             }
             let object = document.ids.next_id();
             let map = document
-                .crdt
-                .registry(registry::OBJECTS)
+                .registry(registry::OBJECTS)?
                 .create(&object.to_string())?;
             map.set("kind", &Value::from("picture"))?;
             map.set("cx", &Value::Int(914_400))?;
@@ -786,8 +781,7 @@ impl Document {
             }
             let bookmark = document.ids.next_id();
             let map = document
-                .crdt
-                .registry(registry::RANGES)
+                .registry(registry::RANGES)?
                 .create(&bookmark.to_string())?;
             map.set("kind", &Value::from("bookmark"))?;
             map.set("name", &Value::from(name))?;
@@ -1087,17 +1081,21 @@ impl Document {
         }
     }
 
+    /// The registry `name` of the CRDT (one of the [`registry`] names, which are all valid root names).
+    fn registry(&self, name: &str) -> Result<bayan_crdt::Registry, EditError> {
+        Ok(self.crdt.registry(name)?)
+    }
+
     fn paragraph_map(&self, paragraph: EntityId) -> Result<PropertyMap, EditError> {
         Ok(self
-            .crdt
-            .registry(registry::PARAGRAPHS)
+            .registry(registry::PARAGRAPHS)?
             .create(&paragraph.to_string())?)
     }
 
     fn paragraph_props(&self, paragraph: EntityId) -> Props {
-        self.crdt
-            .registry(registry::PARAGRAPHS)
-            .get(&paragraph.to_string())
+        self.registry(registry::PARAGRAPHS)
+            .ok()
+            .and_then(|paragraphs| paragraphs.get(&paragraph.to_string()))
             .map(|map| map.entries())
             .unwrap_or_default()
     }
@@ -1131,10 +1129,7 @@ impl Document {
     fn new_cell(&mut self) -> Result<EntityId, EditError> {
         let cell = self.ids.next_id();
         let story = self.new_story("")?;
-        let map = self
-            .crdt
-            .registry(registry::CELLS)
-            .create(&cell.to_string())?;
+        let map = self.registry(registry::CELLS)?.create(&cell.to_string())?;
         map.set("w", &Value::Int(2_000))?;
         map.set(registry::STORY, &Value::Str(story.to_string()))?;
         Ok(cell)
@@ -1143,8 +1138,7 @@ impl Document {
     fn new_row(&mut self, cells: usize) -> Result<EntityId, EditError> {
         let row = self.ids.next_id();
         let list = self
-            .crdt
-            .registry(registry::ROWS)
+            .registry(registry::ROWS)?
             .create(&row.to_string())?
             .id_list(registry::CELLS_KEY)?;
         for index in 0..cells {
@@ -1155,8 +1149,7 @@ impl Document {
     }
 
     fn rows_list(&self, table: EntityId) -> Result<bayan_crdt::IdList, EditError> {
-        self.crdt
-            .registry(registry::TABLES)
+        self.registry(registry::TABLES)?
             .get(&table.to_string())
             .and_then(|map| map.get_id_list(registry::ROWS_KEY))
             .ok_or(EditError::NoSuchTable(table))
@@ -1164,8 +1157,8 @@ impl Document {
 
     /// The cell list of a stored row, if the row exists and has one.
     fn cells_list(&self, row: EntityId) -> Option<bayan_crdt::IdList> {
-        self.crdt
-            .registry(registry::ROWS)
+        self.registry(registry::ROWS)
+            .ok()?
             .get(&row.to_string())
             .and_then(|map| map.get_id_list(registry::CELLS_KEY))
     }

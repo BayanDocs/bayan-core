@@ -6,6 +6,7 @@ use std::ops::Range;
 use loro::cursor::PosType;
 use loro::{LoroText, TextDelta};
 
+use crate::poison::Poison;
 use crate::{CrdtError, Value};
 
 /// The mark key that binds a placeholder character to the entity it stands for (document model §16: "placeholder character plus a mark `atom` = { kind, id } with no expansion"). The adapter always configures it not to expand, so text typed next to an atom never inherits its binding.
@@ -66,38 +67,48 @@ impl Run {
 
 /// One story: a sequence of atoms stored as rich text, with positions counted in Unicode scalar values (one per atom).
 ///
-/// Cloning a `Story` gives another handle to the same sequence.
+/// Cloning a `Story` gives another handle to the same sequence. Once the document is poisoned, every method refuses ([`CrdtError::Poisoned`]) or answers as for an empty story.
 #[derive(Debug, Clone)]
 pub struct Story {
     text: LoroText,
+    poison: Poison,
 }
 
 impl Story {
-    pub(crate) const fn new(text: LoroText) -> Self {
-        Self { text }
+    pub(crate) const fn new(text: LoroText, poison: Poison) -> Self {
+        Self { text, poison }
     }
 
-    /// The number of atoms.
+    /// The number of atoms (0 once the document is poisoned).
     #[must_use]
     pub fn len(&self) -> usize {
+        if self.poison.is_set() {
+            return 0;
+        }
         self.text.len_unicode()
     }
 
     /// Whether the story has no atoms at all (a well-formed story always has at least its final paragraph end).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.len() == 0
     }
 
-    /// The characters of the story, placeholders included.
+    /// The characters of the story, placeholders included (empty once the document is poisoned).
     #[must_use]
     pub fn text(&self) -> String {
+        if self.poison.is_set() {
+            return String::new();
+        }
         self.text.to_string()
     }
 
     /// The character at `pos`, if there is one.
     #[must_use]
     pub fn char_at(&self, pos: usize) -> Option<char> {
+        if self.poison.is_set() {
+            return None;
+        }
         self.text.char_at(pos).ok()
     }
 
@@ -107,8 +118,9 @@ impl Story {
     ///
     /// # Errors
     ///
-    /// [`CrdtError::OutOfRange`] if `pos > len()`, or [`CrdtError::Library`] if the CRDT library refuses.
+    /// [`CrdtError::Poisoned`], [`CrdtError::OutOfRange`] if `pos > len()`, or [`CrdtError::Library`] if the CRDT library refuses.
     pub fn insert(&self, pos: usize, text: &str) -> Result<(), CrdtError> {
+        self.poison.check()?;
         self.check_position(pos)?;
         if text.is_empty() {
             return Ok(());
@@ -122,6 +134,7 @@ impl Story {
     ///
     /// [`CrdtError::OutOfRange`] if the range is reversed or reaches past the end, or [`CrdtError::Library`].
     pub fn delete(&self, range: Range<usize>) -> Result<(), CrdtError> {
+        self.poison.check()?;
         self.check_range(&range)?;
         if range.is_empty() {
             return Ok(());
@@ -137,6 +150,7 @@ impl Story {
     ///
     /// [`CrdtError::OutOfRange`], [`CrdtError::InvalidValue`] for a value that cannot be stored, or [`CrdtError::Library`].
     pub fn mark(&self, range: Range<usize>, key: &str, value: &Value) -> Result<(), CrdtError> {
+        self.poison.check()?;
         self.check_range(&range)?;
         if range.is_empty() {
             return Ok(());
@@ -153,6 +167,7 @@ impl Story {
     ///
     /// [`CrdtError::OutOfRange`] or [`CrdtError::Library`].
     pub fn unmark(&self, range: Range<usize>, key: &str) -> Result<(), CrdtError> {
+        self.poison.check()?;
         self.check_range(&range)?;
         if range.is_empty() {
             return Ok(());
@@ -171,6 +186,7 @@ impl Story {
         placeholder: char,
         binding: &str,
     ) -> Result<(), CrdtError> {
+        self.poison.check()?;
         self.check_position(pos)?;
         let mut buffer = [0; 4];
         self.text
@@ -181,9 +197,12 @@ impl Story {
             .map_err(CrdtError::library)
     }
 
-    /// The whole story as runs, in order; adjacent runs always differ in their marks.
+    /// The whole story as runs, in order; adjacent runs always differ in their marks (none once the document is poisoned).
     #[must_use]
     pub fn runs(&self) -> Vec<Run> {
+        if self.poison.is_set() {
+            return Vec::new();
+        }
         runs_from_delta(self.text.to_delta())
     }
 
@@ -193,6 +212,7 @@ impl Story {
     ///
     /// [`CrdtError::OutOfRange`] or [`CrdtError::Library`].
     pub fn runs_in(&self, range: Range<usize>) -> Result<Vec<Run>, CrdtError> {
+        self.poison.check()?;
         self.check_range(&range)?;
         if range.is_empty() {
             return Ok(Vec::new());
