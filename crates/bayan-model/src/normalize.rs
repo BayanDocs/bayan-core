@@ -11,15 +11,16 @@
 //! 5. **N1.** A story that does not end with a paragraph end gets one.
 //! 6. **N4.** A block-level atom that is not at a block position splits the paragraph: a paragraph end with the containing paragraph's properties is inserted before it.
 //!
-//! Then **N8** (proposed): missing final-section properties get defaults, so I7 holds.
+//! Then, once every story is normalized: **N5 for marks**, a comment highlight (`cmt:<id>`) whose comment is not in the view is removed, and text that differed only by it is merged; and **N8** (proposed), missing final-section properties get defaults, so I7 holds.
 //!
-//! Structure that normalization adds has identifiers derived deterministically from its context, so that every replica derives the same identifiers, and writing it into the CRDT later ("materialization", see [`Report::virtual_paragraph_ends`]) leaves the view unchanged.
+//! Structure that normalization adds has identifiers derived deterministically from its context, so that every replica derives the same identifiers, and writing it into the CRDT later ("materialization", see [`Report::virtual_paragraph_ends`]) leaves the view unchanged. A derived paragraph identifier never takes one that a stored atom binds, wherever that atom stands, so that a derived paragraph end never takes over a stored one.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bayan_crdt::{ATOM_KEY, Run, Value};
 
 use crate::atoms::{decode_binding, is_text_character};
+use crate::marks;
 use crate::raw::{RawDocument, registry};
 use crate::view::{Cell, Comment, Item, Row, Table, View};
 use crate::{AtomKind, EntityId, Props};
@@ -79,7 +80,7 @@ pub struct Report {
     pub n3: usize,
     /// N4: paragraphs split before a block-level atom.
     pub n4: usize,
-    /// N5: atoms and list items whose entity is missing, dropped.
+    /// N5: atoms and list items whose entity is missing, and comment highlights whose comment is not in the view, dropped.
     pub n5: usize,
     /// N6: rows without cells and tables without rows, omitted.
     pub n6: usize,
@@ -107,12 +108,14 @@ pub fn normalize(raw: &RawDocument) -> (View, Report) {
         seen_cells: BTreeSet::new(),
         seen_stories: BTreeSet::from([EntityId::MAIN_STORY]),
         comment_stories: VecDeque::new(),
+        stored_paragraphs: None,
     };
     normalizer.story(EntityId::MAIN_STORY, Some(&raw.main), 0);
     while let Some(story) = normalizer.comment_stories.pop_front() {
         let runs = raw.stories.get(&story).map(Vec::as_slice);
         normalizer.story(story, runs, 0);
     }
+    normalizer.comment_marks();
     normalizer.section();
     (normalizer.view, normalizer.report)
 }
@@ -157,6 +160,8 @@ struct Normalizer<'a> {
     seen_stories: BTreeSet<EntityId>,
     /// Comment stories to normalize after the main story, in the order of their references.
     comment_stories: VecDeque<EntityId>,
+    /// Every paragraph identifier that a stored atom binds, in any story; collected the first time an identifier is derived.
+    stored_paragraphs: Option<BTreeSet<EntityId>>,
 }
 
 impl<'a> Normalizer<'a> {
@@ -506,6 +511,15 @@ impl<'a> Normalizer<'a> {
 
     /// Step 6: N4, block-level atoms at block positions.
     fn block_positions(&mut self, story: EntityId, pieces: Vec<Piece>) -> Vec<Piece> {
+        // The paragraph each piece belongs to: the one whose end is the first at or after it (N1 guarantees there is one). Found in one pass from the end, so that many tables in one paragraph cost linear time, not quadratic.
+        let mut containing_paragraph: Vec<Option<EntityId>> = vec![None; pieces.len()];
+        let mut following = None;
+        for (index, piece) in pieces.iter().enumerate().rev() {
+            if let Some((AtomKind::ParagraphEnd, Some(id))) = piece.atom() {
+                following = Some(id);
+            }
+            containing_paragraph[index] = following;
+        }
         let mut result: Vec<Piece> = Vec::with_capacity(pieces.len());
         for (index, piece) in pieces.iter().enumerate() {
             if let Piece::Atom {
@@ -522,13 +536,7 @@ impl<'a> Normalizer<'a> {
                         .is_some_and(|(kind, _)| kind == AtomKind::ParagraphEnd || kind.is_block())
                 });
                 if !at_block_position {
-                    // The containing paragraph is the one whose end follows; N1 guarantees there is one.
-                    let containing = pieces[index..]
-                        .iter()
-                        .find_map(|piece| match piece.atom() {
-                            Some((AtomKind::ParagraphEnd, Some(id))) => Some(id),
-                            _ => None,
-                        })
+                    let containing = containing_paragraph[index]
                         .and_then(|id| {
                             self.view
                                 .paragraphs
@@ -564,14 +572,23 @@ impl<'a> Normalizer<'a> {
         result
     }
 
-    /// A derived paragraph identifier that no atom has used yet in document order (trying again with a counter if needed), reserved at once.
+    /// A derived paragraph identifier that no stored atom binds, in any story, and that no paragraph end of the view has taken yet (trying again with a counter if needed), reserved at once.
+    ///
+    /// Avoiding only the paragraph ends met so far is not enough: a cell story is normalized in the middle of the story that contains its table, so a stored paragraph end later in that story would otherwise lose its identifier to a derived one and be dropped as a repeat (N7).
     fn virtual_paragraph_id(&mut self, parts: &[u64]) -> EntityId {
+        let raw = self.raw;
+        let stored = self
+            .stored_paragraphs
+            .get_or_insert_with(|| stored_paragraph_ends(raw));
         let mut attempt = 0;
         loop {
             let mut all = parts.to_vec();
             all.push(attempt);
             let id = EntityId::derive(&all);
-            if id != EntityId::MAIN_STORY && self.seen_atoms.insert((AtomKind::ParagraphEnd, id)) {
+            if id != EntityId::MAIN_STORY
+                && !stored.contains(&id)
+                && self.seen_atoms.insert((AtomKind::ParagraphEnd, id))
+            {
                 return id;
             }
             attempt += 1;
@@ -633,6 +650,32 @@ impl<'a> Normalizer<'a> {
         }
     }
 
+    /// N5 for marks: removes every comment highlight whose comment is not in the view (its reference was deleted, or never arrived), and merges text that differed only by it.
+    fn comment_marks(&mut self) {
+        let View {
+            stories, comments, ..
+        } = &mut self.view;
+        let dangling = |key: &str| {
+            key.split(':').next() == Some(marks::COMMENT)
+                && !marks::comment_of_key(key).is_some_and(|id| comments.contains_key(&id))
+        };
+        for items in stories.values_mut() {
+            let mut changed = false;
+            for item in items.iter_mut() {
+                let (Item::Text { marks, .. } | Item::Atom { marks, .. }) = item;
+                let before = marks.len();
+                marks.retain(|key, _| !dangling(key));
+                if marks.len() != before {
+                    self.report.n5 += before - marks.len();
+                    changed = true;
+                }
+            }
+            if changed {
+                *items = merge_text(std::mem::take(items));
+            }
+        }
+    }
+
     /// N8: the final section's properties, with defaults for those I7 requires.
     fn section(&mut self) {
         let mut section = self.raw.body.clone();
@@ -659,6 +702,43 @@ fn clean_marks(marks: &Props) -> Props {
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// Every paragraph identifier that a placeholder of a stored story binds.
+fn stored_paragraph_ends(raw: &RawDocument) -> BTreeSet<EntityId> {
+    std::iter::once(&raw.main)
+        .chain(raw.stories.values())
+        .flatten()
+        .filter(|run| run.text.contains(AtomKind::ParagraphEnd.placeholder()))
+        .filter_map(|run| {
+            run.marks
+                .get(ATOM_KEY)
+                .and_then(Value::as_str)
+                .and_then(decode_binding)
+        })
+        .filter_map(|(kind, id)| (kind == AtomKind::ParagraphEnd).then_some(id))
+        .collect()
+}
+
+/// Merges adjacent text items with equal marks.
+fn merge_text(items: Vec<Item>) -> Vec<Item> {
+    let mut merged: Vec<Item> = Vec::with_capacity(items.len());
+    for item in items {
+        if let (
+            Some(Item::Text {
+                text: previous,
+                marks: previous_marks,
+            }),
+            Item::Text { text, marks },
+        ) = (merged.last_mut(), &item)
+            && previous_marks == marks
+        {
+            previous.push_str(text);
+            continue;
+        }
+        merged.push(item);
+    }
+    merged
 }
 
 /// Ends the current chunk of text, merging it into the previous text piece when the marks are equal.

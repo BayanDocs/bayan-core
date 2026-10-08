@@ -273,7 +273,8 @@ fn replicas_with_a_virtual_split(
     a.split_paragraph(MAIN, 5).expect("splitting");
     let mut b = replica_of(&a, peer_b);
     let table = a.insert_table(MAIN, 6, 1, 1).expect("a table");
-    b.insert_text(MAIN, 6, "typed").expect("typing concurrently");
+    b.insert_text(MAIN, 6, "typed")
+        .expect("typing concurrently");
     sync_both(&mut a, &mut b);
     (bayan_model::normalize(&a.raw()).1.n4 > 0).then_some((a, b, table))
 }
@@ -617,4 +618,30 @@ fn moving_a_range_onto_itself_writes_nothing() {
     a.move_range(MAIN, 1..3, MAIN, 3).unwrap();
     assert_eq!(a.crdt().stats().changes, changes);
     assert_eq!(text(&a), "abcdef\n");
+}
+
+/// Deleting only a comment's reference removes the comment from the view, and its highlight with it (review of CORE-004, item 13).
+#[test]
+fn a_comment_highlight_leaves_the_view_with_its_comment() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abcde").unwrap();
+    let comment = a.add_comment(MAIN, 1..4, "Reviewer", "note").unwrap();
+    let key = marks::comment_key(comment);
+    assert!(crate::common::marks_at(&valid_view(&a), MAIN, 1).contains_key(&key));
+    // "a" "bcd" ⟦reference⟧ "e" ¶: delete the reference alone.
+    a.delete(MAIN, 4..5).unwrap();
+    let view = valid_view(&a);
+    assert!(view.comments.is_empty());
+    assert_eq!(
+        view.main()[0],
+        Item::Text {
+            text: "abcde".to_owned(),
+            marks: Default::default()
+        }
+    );
+    // Undo brings the reference, the comment and its highlight back.
+    assert!(a.undo().unwrap());
+    let view = valid_view(&a);
+    assert!(view.comments.contains_key(&comment));
+    assert!(crate::common::marks_at(&view, MAIN, 1).contains_key(&key));
 }

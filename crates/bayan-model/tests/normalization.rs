@@ -614,3 +614,180 @@ fn a_small_document_normalizes_as_expected() {
     let as_view: &View = &view;
     assert_eq!(as_view.fields.len(), 1);
 }
+
+fn atom(kind: AtomKind, id: EntityId) -> Run {
+    Run {
+        text: kind.placeholder().to_string(),
+        marks: BTreeMap::from([(ATOM_KEY.to_owned(), Value::Str(encode_binding(kind, id)))]),
+    }
+}
+
+fn text(text: &str) -> Run {
+    Run {
+        text: text.to_owned(),
+        marks: BTreeMap::new(),
+    }
+}
+
+/// Adds table `table` with one row and one cell whose story is `story` holding `runs`.
+fn add_table(raw: &mut RawDocument, table: EntityId, story: EntityId, runs: Vec<Run>) {
+    let row = EntityId(table.0 + 1);
+    let cell = EntityId(table.0 + 2);
+    raw.tables.insert(
+        table,
+        RawTable {
+            props: BTreeMap::new(),
+            rows: vec![Value::Str(row.to_string())],
+        },
+    );
+    raw.rows.insert(
+        row,
+        RawRow {
+            props: BTreeMap::new(),
+            cells: vec![Value::Str(cell.to_string())],
+        },
+    );
+    raw.cells.insert(
+        cell,
+        BTreeMap::from([(registry::STORY.to_owned(), Value::Str(story.to_string()))]),
+    );
+    raw.stories.insert(story, runs);
+}
+
+/// The identifier N4 derives for the paragraph end before table `table`, found by normalizing a document where that table stands mid-paragraph in the main story.
+fn n4_identifier(table: EntityId) -> EntityId {
+    let mut raw = RawDocument::default();
+    let paragraph = EntityId(0xA);
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    raw.main = vec![
+        text("x"),
+        atom(AtomKind::TableBlock, table),
+        atom(AtomKind::ParagraphEnd, paragraph),
+    ];
+    add_table(&mut raw, table, EntityId(0x5000), vec![]);
+    let (_, report) = normalize(&raw);
+    let split: Vec<EntityId> = report
+        .virtual_paragraph_ends
+        .iter()
+        .filter(|end| end.rule == bayan_model::Rule::N4)
+        .map(|end| end.id)
+        .collect();
+    assert_eq!(split.len(), 1);
+    split[0]
+}
+
+/// A stored paragraph end whose identifier is the one N4 would derive for a table (because an earlier materialization stored it) keeps its identifier when that table stands mid-paragraph again inside a cell that is normalized before the stored end is reached (review of CORE-004, item 14).
+#[test]
+fn a_derived_paragraph_end_never_takes_over_a_stored_one() {
+    let outer = EntityId(0x1000);
+    let inner = EntityId(0x2000);
+    let derived = n4_identifier(inner);
+    let [a, b, c] = [EntityId(0xA1), EntityId(0xB1), EntityId(0xC1)];
+    let mut raw = RawDocument::default();
+    for paragraph in [a, b, c] {
+        raw.paragraphs.insert(paragraph, BTreeMap::new());
+    }
+    raw.paragraphs.insert(
+        derived,
+        BTreeMap::from([("style".to_owned(), Value::from("Heading1"))]),
+    );
+    // Main story: [outer] ¶a "x" ¶derived "z" ¶b
+    raw.main = vec![
+        atom(AtomKind::TableBlock, outer),
+        atom(AtomKind::ParagraphEnd, a),
+        text("x"),
+        atom(AtomKind::ParagraphEnd, derived),
+        text("z"),
+        atom(AtomKind::ParagraphEnd, b),
+    ];
+    // The outer table's cell: "y" [inner] ¶c, with the inner table mid-paragraph.
+    add_table(
+        &mut raw,
+        outer,
+        EntityId(0x6000),
+        vec![
+            text("y"),
+            atom(AtomKind::TableBlock, inner),
+            atom(AtomKind::ParagraphEnd, c),
+        ],
+    );
+    add_table(&mut raw, inner, EntityId(0x7000), vec![]);
+    let (view, report) = normalize(&raw);
+    assert!(
+        check_invariants(&view).is_empty(),
+        "{:?}",
+        check_invariants(&view)
+    );
+    assert_eq!(report.n7, 0);
+    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "\nx\nz\n");
+    assert_eq!(
+        view.paragraphs[&derived].get("style"),
+        Some(&Value::from("Heading1"))
+    );
+    // The cell's split got an identifier of its own, with the properties of the paragraph it splits.
+    let cell = &view.stories[&EntityId(0x6000)];
+    let Item::Atom {
+        id: Some(split), ..
+    } = &cell[1]
+    else {
+        panic!("the cell does not start with text and a paragraph end: {cell:?}");
+    };
+    assert_ne!(*split, derived);
+    assert_eq!(view.paragraphs[split], BTreeMap::new());
+}
+
+/// Many tables in the middle of one paragraph: N4 splits before each in linear time (with the earlier quadratic search, 40,000 tables took about 4 s in a release build), and the view is valid (review of CORE-004, item 15).
+#[test]
+fn many_tables_in_one_paragraph_are_split_in_linear_time() {
+    let tables: u128 = 20_000;
+    let mut raw = RawDocument::default();
+    let paragraph = EntityId(0xA);
+    raw.paragraphs.insert(
+        paragraph,
+        BTreeMap::from([("style".to_owned(), Value::from("Quote"))]),
+    );
+    for index in 0..tables {
+        let table = EntityId(0x1_0000 + index * 4);
+        raw.main.push(text("x"));
+        raw.main.push(atom(AtomKind::TableBlock, table));
+        add_table(&mut raw, table, EntityId(0x1_0000 + index * 4 + 3), vec![]);
+    }
+    raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
+    let (view, report) = normalize(&raw);
+    assert_eq!(report.n4, 20_000);
+    assert!(check_invariants(&view).is_empty());
+    // Every split carries the properties of the paragraph it splits.
+    assert!(
+        report
+            .virtual_paragraph_ends
+            .iter()
+            .filter(|end| end.rule == bayan_model::Rule::N4)
+            .all(|end| end.props.get("style") == Some(&Value::from("Quote")))
+    );
+}
+
+/// Deeply nested field codes cost linear time in the plain text export too (the earlier version looked at every open field for every item).
+#[test]
+fn deeply_nested_field_codes_export_in_linear_time() {
+    let depth: u128 = 20_000;
+    let paragraph = EntityId(0xA);
+    let mut raw = RawDocument::default();
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    for level in 0..depth {
+        let field = EntityId(0x1_0000 + level);
+        raw.fields.insert(field, BTreeMap::new());
+        raw.main.push(atom(AtomKind::FieldBegin, field));
+        raw.main.push(text("c"));
+    }
+    raw.main.push(text("hidden"));
+    for level in (0..depth).rev() {
+        let field = EntityId(0x1_0000 + level);
+        raw.main.push(atom(AtomKind::FieldSeparator, field));
+        raw.main.push(text("r"));
+        raw.main.push(atom(AtomKind::FieldEnd, field));
+    }
+    raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
+    let (view, _) = normalize(&raw);
+    // Only the outermost field's result is outside every code.
+    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "r\n");
+}

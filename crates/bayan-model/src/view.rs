@@ -137,36 +137,44 @@ impl View {
     #[must_use]
     pub fn plain_text(&self, story: EntityId) -> String {
         let mut text = String::new();
-        // For every open field, whether its code is still being read (the code is hidden; the result is shown).
+        // For every open field, whether its code is still being read (the code is hidden, also a nested field's whole content; the result is shown), and how many open fields are in their code, so that each item costs constant time however deeply fields nest.
         let mut fields: Vec<bool> = Vec::new();
-        let in_code = |fields: &[bool]| fields.iter().any(|in_code| *in_code);
+        let mut in_code = 0_usize;
         for item in self.stories.get(&story).map_or(&[][..], Vec::as_slice) {
             match item {
                 Item::Text { text: chars, .. } => {
-                    if !in_code(&fields) {
+                    if in_code == 0 {
                         text.push_str(chars);
                     }
                 }
                 Item::Atom { kind, .. } => match kind {
                     AtomKind::ParagraphEnd => text.push('\n'),
                     AtomKind::Tab => {
-                        if !in_code(&fields) {
+                        if in_code == 0 {
                             text.push('\t');
                         }
                     }
                     AtomKind::ObjectAnchor => {
-                        if !in_code(&fields) {
+                        if in_code == 0 {
                             text.push('\u{FFFC}');
                         }
                     }
-                    AtomKind::FieldBegin => fields.push(true),
+                    AtomKind::FieldBegin => {
+                        fields.push(true);
+                        in_code += 1;
+                    }
                     AtomKind::FieldSeparator => {
-                        if let Some(last) = fields.last_mut() {
+                        if let Some(last) = fields.last_mut()
+                            && *last
+                        {
                             *last = false;
+                            in_code -= 1;
                         }
                     }
                     AtomKind::FieldEnd => {
-                        fields.pop();
+                        if fields.pop() == Some(true) {
+                            in_code -= 1;
+                        }
                     }
                     AtomKind::RangeStart
                     | AtomKind::RangeEnd
