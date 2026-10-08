@@ -1,26 +1,30 @@
+# crdt-model bench --mode subset --snapshot <data>/subset-500.bin
+# native x86_64-unknown-linux-gnu, release build, Loro 1.16.2 with the F1 fix of loro-f1-fix.patch through [patch.crates-io], in a scratch copy of the workspace with its own target folder
+# commit 50dbc7a; Rust 1.99.0; Node.js v24.21.0; run 2026-10-08T15:35:48Z; load average before: 1.08 1.78 1.56
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
 metric snapshot_bytes 5009149 bytes
-metric load_ms 17.459 ms
-metric read_ms 217.511 ms
-metric load_and_read_ms 234.970 ms
+metric load_ms 20.839 ms
+metric read_ms 206.120 ms
+metric load_and_read_ms 226.959 ms
 metric text_fnv1a64 2d2e9e2dc8af0e5b hash
 metric marks_read 5643 count
 metric blocks_read 15000 count
 metric paragraph_entities_read 15000 count
-metric memory_after_load_rss_delta 77049856 bytes
-metric local_edits_ms 41.833 ms
+metric memory_after_load_rss_delta 77025280 bytes
+metric local_edits_ms 38.025 ms
 metric update_bytes_per_edit_avg 104 bytes
 metric update_bytes 17559 bytes
-metric apply_update_ms 41.649 ms
+metric apply_update_ms 36.354 ms
 metric replicas_equal true bool
-metric read_after_update_ms 138.309 ms
+metric read_after_update_ms 113.521 ms
 metric final_text_fnv1a64 3838c90c4f76f74a hash
 metric final_sequence_len 1522849 count
 metric undo_steps 20 count
-metric undo_ms_avg 176.096 ms
-metric apply_later_update_ms_avg 4.401 ms
-metric concurrent_keystroke_first_ms 0.111 ms
-metric concurrent_keystroke_ms_avg 0.060 ms
+metric undo_ms_avg 146.443 ms
+metric apply_later_update_ms_avg 4.037 ms
+metric concurrent_keystroke_first_ms 0.105 ms
+metric concurrent_keystroke_ms_avg 0.055 ms
 metric concurrent_update_bytes 11895 bytes
-metric concurrent_apply_update_ms 5.950 ms
+metric concurrent_apply_update_ms 6.080 ms
 metric concurrent_replicas_equal true bool
-metric peak_rss 227987456 bytes
+metric peak_rss 227721216 bytes

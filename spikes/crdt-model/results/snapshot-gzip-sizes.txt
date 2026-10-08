@@ -1,0 +1,6 @@
+# Compressed sizes of the generated snapshots (report §4, §5.3): gzip -9 -c <file> | wc -c
+# commit 50dbc7a; gzip 1.12; run 2026-10-08T15:48:31Z; the files are those of generate-full.txt and generate-subset.txt
+full-500.bin                9190558 bytes, gzip -9:    6071358 bytes
+full-500.bin.shallow        5407520 bytes, gzip -9:    3601692 bytes
+subset-500.bin              5009149 bytes, gzip -9:    3381027 bytes
+subset-500.bin.shallow      2699660 bytes, gzip -9:    1847297 bytes

@@ -1,11 +1,11 @@
-# CORE-004 Automerge benchmark, native (x86_64-unknown-linux-gnu, release profile, Rust 1.99.0, automerge 0.12.0)
-# date: 2026-10-07T03:09:36Z
-# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v77
-# binary: target/release/crdt-model-automerge (c5c75458e11cf201...)
+# CORE-004 Automerge benchmark, native (x86_64-unknown-linux-gnu, release build, Rust 1.99.0, automerge 0.12.0)
+# commit 50dbc7a; run 2026-10-08T15:39:23Z
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+# binary: target/release/crdt-model-automerge (sha256 cb1cce97e5711bcf...)
 
 ## crdt-model-automerge generate --out <data>/am-10.bin --small
-metric build_ms 48.471 ms
-metric save_ms 1.740 ms
+metric build_ms 47.476 ms
+metric save_ms 1.974 ms
 metric snapshot_bytes 21951 bytes
 metric sequence_len 31019 count
 metric paragraphs 300 count
@@ -16,36 +16,38 @@ metric text_fnv1a64 2fe368cd5c2c29b5 hash
 metric generator_fnv1a64 2fe368cd5c2c29b5 hash
 
 ## crdt-model-automerge bench --snapshot <data>/am-10.bin  (sanity)
-metric load_ms 25.068 ms
-metric read_ms 2.649 ms
+metric load_ms 25.695 ms
+metric read_ms 2.855 ms
 metric text_fnv1a64 2fe368cd5c2c29b5 hash
-metric memory_after_load_rss_delta 10424320 bytes
-metric memory_load_only_rss_delta 10424320 bytes
+metric memory_after_load_rss_delta 10338304 bytes
+metric memory_load_only_rss_delta 10338304 bytes
 metric blocks_read 300 count
 metric marks_read 113 count
-metric read_text_ms 0.739 ms
-metric local_edits_ms 41.105 ms
+metric read_text_ms 0.763 ms
+metric local_edits_ms 43.821 ms
 metric edits 1000 count
 metric update_bytes_per_edit_avg 134 bytes
 metric update_bytes 134250 bytes
 metric update_changes 1000 count
 metric update_bundle_bytes 13806 bytes
-metric apply_update_ms 38.295 ms
+metric apply_update_ms 38.737 ms
 metric replicas_equal true bool
 metric replicas_content_equal true bool
 metric heads_equal true bool
-metric read_after_update_ms 4.880 ms
+metric read_after_update_ms 5.165 ms
 metric final_text_fnv1a64 94cbfa01531b2c76 hash
 metric final_sequence_len 32581 count
 metric final_blocks 337 count
 metric final_marks 191 count
-metric peak_rss 15523840 bytes
-metric apply_first_change_ms 7.717 ms
+metric peak_rss 15544320 bytes
+metric apply_later_update_ms_avg 42.652 ms
+metric apply_keystroke_ms_avg 11.318 ms
+metric apply_first_change_ms 7.846 ms
 metric first_change_bytes 134 bytes
 
 ## crdt-model-automerge generate --out <data>/am-500.bin
-metric build_ms 2772.747 ms
-metric save_ms 129.361 ms
+metric build_ms 2826.375 ms
+metric save_ms 131.024 ms
 metric snapshot_bytes 931704 bytes
 metric sequence_len 1521287 count
 metric paragraphs 15000 count
@@ -56,86 +58,92 @@ metric text_fnv1a64 2d2e9e2dc8af0e5b hash
 metric generator_fnv1a64 2d2e9e2dc8af0e5b hash
 # snapshot sha256: 21fe9cb6df914c6ca2eba0d1626d147c0bb41a2ce2c379f32f3315528e9e7ed0
 
-## run 1: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.16 1.15 0.75)
-metric load_ms 1329.910 ms
-metric read_ms 153.159 ms
+## run 1: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.33 1.50 1.49)
+metric load_ms 1334.207 ms
+metric read_ms 144.628 ms
 metric text_fnv1a64 2d2e9e2dc8af0e5b hash
-metric memory_after_load_rss_delta 400171008 bytes
-metric memory_load_only_rss_delta 400171008 bytes
+metric memory_after_load_rss_delta 400158720 bytes
+metric memory_load_only_rss_delta 400158720 bytes
 metric blocks_read 15000 count
 metric marks_read 5643 count
-metric read_text_ms 44.010 ms
-metric local_edits_ms 56.926 ms
+metric read_text_ms 38.035 ms
+metric local_edits_ms 59.544 ms
 metric edits 1000 count
 metric update_bytes_per_edit_avg 135 bytes
 metric update_bytes 135241 bytes
 metric update_changes 1000 count
 metric update_bundle_bytes 15024 bytes
-metric apply_update_ms 2420.017 ms
+metric apply_update_ms 868.551 ms
 metric replicas_equal true bool
 metric replicas_content_equal true bool
 metric heads_equal true bool
-metric read_after_update_ms 223.827 ms
+metric read_after_update_ms 216.072 ms
 metric final_text_fnv1a64 efd47631a795be2e hash
 metric final_sequence_len 1522849 count
 metric final_blocks 15038 count
 metric final_marks 5718 count
-metric peak_rss 1063223296 bytes
-metric apply_first_change_ms 360.077 ms
+metric peak_rss 1063251968 bytes
+metric apply_later_update_ms_avg 419.340 ms
+metric apply_keystroke_ms_avg 375.477 ms
+metric apply_first_change_ms 367.078 ms
 metric first_change_bytes 132 bytes
 
-## run 2: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.14 1.15 0.75)
-metric load_ms 1286.077 ms
-metric read_ms 138.975 ms
+## run 2: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.28 1.48 1.48)
+metric load_ms 1336.737 ms
+metric read_ms 144.247 ms
 metric text_fnv1a64 2d2e9e2dc8af0e5b hash
-metric memory_after_load_rss_delta 400171008 bytes
-metric memory_load_only_rss_delta 400171008 bytes
+metric memory_after_load_rss_delta 400121856 bytes
+metric memory_load_only_rss_delta 400121856 bytes
 metric blocks_read 15000 count
 metric marks_read 5643 count
-metric read_text_ms 38.137 ms
-metric local_edits_ms 58.892 ms
+metric read_text_ms 40.377 ms
+metric local_edits_ms 54.953 ms
 metric edits 1000 count
 metric update_bytes_per_edit_avg 135 bytes
 metric update_bytes 135241 bytes
 metric update_changes 1000 count
 metric update_bundle_bytes 15024 bytes
-metric apply_update_ms 1936.039 ms
+metric apply_update_ms 789.473 ms
 metric replicas_equal true bool
 metric replicas_content_equal true bool
 metric heads_equal true bool
-metric read_after_update_ms 221.664 ms
+metric read_after_update_ms 209.647 ms
 metric final_text_fnv1a64 efd47631a795be2e hash
 metric final_sequence_len 1522849 count
 metric final_blocks 15038 count
 metric final_marks 5718 count
-metric peak_rss 1063182336 bytes
-metric apply_first_change_ms 368.507 ms
+metric peak_rss 1062404096 bytes
+metric apply_later_update_ms_avg 414.755 ms
+metric apply_keystroke_ms_avg 368.995 ms
+metric apply_first_change_ms 367.076 ms
 metric first_change_bytes 132 bytes
 
-## run 3: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.12 1.14 0.75)
-metric load_ms 1351.301 ms
-metric read_ms 143.264 ms
+## run 3: crdt-model-automerge bench --snapshot <data>/am-500.bin   (load average before: 1.23 1.47 1.48)
+metric load_ms 1305.828 ms
+metric read_ms 139.566 ms
 metric text_fnv1a64 2d2e9e2dc8af0e5b hash
-metric memory_after_load_rss_delta 400224256 bytes
-metric memory_load_only_rss_delta 400224256 bytes
+metric memory_after_load_rss_delta 400064512 bytes
+metric memory_load_only_rss_delta 400011264 bytes
 metric blocks_read 15000 count
 metric marks_read 5643 count
-metric read_text_ms 40.181 ms
-metric local_edits_ms 59.422 ms
+metric read_text_ms 39.375 ms
+metric local_edits_ms 55.758 ms
 metric edits 1000 count
 metric update_bytes_per_edit_avg 135 bytes
 metric update_bytes 135241 bytes
 metric update_changes 1000 count
 metric update_bundle_bytes 15024 bytes
-metric apply_update_ms 1665.207 ms
+metric apply_update_ms 807.366 ms
 metric replicas_equal true bool
 metric replicas_content_equal true bool
 metric heads_equal true bool
-metric read_after_update_ms 226.814 ms
+metric read_after_update_ms 209.989 ms
 metric final_text_fnv1a64 efd47631a795be2e hash
 metric final_sequence_len 1522849 count
 metric final_blocks 15038 count
 metric final_marks 5718 count
-metric peak_rss 1063186432 bytes
-metric apply_first_change_ms 367.506 ms
+metric peak_rss 1062391808 bytes
+metric apply_later_update_ms_avg 433.148 ms
+metric apply_keystroke_ms_avg 404.137 ms
+metric apply_first_change_ms 392.706 ms
 metric first_change_bytes 132 bytes
