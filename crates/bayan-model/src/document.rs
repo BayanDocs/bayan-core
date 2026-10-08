@@ -12,7 +12,7 @@ use bayan_crdt::{
 use crate::atoms::{decode_binding, encode_binding, is_text_character};
 use crate::raw::{RawDocument, registry};
 use crate::view::View;
-use crate::{AtomKind, EntityId, IdGenerator, Props, SECTION_DEFAULTS, marks, normalize};
+use crate::{AtomKind, EntityId, IdGenerator, Props, Report, SECTION_DEFAULTS, marks, normalize};
 
 const PARAGRAPH_END: char = '\u{0D}';
 const TABLE_BLOCK: char = '\u{07}';
@@ -122,7 +122,7 @@ pub struct Document {
 /// What [`Document::check_materializations`] counted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MaterializationCheck {
-    /// Materializations performed since the check started.
+    /// Materializations that wrote structure, since the check started.
     pub performed: usize,
     /// Materializations after which the view differed from the view before them. Materialization must never change the view (document model §14), so this must stay 0.
     pub changed_view: usize,
@@ -1007,15 +1007,18 @@ impl Document {
         let mut inserted = Vec::new();
         if !self.clean.contains(&story) {
             if needs_materialization(handle) {
-                let before = self.check.is_some().then(|| self.view());
-                inserted = self.materialize(story, handle)?;
-                self.crdt.commit_without_undo();
-                if let Some(before) = before {
-                    let after = self.view();
-                    if let Some(check) = &mut self.check {
-                        check.performed += 1;
-                        if after != before {
-                            check.changed_view += 1;
+                // One normalization finds the structure to write, and is the view before it for the check.
+                let (before, report) = normalize(&self.raw());
+                inserted = self.materialize(story, handle, report)?;
+                if !inserted.is_empty() {
+                    self.crdt.commit_without_undo();
+                    if self.check.is_some() {
+                        let after = self.view();
+                        if let Some(check) = &mut self.check {
+                            check.performed += 1;
+                            if after != before {
+                                check.changed_view += 1;
+                            }
                         }
                     }
                 }
@@ -1026,9 +1029,13 @@ impl Document {
         Ok(Positions { inserted, len })
     }
 
-    /// Writes into the CRDT the structure that the view of `story` shows but the story does not store (N1 and N4 paragraph ends), so that later edits act on stored structure. Returns the positions, in the story before materialization, where paragraph ends were inserted. The caller commits.
-    fn materialize(&mut self, story: EntityId, handle: &Story) -> Result<Vec<usize>, EditError> {
-        let (_, report) = normalize(&self.raw());
+    /// Writes into the CRDT the structure that the view of `story` shows but the story does not store (N1 and N4 paragraph ends, as `report`, the normalization of the current state, lists them), so that later edits act on stored structure. Returns the positions, in the story before materialization, where paragraph ends were inserted. The caller commits.
+    fn materialize(
+        &mut self,
+        story: EntityId,
+        handle: &Story,
+        report: Report,
+    ) -> Result<Vec<usize>, EditError> {
         let mut virtual_ends: Vec<_> = report
             .virtual_paragraph_ends
             .into_iter()
