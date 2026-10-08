@@ -10,8 +10,8 @@
 //!
 //! - [`Document`]: a document stored in the CRDT (through bayan-crdt), with the operations of the brief (insert text, delete, format, split and merge paragraphs, tables with movable rows and columns, comments, fields, objects, bookmarks, moving a range), each one transaction and one undo step.
 //! - [`RawDocument`]: the stored state as it is, which concurrent edits can leave inconsistent.
-//! - [`normalize`]: the deterministic projection of the stored state onto a [`View`] (rules N1–N7, document model §14), which every replica computes identically and which never writes back by itself.
-//! - [`check_invariants`]: the invariants I1–I7, checked on a view.
+//! - [`normalize`]: the deterministic projection of the stored state onto a [`View`] (rules N1–N9 of document model §14, with N5 applied to comment highlights too), which every replica computes identically and which never writes back by itself.
+//! - [`check_invariants`]: the invariants I1–I7 and the view's form (every story reachable from the main story, no binding marks or unstorable values left in it), checked on a view.
 //! - [`simulation`]: seeded random editing by several replicas with partitions and reordered delivery, used by the convergence tests and the spike's long runs.
 //!
 //! ## Layer
