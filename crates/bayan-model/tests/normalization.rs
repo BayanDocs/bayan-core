@@ -889,6 +889,31 @@ fn many_tables_in_one_paragraph_are_split_in_linear_time() {
     assert_linear("N4", || drop(normalize(&small)), || drop(normalize(&raw)));
 }
 
+/// N7 keeps the first of two atoms that reference the same entity in one story, not the last (review of CORE-004, item 21).
+#[test]
+fn a_repeated_reference_keeps_its_first_place() {
+    let paragraph = EntityId(0xA);
+    let mut raw = RawDocument::default();
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    raw.main = vec![
+        text("x"),
+        atom(AtomKind::ParagraphEnd, paragraph),
+        text("y"),
+        atom(AtomKind::ParagraphEnd, paragraph),
+    ];
+    let (view, report) = normalize(&raw);
+    assert_eq!(report.n7, 1);
+    assert_eq!(
+        view.main()[1],
+        Item::Atom {
+            kind: AtomKind::ParagraphEnd,
+            id: Some(paragraph),
+            marks: BTreeMap::new()
+        }
+    );
+    assert_eq!(view.plain_text(EntityId::MAIN_STORY), "x\ny\n");
+}
+
 /// Which atoms keep their marks in the view, written out independently of `AtomKind::keeps_marks` (review of CORE-004, item 21): those with a glyph or an anchor keep them; paragraph ends (their formatting lives in the paragraph's properties), range delimiters and tables do not.
 #[test]
 fn atoms_keep_their_marks_exactly_when_they_have_a_glyph() {
