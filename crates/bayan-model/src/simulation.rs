@@ -1,6 +1,6 @@
 //! Seeded random editing by several replicas, for the convergence tests and the spike's long runs (CORE-004 AC-1).
 //!
-//! A run is a list of [`Action`]s generated from a seed: replicas edit, send each other updates over links that delay and reorder them, are cut off by partitions and healed, and undo and redo. Every random choice inside an action is a raw number resolved against the replica's state when the action runs, so that any sub-list of a run is a valid run too; that is what lets [`shrink`] cut a failing run down to a few actions. Operations mostly target what the replica's view shows, and now and then a story or table that only the stored state holds, because concurrent edits reach those too. Every materialization is checked to leave the view unchanged. At the end the network heals, every message is delivered, the replicas synchronize fully, and [`run`] checks that every replica shows the same view, that it satisfies the invariants I1–I7, that a replica loaded from the final snapshot shows it too, and that normalizing is idempotent.
+//! A run is a list of [`Action`]s generated from a seed: replicas edit, send each other updates over links that delay and reorder them, are cut off by partitions and healed, and undo and redo. Every random choice inside an action is a raw number resolved against the replica's state when the action runs, so that any sub-list of a run is a valid run too; that is what lets [`shrink`] cut a failing run down to a few actions. Operations mostly target what the replica's view shows, and now and then a story or table that only the stored state holds, because concurrent edits reach those too. Every materialization is checked to leave the view unchanged, and every action to leave no write pending (an operation that failed halfway would leave its writes for the next operation's change and undo step). At the end the network heals, every message is delivered, the replicas synchronize fully, and [`run`] checks that every replica shows the same view, that it satisfies the invariants I1–I7, that a replica loaded from the final snapshot shows it too, and that normalizing is idempotent.
 
 use std::fmt;
 
@@ -455,6 +455,13 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
         }
         if stats.undo_errors > 0 {
             return Err(fail(Some(step), "an undo or redo failed".to_owned()));
+        }
+        // Every operation, applied or refused, commits or writes nothing: writes left pending would become part of the next operation's change and undo step.
+        if let Some(replica) = documents.iter().position(Document::has_pending_changes) {
+            return Err(fail(
+                Some(step),
+                format!("replica {replica} has writes pending after {action:?}"),
+            ));
         }
         if let Some(check) = documents
             .iter()
