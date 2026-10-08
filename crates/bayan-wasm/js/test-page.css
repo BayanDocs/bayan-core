@@ -1,0 +1,53 @@
+/*
+ * Styles of the engine test page (test-page.html).
+ *
+ * SPDX-FileCopyrightText: 2026 BayanDocs contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
+ */
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 1rem;
+  color: #1a1a1a;
+  background: #f2f2f2;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+#pages {
+  position: relative;
+  overflow: auto;
+  max-height: 80vh;
+  max-width: 100%;
+  background: #8a8a8a;
+}
+
+#canvas {
+  display: block;
+}
+
+#caret {
+  position: absolute;
+  background: #000;
+  pointer-events: none;
+}
+
+#log {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  max-height: 80vh;
+  overflow: auto;
+  min-width: 20rem;
+}

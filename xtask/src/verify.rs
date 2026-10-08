@@ -19,7 +19,7 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 /// The WebAssembly target the tests run on. The engine's own target, wasm32-unknown-unknown, offers no standard way to run Rust's test harness, so the tests are built for WASI (wasm32-wasip1) and run in Node.js, as ADR-0025 §1 foresees for the determinism checks. Both targets compile the code to the same WebAssembly instructions with the same arithmetic; WASI adds only the operating-system interface the test harness needs to print its results and report how it ended. `rust-toolchain.toml` lists the target, so rustup installs it.
 const WASM_TEST_TARGET: &str = "wasm32-wasip1";
 
-/// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; a test keeps the three equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
+/// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; the Node.js driver in `.github/workflows/artifacts.yml` uses it too, and a test keeps all four equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
 pub const NODE_VERSION: &str = "24.21.0";
 
 /// Crates that run natively only and are therefore not built for WebAssembly, with the reason. Every other workspace member must build for WebAssembly, so a new crate is covered without anyone having to remember it.
@@ -94,8 +94,17 @@ pub const CLIPPY_RUNS: [ClippyRun; 4] = [
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
 
-/// Hook for the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not cover. Work package X-003 adds `check-exact-pins` (every entry of `[workspace.dependencies]` is an exact `=x.y.z` requirement) and `check-lockfile-age` (no package version in `Cargo.lock` is younger than 24 hours) here, and as `cargo xtask` commands.
-const SUPPLY_CHAIN_CHECKS: &[Check] = &[];
+/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to `Cargo.lock` is at least 24 hours old. The second compares with the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when `Cargo.lock` changed.
+const SUPPLY_CHAIN_CHECKS: &[Check] = &[
+    (
+        "check-exact-pins: every dependency is pinned exactly (ADR-0017 rule 5)",
+        exact_pins,
+    ),
+    (
+        "check-lockfile-age: Cargo builds exactly what Cargo.lock lists, and every package version added to it was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
+        lockfile_age,
+    ),
+];
 
 /// Hook for determinism checks (ADR-0004, ADR-0025 §1): checks that the same input produces identical layout and pixel hashes on every platform plug in here, from CORE-002 and CORE-003 onward.
 const DETERMINISM_CHECKS: &[Check] = &[(
@@ -112,8 +121,13 @@ pub struct Step {
     run: fn(&Path) -> Result<(), String>,
 }
 
-/// The steps, in order. The first six are the ones work package CORE-001 lists, in its order.
+/// The steps, in order. The supply-chain checks come first, so that no code of a dependency they reject is compiled or run (build scripts, procedural macros, tests) before they fail; they build nothing themselves. The next six are the ones work package CORE-001 lists, in its order.
 pub const STEPS: [Step; 9] = [
+    Step {
+        name: "supply-chain",
+        title: "Supply-chain checks (exact pins, what Cargo builds, age and checksum of new package versions)",
+        run: supply_chain,
+    },
     Step {
         name: "fmt",
         title: "Formatting (rustfmt)",
@@ -148,11 +162,6 @@ pub const STEPS: [Step; 9] = [
         name: "guardrails",
         title: "Guardrails: lint configuration and lint canaries",
         run: guardrails,
-    },
-    Step {
-        name: "supply-chain",
-        title: "Supply-chain checks (X-003)",
-        run: supply_chain,
     },
     Step {
         name: "determinism",
@@ -401,7 +410,15 @@ fn guardrails(root: &Path) -> Result<(), String> {
 }
 
 fn supply_chain(root: &Path) -> Result<(), String> {
-    run_hook(SUPPLY_CHAIN_CHECKS, root, "work package X-003 adds them")
+    run_hook(SUPPLY_CHAIN_CHECKS, root, "none are configured")
+}
+
+fn exact_pins(root: &Path) -> Result<(), String> {
+    crate::supply_chain::exact_pins::check(root, &mut |line| println!("      {line}"))
+}
+
+fn lockfile_age(root: &Path) -> Result<(), String> {
+    crate::supply_chain::lockfile_age::check(root, None, &mut |line| println!("      {line}"))
 }
 
 fn determinism(root: &Path) -> Result<(), String> {
@@ -555,12 +572,14 @@ fn duration(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// The supply-chain checks run before anything is compiled, so that a dependency they reject never runs its build script, procedural macros or tests; then the steps that work package CORE-001 lists, in its order.
     #[test]
-    fn runs_the_briefs_steps_first_and_in_its_order() {
+    fn runs_the_supply_chain_checks_first_then_the_briefs_steps_in_its_order() {
         let names: Vec<&str> = STEPS.iter().map(|step| step.name).collect();
         assert_eq!(
             names,
             [
+                "supply-chain",
                 "fmt",
                 "clippy",
                 "test",
@@ -568,7 +587,6 @@ mod tests {
                 "doc",
                 "deny",
                 "guardrails",
-                "supply-chain",
                 "determinism"
             ]
         );
@@ -843,6 +861,13 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
             "the CI workflow must install Node.js {NODE_VERSION}"
+        );
+        let artifacts = include_str!("../../.github/workflows/artifacts.yml");
+        assert!(
+            artifacts
+                .lines()
+                .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
+            "the artifacts workflow's Node.js driver must use Node.js {NODE_VERSION}"
         );
         let script = include_str!("../../scripts/dev-setup.sh");
         assert!(

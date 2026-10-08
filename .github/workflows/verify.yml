@@ -23,7 +23,7 @@ env:
   CARGO_INCREMENTAL: 0
   # Must equal CARGO_DENY_VERSION in xtask/src/verify.rs (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
   CARGO_DENY_VERSION: 0.20.2
-  # Node.js runs the tests in WebAssembly (CORE-002). Must equal NODE_VERSION in xtask/src/verify.rs and scripts/dev-setup.sh (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
+  # Node.js runs the tests in WebAssembly (CORE-002). Must equal NODE_VERSION in xtask/src/verify.rs, scripts/dev-setup.sh and .github/workflows/artifacts.yml (a test checks this). Change it, and the checksums below, only in the monthly dependency session.
   NODE_VERSION: 24.21.0
 
 jobs:
@@ -44,6 +44,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares Cargo.lock with the merge base of the pull request and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
