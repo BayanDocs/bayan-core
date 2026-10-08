@@ -13,7 +13,7 @@ const CONFIG: Config = Config {
 };
 
 /// The outcome every platform must reach: operations applied, refused and skipped, the main story's length in the final view, and the view's fingerprint.
-const EXPECTED: (usize, usize, usize, usize, &str) = (342, 33, 25, 102, "c17392f87f9959e0");
+const EXPECTED: (usize, usize, usize, usize, &str) = (328, 46, 26, 136, "5580e1b4474b07c3");
 
 #[test]
 fn a_fixed_run_ends_with_the_same_view_on_every_platform() {

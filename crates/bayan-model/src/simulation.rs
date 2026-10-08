@@ -309,9 +309,9 @@ pub struct Stats {
     pub refusals: [usize; 15],
     /// Operations not attempted because the state offered nothing to apply them to (no table, no paragraph end to merge, a story too short for a range, a row move onto itself, moving content onto its own start or end).
     pub skipped: usize,
-    /// Attempted operations whose story or table the replica's view showed.
+    /// Attempted operations whose story or table the replica's view showed, as last normalized for choosing targets (at most [`SIGHT_REFRESH`] changes of the replica earlier).
     pub visible_targets: usize,
-    /// Attempted operations whose story or table only the stored state held (picked on purpose for a tenth of the operations).
+    /// Attempted operations whose story or table that view did not show: only the stored state held it (picked on purpose for a tenth of the operations).
     pub hidden_targets: usize,
     /// Messages delivered.
     pub delivered: usize,
@@ -364,6 +364,7 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
     let mut queue: Vec<Message> = Vec::new();
     let mut partitioned: Option<usize> = None;
     let mut stats = Stats::default();
+    let mut sights: Vec<Sight> = (0..replicas).map(|_| Sight::default()).collect();
     for (step, action) in actions.iter().enumerate() {
         match *action {
             Action::Edit {
@@ -371,12 +372,17 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
                 kind,
                 params,
             } => {
-                let Some(document) = documents.get_mut(replica) else {
+                let (Some(document), Some(sight)) =
+                    (documents.get_mut(replica), sights.get_mut(replica))
+                else {
                     continue;
                 };
-                let attempt = edit(document, kind, params);
+                let attempt = edit(document, sight, kind, params);
                 match attempt.outcome {
-                    Outcome::Applied => stats.applied += 1,
+                    Outcome::Applied => {
+                        stats.applied += 1;
+                        sight.changed();
+                    }
                     Outcome::Refused(reason) => {
                         stats.refused += 1;
                         stats.refusals[reason] += 1;
@@ -411,23 +417,36 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
                     let message = queue.remove(deliverable[below(pick, deliverable.len())]);
                     deliver(&mut documents, &message).map_err(|reason| fail(Some(step), reason))?;
                     stats.delivered += 1;
+                    if let Some(sight) = sights.get_mut(message.to) {
+                        sight.changed();
+                    }
                 }
             }
             Action::Partition { replica } => partitioned = Some(replica % replicas),
             Action::Heal => partitioned = None,
             Action::Undo { replica } => {
-                if let Some(document) = documents.get_mut(replica) {
+                if let (Some(document), Some(sight)) =
+                    (documents.get_mut(replica), sights.get_mut(replica))
+                {
                     match document.undo() {
-                        Ok(true) => stats.undone += 1,
+                        Ok(true) => {
+                            stats.undone += 1;
+                            sight.changed();
+                        }
                         Ok(false) => {}
                         Err(_) => stats.undo_errors += 1,
                     }
                 }
             }
             Action::Redo { replica } => {
-                if let Some(document) = documents.get_mut(replica) {
+                if let (Some(document), Some(sight)) =
+                    (documents.get_mut(replica), sights.get_mut(replica))
+                {
                     match document.redo() {
-                        Ok(true) => stats.undone += 1,
+                        Ok(true) => {
+                            stats.undone += 1;
+                            sight.changed();
+                        }
                         Ok(false) => {}
                         Err(_) => stats.undo_errors += 1,
                     }
@@ -615,7 +634,52 @@ pub fn random_edit(document: &mut Document, rng: &mut Rng) -> bool {
         rng.next_u64(),
         rng.next_u64(),
     ];
-    matches!(edit(document, kind, params).outcome, Outcome::Applied)
+    // A sight of its own each time: every choice that needs the view normalizes it afresh.
+    let mut sight = Sight::default();
+    matches!(
+        edit(document, &mut sight, kind, params).outcome,
+        Outcome::Applied
+    )
+}
+
+/// How many changes of a replica (applied edits, delivered updates, undo and redo steps) a run lets pass before it normalizes the replica's view again to choose targets. Normalizing the whole document before nearly every operation made the time of a run grow with the square of its length (two thirds of a run of 1,000 operations); a view a few changes old nearly always shows the same stories and tables, and every operation still checks the stored state itself.
+pub const SIGHT_REFRESH: usize = 16;
+
+/// The stories and tables of a replica's view, from which a run chooses the targets of its operations, and how many changes the replica has had since that view was normalized.
+#[derive(Default)]
+struct Sight {
+    shown: Option<Shown>,
+    changes: usize,
+}
+
+/// The identifiers of the stories and tables a view shows, each in ascending order.
+struct Shown {
+    stories: Vec<EntityId>,
+    tables: Vec<EntityId>,
+}
+
+impl Sight {
+    /// What the replica's view shows, normalized again once the replica has changed [`SIGHT_REFRESH`] times since the last time.
+    fn shown(&mut self, document: &Document) -> &Shown {
+        if self.changes >= SIGHT_REFRESH {
+            self.shown = None;
+        }
+        if self.shown.is_none() {
+            self.changes = 0;
+        }
+        self.shown.get_or_insert_with(|| {
+            let view = document.view();
+            Shown {
+                stories: view.stories.keys().copied().collect(),
+                tables: view.tables.keys().copied().collect(),
+            }
+        })
+    }
+
+    /// Records one change of the replica.
+    const fn changed(&mut self) {
+        self.changes += 1;
+    }
 }
 
 /// How an editing operation of a run ended.
@@ -633,31 +697,30 @@ struct Attempt {
     visible: Option<bool>,
 }
 
-/// Performs one editing operation, resolving the raw parameters against the replica's state: its story or table is one the view shows nine times in ten, and one that only the stored state holds otherwise; positions are positions in the stored story.
-fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> Attempt {
-    let [a, b, c, d] = params;
-    // The view, normalized only when a choice needs it (the main story is always in the view).
-    let mut cached: Option<View> = None;
-    let mut view =
-        |document: &Document| -> View { cached.get_or_insert_with(|| document.view()).clone() };
-    // A story: the main story most of the time, else a cell or comment story the view shows, and now and then any stored story.
-    let mut pick_story = |document: &Document, pick: u64| -> (EntityId, bool) {
-        let view = view(document);
-        let stories: Vec<EntityId> = if below(pick, 10) < 9 {
-            view.stories.keys().copied().collect()
-        } else {
-            document.stories()
-        };
-        let story = stories
-            .get(below(pick >> 8, stories.len()))
+/// A story to edit, chosen by `pick`: a cell or comment story the view shows nine times in ten, and any stored story otherwise. Returns it with whether the view shows it.
+fn pick_story(document: &Document, sight: &mut Sight, pick: u64) -> (EntityId, bool) {
+    let shown = sight.shown(document);
+    let story = if below(pick, 10) < 9 {
+        shown
+            .stories
+            .get(below(pick >> 8, shown.stories.len()))
             .copied()
-            .unwrap_or(EntityId::MAIN_STORY);
-        (story, view.stories.contains_key(&story))
-    };
+    } else {
+        let stored = document.stories();
+        stored.get(below(pick >> 8, stored.len())).copied()
+    }
+    .unwrap_or(EntityId::MAIN_STORY);
+    (story, shown.stories.binary_search(&story).is_ok())
+}
+
+/// Performs one editing operation, resolving the raw parameters against the replica's state: its story or table is one the replica's view shows nine times in ten (as `sight` last saw it), and one that only the stored state holds otherwise; positions are positions in the stored story.
+fn edit(document: &mut Document, sight: &mut Sight, kind: Kind, params: [u64; 4]) -> Attempt {
+    let [a, b, c, d] = params;
+    // The main story most of the time (it is always in the view), else a story chosen by `pick_story`.
     let (story, story_visible) = if below(a, 10) < 6 {
         (EntityId::MAIN_STORY, true)
     } else {
-        pick_story(document, a >> 4)
+        pick_story(document, sight, a >> 4)
     };
     let len = document.story_len(story).unwrap_or(0);
     let skipped = |visible: Option<bool>| Attempt {
@@ -729,19 +792,19 @@ fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> Attempt {
         | Kind::InsertColumn
         | Kind::DeleteColumn => {
             // A table, chosen like a story, with the number of cells of each of its rows.
-            let shown = view(document).tables;
-            let tables: Vec<EntityId> = if below(d, 10) < 9 {
-                shown.keys().copied().collect()
+            let shown = &sight.shown(document).tables;
+            let table = if below(d, 10) < 9 {
+                shown.get(below(d >> 4, shown.len())).copied()
             } else {
-                document.tables()
+                let stored = document.tables();
+                stored.get(below(d >> 4, stored.len())).copied()
             };
-            let Some((table, shape)) = tables
-                .get(below(d >> 4, tables.len()))
-                .and_then(|table| Some((*table, document.table_shape(*table).ok()?)))
+            let Some((table, shape)) =
+                table.and_then(|table| Some((table, document.table_shape(table).ok()?)))
             else {
                 return skipped(None);
             };
-            visible = Some(shown.contains_key(&table));
+            visible = Some(shown.binary_search(&table).is_ok());
             let rows = shape.len();
             let widest = shape.iter().copied().max().unwrap_or(0);
             match kind {
@@ -777,7 +840,7 @@ fn edit(document: &mut Document, kind: Kind, params: [u64; 4]) -> Attempt {
         }
         Kind::Move => {
             let target = if below(d, 3) == 0 {
-                pick_story(document, d >> 8).0
+                pick_story(document, sight, d >> 8).0
             } else {
                 story
             };
