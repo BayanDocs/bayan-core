@@ -465,7 +465,7 @@ fn hex(bytes: &[u8]) -> String {
     format!("{:016x}", crdt_workload::fnv1a64(bytes))
 }
 
-/// Runs the fuzzer for `seconds` on `threads` threads (each with a large stack, so that only nesting deeper than the documented limits can exhaust it), writing inputs that panic, break an invariant or take too long into `out`. Prints a summary, with one line per panic location.
+/// Runs the fuzzer for `seconds` on `threads` threads, each on a stack of `stack_mib` MiB (2 by default, the engine thread's, so that stack exhaustion is met where the engine would meet it), writing inputs that panic, break an invariant or take too long into `out`. Prints a summary, with one line per panic location.
 ///
 /// # Errors
 ///

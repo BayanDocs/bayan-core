@@ -1,6 +1,6 @@
 //! A panic of the CRDT library during an import is contained and poisons the document, and the poisoned document and every handle to it refuse to work instead of panicking again.
 //!
-//! A test program of its own, because it installs a panic hook for the whole process: Loro's panic messages can quote document text, so the hook prints nothing for a panic raised inside Loro and hands every other panic (such as a failing assertion of these tests) to the default hook. That is what a host must do before importing untrusted blobs (see `Doc::import`).
+//! A test program of its own, because it installs a panic hook for the whole process, in the pattern a host must follow before importing untrusted blobs (see `Doc::import`): the hook never prints or records a panic's message, whatever code raised it, and reports only where a panic happened. Filtering by crate is not enough: a panic message of Loro's can quote document text, and so can one of the crates Loro uses (generic-btree's prints the tree element, which for rich text holds the text; it raised 48% of the panics of the CORE-004 fuzzing run), or an assertion that compares document state.
 //!
 //! Host only: in WebAssembly (wasm32-wasip1, where the gate also runs the tests) a panic aborts the whole test program instead of unwinding, so the adapter cannot contain it there; the engine's host restarts an engine that aborts (CORE-004 report).
 #![cfg(not(target_arch = "wasm32"))]
@@ -23,23 +23,27 @@ const PANIC_BASE: &[u8] = include_bytes!("fixtures/loro-panic-base.bin");
 const PANIC_UPDATE: &[u8] = include_bytes!("fixtures/loro-panic-update.bin");
 const PANIC_CRAFTED: &[u8] = include_bytes!("fixtures/loro-panic-crafted.bin");
 
-/// Panics that the hook kept quiet: raised inside the CRDT library.
-static SILENCED: AtomicUsize = AtomicUsize::new(0);
+/// Panics raised in the CRDT library's code, which these tests expect.
+static LIBRARY_PANICS: AtomicUsize = AtomicUsize::new(0);
 
-/// Installs, once, a hook that prints nothing for a panic raised in the CRDT library's code and keeps the default behaviour for every other panic.
-fn silence_library_panics() {
+/// Installs, once, a hook that never prints or records a panic's message. It counts the panics raised in the CRDT library's code, which the tests provoke, and prints only the location of any other panic (a failing assertion of these tests names its line that way; a host would record the location in a crash report instead).
+#[expect(
+    clippy::print_stderr,
+    reason = "a test's panic hook: it prints where a panic happened, never the message, so that a failing assertion names its line; Clippy treats only test functions, not this helper, as test code, where printing is allowed (clippy.toml)"
+)]
+fn withhold_panic_messages() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
-        let default = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let in_library = info
-                .location()
-                .is_some_and(|location| is_library_file(location.file()));
-            if in_library {
-                SILENCED.fetch_add(1, Ordering::Relaxed);
-            } else {
-                default(info);
+        std::panic::set_hook(Box::new(|info| match info.location() {
+            Some(location) if is_library_file(location.file()) => {
+                LIBRARY_PANICS.fetch_add(1, Ordering::Relaxed);
             }
+            Some(location) => eprintln!(
+                "panicked at {}:{} (the message is withheld)",
+                location.file(),
+                location.line()
+            ),
+            None => eprintln!("panicked (the message is withheld)"),
         }));
     });
 }
@@ -73,7 +77,7 @@ fn load() -> Doc {
 
 #[test]
 fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
-    silence_library_panics();
+    withhold_panic_messages();
     let valid = load();
     valid
         .import(PANIC_UPDATE, &ImportLimits::UPDATE)
@@ -88,14 +92,14 @@ fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
 
     let doc = load();
     let undo = UndoManager::new(&doc);
-    let silenced = SILENCED.load(Ordering::Relaxed);
+    let library_panics = LIBRARY_PANICS.load(Ordering::Relaxed);
     // When Loro stops panicking on this blob, replace the fixtures with a case that still panics (the fuzzer finds them), so that this test keeps exercising the containment.
     assert_eq!(
         doc.import(PANIC_CRAFTED, &ImportLimits::UPDATE),
         Err(ImportError::Panicked)
     );
     // The panic happened in the library, and the hook kept its message out of the output.
-    assert!(SILENCED.load(Ordering::Relaxed) > silenced);
+    assert!(LIBRARY_PANICS.load(Ordering::Relaxed) > library_panics);
     assert!(doc.is_poisoned());
     assert_eq!(
         doc.import(PANIC_UPDATE, &ImportLimits::UPDATE),
@@ -110,7 +114,7 @@ fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
 /// Every method of a poisoned document and of its handles, those obtained before the panic and those obtained after, refuses or answers as for an empty document, without calling the library, whose locks the panic poisoned (review of CORE-004, item 3). Before, all but the import and the exports panicked here.
 #[test]
 fn a_poisoned_document_and_its_handles_refuse_everything() {
-    silence_library_panics();
+    withhold_panic_messages();
     let doc = load();
     // Handles obtained before the panic.
     let story_before = doc.main_story();

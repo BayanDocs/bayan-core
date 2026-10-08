@@ -269,7 +269,7 @@ impl Doc {
 
     /// Imports a blob from another replica or from storage, within `limits`. Changes that depend on changes not received yet wait and are applied when those arrive, so blobs may arrive in any order.
     ///
-    /// Every blob that does not come from this device is untrusted input, and the limits narrow what it can do without making the CRDT library safe (see [`ImportLimits`] and the crate documentation): a crafted blob can make Loro 1.16.2 panic, which is contained here where panics unwind and poisons the document; it can make it abort the process, which nothing here can catch; and **the panic message, which Rust's panic hook prints before the panic is contained, can quote document text**, so the host must install a panic hook that never prints or records messages before it imports untrusted blobs.
+    /// Every blob that does not come from this device is untrusted input, and the limits narrow what it can do without making the CRDT library safe (see [`ImportLimits`] and the crate documentation): a crafted blob can make Loro 1.16.2 panic, which is contained here where panics unwind and poisons the document; it can make it abort the process, which nothing here can catch; and **the panic message, which Rust's panic hook prints before the panic is contained, can quote document text**, whichever crate raises it, so the host must install a panic hook that never prints or records any panic's message before it imports untrusted blobs.
     ///
     /// # Errors
     ///

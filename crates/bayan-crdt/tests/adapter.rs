@@ -396,7 +396,7 @@ fn hostile_update(depth: usize, overwrite: bool) -> Vec<u8> {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_deeply_nested_value_poisons_the_document_instead_of_crashing_it() {
-    // 1,000 levels is far beyond MAX_VALUE_DEPTH but shallow enough for the library to decode on a 2 MiB stack in a debug build, so this test checks the logic: detect, poison, refuse, and leak instead of freeing. At about 20,000 levels the library's own decoder overflows such a stack before the adapter can look (CORE-004 report, "Resource limits"); the spike demonstrates the adapter's protection at depths where freeing would crash.
+    // 1,000 levels is far beyond MAX_VALUE_DEPTH but shallow enough for the library to decode on a 2 MiB stack in a debug build, so this test checks the logic: detect, poison, refuse, and leak instead of freeing. At about 21,800 levels in a release build (6,000 in a debug build), freeing the decoded copy inside the library's metadata call overflows such a stack before the adapter can look (CORE-004 report, F5); the spike demonstrates the adapter's protection at depths where freeing would crash.
     for overwrite in [false, true] {
         let update = hostile_update(1_000, overwrite);
         let outcome = std::thread::Builder::new()
