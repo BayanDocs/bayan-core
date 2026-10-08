@@ -6,10 +6,10 @@
 //! crdt-model generate --mode full|subset --out FILE [--small]
 //! crdt-model bench    --mode full|subset --snapshot FILE [--edits N]
 //! crdt-model converge [--runs N] [--operations N] [--threads N] [--seed N] [--check-every N]
-//! crdt-model fuzz      [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--out DIR]
-//! crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--out DIR]
-//! crdt-model replay    --input FILE [--seed N]
-//! crdt-model minimize  --input FILE [--seed N] [--isolated]
+//! crdt-model fuzz      [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--stack MIB] [--out DIR]
+//! crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--stack MIB] [--out DIR]
+//! crdt-model replay    --input FILE [--seed N] [--stack MIB]
+//! crdt-model minimize  --input FILE [--seed N] [--isolated] [--stack MIB]
 //! ```
 //!
 //! `bench` also runs as WebAssembly: build with `--target wasm32-wasip1` and run under Node.js with `run-wasi.mjs` (the snapshot directory appears as `/data`).
@@ -33,13 +33,16 @@ use bench::Mode;
 const USAGE: &str = "usage: crdt-model generate --mode full|subset --out FILE [--small]
        crdt-model bench --mode full|subset --snapshot FILE [--edits N]
        crdt-model converge [--runs N] [--operations N] [--threads N] [--seed N] [--check-every N]
-       crdt-model fuzz [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--out DIR]
-       crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--out DIR]
-       crdt-model replay --input FILE [--seed N]
-       crdt-model minimize --input FILE [--seed N] [--isolated]";
+       crdt-model fuzz [--seconds N] [--threads N] [--seed N] [--small] [--stream N] [--stack MIB] [--out DIR]
+       crdt-model supervise [--seconds N] [--workers N] [--seed N] [--small] [--stack MIB] [--out DIR]
+       crdt-model replay --input FILE [--seed N] [--stack MIB]
+       crdt-model minimize --input FILE [--seed N] [--isolated] [--stack MIB]";
 
 /// The default seed of `fuzz`, which `minimize` needs to rebuild the same base documents.
 const FUZZ_SEED: u64 = 0xC0DE_0004_00F2_2000;
+
+/// The stack of each fuzzing thread, in MiB: Rust's default for a spawned thread, which is what the engine's thread gets on native platforms (bayan-engine's `EngineThread` sets no size), so that stack exhaustion is met where the engine would meet it.
+const FUZZ_STACK_MIB: usize = 2;
 
 /// `--name value` options.
 struct Options(BTreeMap<String, String>);
@@ -136,6 +139,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             options.number("seed", FUZZ_SEED)?,
             options.text("small").is_some(),
             options.number("stream", 0)?,
+            options.count("stack", FUZZ_STACK_MIB)?,
             &options
                 .text("out")
                 .map_or_else(fuzz::default_output, PathBuf::from),
@@ -145,6 +149,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             options.count("workers", threads)?,
             options.number("seed", FUZZ_SEED)?,
             options.text("small").is_some(),
+            options.count("stack", FUZZ_STACK_MIB)?,
             &options
                 .text("out")
                 .map_or_else(fuzz::default_output, PathBuf::from),
@@ -153,10 +158,15 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             &options.path("input")?,
             options.number("seed", FUZZ_SEED)?,
             options.text("isolated").is_some(),
+            options.count("stack", FUZZ_STACK_MIB)?,
         ),
         "replay" => {
-            return fuzz::replay(&options.path("input")?, options.number("seed", FUZZ_SEED)?)
-                .map(ExitCode::from);
+            return fuzz::replay(
+                &options.path("input")?,
+                options.number("seed", FUZZ_SEED)?,
+                options.count("stack", FUZZ_STACK_MIB)?,
+            )
+            .map(ExitCode::from);
         }
         _ => Err(USAGE.to_owned()),
     };

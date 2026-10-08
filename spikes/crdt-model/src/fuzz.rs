@@ -87,10 +87,12 @@ impl Case {
         })
     }
 
+    /// The limits an engine applies to such a blob from someone else: an update as received from another replica, and a snapshot as received when a document is shared, with its values inspected (only this device's own snapshots are trusted enough to skip that).
     fn limits(&self) -> ImportLimits {
         if self.snapshot {
             ImportLimits {
                 max_bytes: 16 << 20,
+                inspect_values: true,
                 ..ImportLimits::LOCAL_SNAPSHOT
             }
         } else {
@@ -194,6 +196,22 @@ fn registry_relative(file: &str) -> &str {
     file.split_once("index.crates.io")
         .and_then(|(_, rest)| rest.split_once('/'))
         .map_or(file, |(_, relative)| relative)
+}
+
+/// Runs `work` on a thread with a stack of `stack_mib` MiB, as the fuzzing workers do, so that a replay meets the stack limit the finding met. A thread that could not be started, or that ended with a panic `work` did not contain, counts as a panic outside the import.
+fn on_stack(stack_mib: usize, work: impl FnOnce() -> Outcome + Send) -> Outcome {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(stack_mib << 20)
+            .spawn_scoped(scope, work)
+            .ok()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or(Outcome::Panicked(Panic {
+                stage: "thread",
+                location: String::new(),
+                message: String::new(),
+            }))
+    })
 }
 
 /// Imports `case` into a freshly loaded copy of its base document and checks the result.
@@ -462,13 +480,14 @@ pub fn fuzz(
     seed: u64,
     small: bool,
     stream: u64,
+    stack_mib: usize,
     out: &Path,
 ) -> Result<(), String> {
     std::fs::create_dir_all(out)
         .map_err(|error| format!("cannot create {}: {error}", out.display()))?;
     let (bases, seeds) = seeds(seed, small)?;
     println!(
-        "fuzz: {} starting blobs over {} {}base documents, {threads} threads, {seconds} s, seed {seed:#x}",
+        "fuzz: {} starting blobs over {} {}base documents, {threads} threads with {stack_mib} MiB stacks, {seconds} s, seed {seed:#x}",
         seeds.len(),
         bases.len(),
         if small { "small " } else { "" }
@@ -486,7 +505,7 @@ pub fn fuzz(
                 let (bases, seeds, findings, current, started_at) =
                     (&bases, &seeds, &findings, &current, &started_at);
                 let worker = std::thread::Builder::new()
-                    .stack_size(64 << 20)
+                    .stack_size(stack_mib << 20)
                     .spawn_scoped(scope, move || {
                         // The mutations depend on the seed, the thread and the stream; the base documents only on the seed.
                         let mut rng = Rng::new(
@@ -732,6 +751,7 @@ pub fn supervise(
     workers: usize,
     seed: u64,
     small: bool,
+    stack_mib: usize,
     out: &Path,
 ) -> Result<(), String> {
     std::fs::create_dir_all(out)
@@ -742,7 +762,7 @@ pub fn supervise(
     let runs: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
     let aborts: Mutex<Vec<String>> = Mutex::new(Vec::new());
     println!(
-        "supervise: {workers} workers, {seconds} s, seed {seed:#x}{}",
+        "supervise: {workers} workers with {stack_mib} MiB stacks, {seconds} s, seed {seed:#x}{}",
         if small { ", small base documents" } else { "" }
     );
     std::thread::scope(|scope| {
@@ -768,6 +788,8 @@ pub fn supervise(
                         &format!("{seed:#x}"),
                         "--stream",
                         &stream.to_string(),
+                        "--stack",
+                        &stack_mib.to_string(),
                         "--out",
                     ]);
                     command.arg(&directory);
@@ -869,7 +891,7 @@ pub fn supervise(
     clippy::print_stdout,
     reason = "the driver reports its results on standard output"
 )]
-pub fn replay(path: &Path, seed: u64) -> Result<u8, String> {
+pub fn replay(path: &Path, seed: u64, stack_mib: usize) -> Result<u8, String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -881,22 +903,24 @@ pub fn replay(path: &Path, seed: u64) -> Result<u8, String> {
             .to_owned()
     })?;
     let (bases, _) = seeds(seed, case.small)?;
-    Ok(with_panic_hook(|| match run_case(&bases, &case) {
-        Outcome::Imported => {
-            println!("imported");
-            0
-        }
-        Outcome::Refused(kind) => {
-            println!("refused: {kind}");
-            0
-        }
-        Outcome::Panicked(panic) => {
-            println!("panicked at {} during {}", panic.location, panic.stage);
-            3
-        }
-        Outcome::Invariants(violations) => {
-            println!("broke invariants: {violations}");
-            4
+    Ok(with_panic_hook(|| {
+        match on_stack(stack_mib, || run_case(&bases, &case)) {
+            Outcome::Imported => {
+                println!("imported");
+                0
+            }
+            Outcome::Refused(kind) => {
+                println!("refused: {kind}");
+                0
+            }
+            Outcome::Panicked(panic) => {
+                println!("panicked at {} during {}", panic.location, panic.stage);
+                3
+            }
+            Outcome::Invariants(violations) => {
+                println!("broke invariants: {violations}");
+                4
+            }
         }
     }))
 }
@@ -949,7 +973,7 @@ enum Failure {
     clippy::print_stdout,
     reason = "the driver reports its results on standard output"
 )]
-pub fn minimize(path: &Path, seed: u64, isolated: bool) -> Result<(), String> {
+pub fn minimize(path: &Path, seed: u64, isolated: bool, stack_mib: usize) -> Result<(), String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -979,7 +1003,14 @@ pub fn minimize(path: &Path, seed: u64, isolated: bool) -> Result<(), String> {
         if isolated {
             std::fs::write(&probe_path, bytes).ok()?;
             let output = std::process::Command::new(&program)
-                .args(["replay", "--seed", &format!("{seed:#x}"), "--input"])
+                .args([
+                    "replay",
+                    "--seed",
+                    &format!("{seed:#x}"),
+                    "--stack",
+                    &stack_mib.to_string(),
+                    "--input",
+                ])
                 .arg(&probe_path)
                 .output()
                 .ok()?;
@@ -1000,7 +1031,7 @@ pub fn minimize(path: &Path, seed: u64, isolated: bool) -> Result<(), String> {
                 bytes: bytes.to_vec(),
                 ..case.clone()
             };
-            match run_case(&bases, &probe) {
+            match on_stack(stack_mib, || run_case(&bases, &probe)) {
                 Outcome::Panicked(panic) => Some(Failure::Panic(panic.location)),
                 _ => None,
             }

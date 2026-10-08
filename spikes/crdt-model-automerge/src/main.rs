@@ -605,6 +605,52 @@ fn bench(snapshot: &str, edits: usize) -> Result<(), String> {
         metric("wasm_linear_memory_end", memory, "bytes");
     }
 
+    // Later updates of the same size, as for Loro (`apply_later_update_ms_avg`): the first update after loading may pay for work that later ones do not.
+    let mut later = Duration::ZERO;
+    for round in 1..=LATER_UPDATES {
+        let before = b.get_heads();
+        let mut len = b.length(&b_text);
+        for edit in &edit_script(EDIT_SEED ^ (u64::from(round) << 8), edits) {
+            let resolved = edit.resolve(len);
+            apply_edit(&mut b, &b_text, &resolved, &mut ids)?;
+            b.commit();
+            len = Edit::new_len(&resolved, len);
+        }
+        let update = b.save_after(&before);
+        let start = Instant::now();
+        a.load_incremental(&update).map_err(automerge_error)?;
+        later += start.elapsed();
+    }
+    metric(
+        "apply_later_update_ms_avg",
+        millis(later / LATER_UPDATES),
+        "ms",
+    );
+
+    // Warm keystrokes: one remote keystroke at a time, applied to a copy that is already up to date, as for Loro (`apply_keystroke_ms_avg`).
+    let mut keystrokes = Duration::ZERO;
+    for round in 0..KEYSTROKES {
+        let before = b.get_heads();
+        let len = b.length(&b_text);
+        let at = (len / 3 + usize::try_from(round).unwrap_or(0) * 7_919) % len.max(1);
+        apply_edit(
+            &mut b,
+            &b_text,
+            &Resolved::Insert { at, text: "k" },
+            &mut ids,
+        )?;
+        b.commit();
+        let update = b.save_after(&before);
+        let start = Instant::now();
+        a.load_incremental(&update).map_err(automerge_error)?;
+        keystrokes += start.elapsed();
+    }
+    metric(
+        "apply_keystroke_ms_avg",
+        millis(keystrokes / KEYSTROKES),
+        "ms",
+    );
+
     // Extra, after the measurements above: what one remote keystroke costs. A fresh copy (C) receives only the first edit's change. Applying an update walks every operation of the text object, so this is the fixed cost that every update pays, however small.
     let first_change = b
         .get_changes(&a_heads)
@@ -619,6 +665,12 @@ fn bench(snapshot: &str, edits: usize) -> Result<(), String> {
     metric("first_change_bytes", first_change.len(), "bytes");
     Ok(())
 }
+
+/// How many later updates of the edit script's size the benchmark applies after the first (as in the Loro benchmark).
+const LATER_UPDATES: u32 = 3;
+
+/// How many single keystrokes the benchmark applies to an up-to-date copy.
+const KEYSTROKES: u32 = 10;
 
 /// Applies one resolved edit to the text object (without committing).
 fn apply_edit(

@@ -143,12 +143,7 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
     let mut a = Document::load(bytes, 2, 2, &ImportLimits::LOCAL_SNAPSHOT).map_err(err)?;
     let load_ms = started.elapsed();
     metric("load_ms", millis(load_ms), "ms");
-    let started = Instant::now();
-    let raw = RawDocument::read(a.crdt());
-    let raw_ms = started.elapsed();
-    let started = Instant::now();
-    let (view, _) = normalize(&raw);
-    let normalize_ms = started.elapsed();
+    let (raw, raw_ms, view, normalize_ms) = profile_first_read(&a);
     metric("raw_read_ms", millis(raw_ms), "ms");
     metric("normalize_ms", millis(normalize_ms), "ms");
     metric("read_ms", millis(raw_ms + normalize_ms), "ms");
@@ -202,9 +197,8 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
 
     let update = b.export_updates(&a.version_vector()).map_err(err)?;
     metric("update_bytes", update.len(), "bytes");
-    let started = Instant::now();
-    a.import(&update, &ImportLimits::UPDATE).map_err(err)?;
-    metric("apply_update_ms", millis(started.elapsed()), "ms");
+    let elapsed = profile_apply(&mut a, &update).map_err(err)?;
+    metric("apply_update_ms", millis(elapsed), "ms");
     let started = Instant::now();
     let view_a = a.view();
     metric("read_after_update_ms", millis(started.elapsed()), "ms");
@@ -221,14 +215,7 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
     }
 
     // Undo latency on the replica that made the edits.
-    let started = Instant::now();
-    let mut undone = 0_u32;
-    for _ in 0..20 {
-        if b.undo().map_err(err)? {
-            undone += 1;
-        }
-    }
-    let elapsed = started.elapsed();
+    let (undone, elapsed) = profile_undo(&mut b, 20).map_err(err)?;
     metric("undo_steps", undone, "count");
     metric("undo_ms_avg", millis(elapsed / undone.max(1)), "ms");
 
@@ -269,7 +256,84 @@ fn bench_full(bytes: &[u8], baseline: Option<u64>, edits: usize) -> Result<(), S
         millis(later / LATER_UPDATES),
         "ms",
     );
+    // Warm keystrokes: one remote keystroke at a time, applied to a replica that is already up to date, without concurrent edits (those are `concurrent_keystroke_ms_avg` below).
+    let mut keystrokes = std::time::Duration::ZERO;
+    for round in 0..KEYSTROKES {
+        let before = a.version_vector();
+        type_somewhere(&mut b, round + 1_000)?;
+        let update = b.export_updates(&before).map_err(err)?;
+        let started = Instant::now();
+        a.import(&update, &ImportLimits::UPDATE).map_err(err)?;
+        keystrokes += started.elapsed();
+    }
+    metric(
+        "apply_keystroke_ms_avg",
+        millis(keystrokes / u32::try_from(KEYSTROKES).unwrap_or(1)),
+        "ms",
+    );
     concurrent_full(&mut a, &mut b)
+}
+
+/// How many single keystrokes the full benchmark applies to an up-to-date replica.
+const KEYSTROKES: usize = 10;
+
+// The phases that the CORE-004 report's profiles show, each a function of its own so that a profiler can collect exactly one call of it, for example `valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_first_read*' crdt-model bench --mode full --snapshot <file>` (results/README.md). They are kept from being inlined, and differ in what they do, so that the compiler and the linker keep each as a symbol of its own.
+
+/// The first read of a loaded document: its raw state and its view, with the time of each. Loro decodes a snapshot's containers when they are first read.
+#[inline(never)]
+fn profile_first_read(
+    document: &Document,
+) -> (
+    RawDocument,
+    std::time::Duration,
+    bayan_model::View,
+    std::time::Duration,
+) {
+    let started = Instant::now();
+    let raw = RawDocument::read(document.crdt());
+    let raw_ms = started.elapsed();
+    let started = Instant::now();
+    let (view, _) = normalize(&raw);
+    (raw, raw_ms, view, started.elapsed())
+}
+
+/// The first update after opening: one update with every edit of the session.
+#[inline(never)]
+fn profile_apply(
+    document: &mut Document,
+    update: &[u8],
+) -> Result<std::time::Duration, bayan_model::EditError> {
+    let started = Instant::now();
+    document.import(std::hint::black_box(update), &ImportLimits::UPDATE)?;
+    Ok(started.elapsed())
+}
+
+/// The update of a session of 1,000 edits made while the receiving replica edited too.
+#[inline(never)]
+fn profile_concurrent(
+    document: &mut Document,
+    update: &[u8],
+) -> Result<std::time::Duration, bayan_model::EditError> {
+    let started = Instant::now();
+    let report = document.import(update, &ImportLimits::UPDATE)?;
+    std::hint::black_box(report);
+    Ok(started.elapsed())
+}
+
+/// Up to `steps` undo steps on the replica that made the edits.
+#[inline(never)]
+fn profile_undo(
+    document: &mut Document,
+    steps: u32,
+) -> Result<(u32, std::time::Duration), bayan_model::EditError> {
+    let started = Instant::now();
+    let mut undone = 0_u32;
+    for _ in 0..steps {
+        if document.undo()? {
+            undone += 1;
+        }
+    }
+    Ok((undone, started.elapsed()))
 }
 
 /// How many later updates the benchmarks apply after the first (see `apply_later_update_ms_avg`).
@@ -316,13 +380,8 @@ fn concurrent_full(a: &mut Document, b: &mut Document) -> Result<(), String> {
     }
     let update = b.export_updates(&a.version_vector()).map_err(err)?;
     metric("concurrent_update_bytes", update.len(), "bytes");
-    let started = Instant::now();
-    a.import(&update, &ImportLimits::UPDATE).map_err(err)?;
-    metric(
-        "concurrent_apply_update_ms",
-        millis(started.elapsed()),
-        "ms",
-    );
+    let elapsed = profile_concurrent(a, &update).map_err(err)?;
+    metric("concurrent_apply_update_ms", millis(elapsed), "ms");
     exchange(a, b)?;
     let equal = a.view() == b.view();
     metric("concurrent_replicas_equal", equal, "bool");
