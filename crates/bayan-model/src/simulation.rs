@@ -456,15 +456,17 @@ pub fn run(seed: u64, actions: &[Action], config: &Config) -> Result<Stats, Fail
         if stats.undo_errors > 0 {
             return Err(fail(Some(step), "an undo or redo failed".to_owned()));
         }
-        if documents.iter().any(|document| {
-            document
-                .materialization_check()
-                .is_some_and(|check| check.changed_view > 0)
-        }) {
-            return Err(fail(
-                Some(step),
-                "a materialization changed the view".to_owned(),
-            ));
+        if let Some(check) = documents
+            .iter()
+            .filter_map(Document::materialization_check)
+            .find(|check| check.changed_view > 0 || check.failed > 0)
+        {
+            let reason = if check.failed > 0 {
+                "a materialization failed"
+            } else {
+                "a materialization changed the view"
+            };
+            return Err(fail(Some(step), reason.to_owned()));
         }
         if config.check_every > 0 && step % config.check_every == config.check_every - 1 {
             let document = &documents[step / config.check_every % replicas];

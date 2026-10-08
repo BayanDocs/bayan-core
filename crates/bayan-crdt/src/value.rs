@@ -87,6 +87,27 @@ impl Value {
         deepest
     }
 
+    /// Whether the adapter can store this value: it holds no [`Value::Unsupported`] anywhere and is nested no deeper than [`MAX_VALUE_DEPTH`]. A value read from the CRDT may not be, because another replica can store what this adapter refuses (a floating-point number, a container reference, a deeply nested value); code that copies stored values must skip those, or the copy fails halfway.
+    #[must_use]
+    pub fn is_storable(&self) -> bool {
+        // Iterative, like `depth`, and stops at the first level beyond the limit.
+        let mut pending = vec![(self, 1_usize)];
+        while let Some((value, depth)) = pending.pop() {
+            if depth > MAX_VALUE_DEPTH {
+                return false;
+            }
+            match value {
+                Self::Unsupported => return false,
+                Self::List(items) => pending.extend(items.iter().map(|item| (item, depth + 1))),
+                Self::Map(entries) => {
+                    pending.extend(entries.values().map(|item| (item, depth + 1)));
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Converts a CRDT value, replacing anything unsupported or nested deeper than [`MAX_VALUE_DEPTH`] by [`Value::Unsupported`].
     pub(crate) fn from_loro(value: &LoroValue) -> Self {
         Self::from_loro_at(value, 1)
@@ -234,6 +255,25 @@ mod tests {
         assert!(nested(MAX_VALUE_DEPTH).to_loro().is_ok());
         assert!(nested(MAX_VALUE_DEPTH + 1).to_loro().is_err());
         assert!(Value::Unsupported.to_loro().is_err());
+    }
+
+    #[test]
+    fn storable_values_are_exactly_those_that_convert() {
+        let values = [
+            Value::Null,
+            Value::Int(3),
+            Value::Unsupported,
+            Value::List(vec![Value::Int(1), Value::Unsupported]),
+            Value::Map(BTreeMap::from([("x".to_owned(), Value::Unsupported)])),
+            Value::Map(BTreeMap::from([("x".to_owned(), Value::from("y"))])),
+            nested(MAX_VALUE_DEPTH),
+            nested(MAX_VALUE_DEPTH + 1),
+        ];
+        for value in values {
+            assert_eq!(value.is_storable(), value.to_loro().is_ok(), "{value:?}");
+        }
+        assert!(!Value::List(vec![Value::Unsupported]).is_storable());
+        assert!(nested(MAX_VALUE_DEPTH).is_storable());
     }
 
     #[test]

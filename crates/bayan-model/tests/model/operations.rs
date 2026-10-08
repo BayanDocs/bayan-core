@@ -310,7 +310,8 @@ fn materialization_does_not_change_the_view_even_when_replicas_materialize_concu
                 replica.materialization_check(),
                 Some(MaterializationCheck {
                     performed: 1,
-                    changed_view: 0
+                    changed_view: 0,
+                    failed: 0
                 })
             );
             assert_eq!(bayan_model::normalize(&replica.raw()).1.n4, 0);
@@ -524,9 +525,18 @@ fn formatting_refuses_the_atom_binding_and_unknown_families() {
         a.format(MAIN, 0..1, "unknown:x", &Value::Bool(true)),
         Err(EditError::InvalidKey)
     );
+    // A family name alone is no key (review of CORE-004, second round, item A3), except `link`, the one key of the hyperlink family; nor is a family with an empty name.
+    for key in ["r", "cmt", "rev", "r:", "link:x"] {
+        assert_eq!(
+            a.format(MAIN, 0..1, key, &Value::Bool(true)),
+            Err(EditError::InvalidKey),
+            "{key}"
+        );
+    }
     assert_eq!(valid_view(&a), before);
-    // Keys of the model's families are accepted, including the family name alone.
     a.format(MAIN, 0..1, marks::LINK, &Value::from("https://example.org"))
+        .unwrap();
+    a.format(MAIN, 0..1, marks::BOLD, &Value::Bool(true))
         .unwrap();
 }
 
@@ -668,4 +678,192 @@ fn setting_a_paragraph_property() {
     assert!(a.undo().unwrap());
     assert!(!valid_view(&a).paragraphs[&paragraph].contains_key("jc"));
     assert_eq!(text(&a), "abc\n");
+}
+
+/// Replicas `a` (peer 1) and `b` (peer 2) move the same `content` of the main story concurrently, one to the start of the story and the other to its end (`a_moves_to_start` says which), so the merged story stores the content twice and the view keeps the first copy of each atom (N7).
+fn moved_twice(
+    mut a: Document,
+    content: std::ops::Range<usize>,
+    a_moves_to_start: bool,
+) -> (Document, Document) {
+    let mut b = replica_of(&a, 2);
+    let end = a.story_len(MAIN).expect("the main story") - 1;
+    let (to_a, to_b) = if a_moves_to_start { (0, end) } else { (end, 0) };
+    a.move_range(MAIN, content.clone(), MAIN, to_a)
+        .expect("the first move");
+    b.move_range(MAIN, content, MAIN, to_b)
+        .expect("the concurrent move");
+    sync_both(&mut a, &mut b);
+    assert_eq!(valid_view(&a), valid_view(&b));
+    (a, b)
+}
+
+/// After two replicas moved the same field or bookmark concurrently, the story stores two copies of its delimiters, and the view keeps only the first (N7). Either copy can still be deleted or moved whole; only a partial cut of the copy the view shows is refused (review of CORE-004, second round, item A2: the check counted the copy that the view drops, and refused every such edit).
+#[test]
+fn either_copy_of_a_field_or_bookmark_moved_twice_concurrently_can_be_deleted_or_moved() {
+    // A field "PAGE" with result "7" between "ab" and "cdef": 8 stored characters at 2..10. Merged, the story stores a copy at 0..8, "abcdef" at 8..14 and a copy at 14..22.
+    let field = || {
+        let mut a = document(1);
+        a.insert_text(MAIN, 0, "abcdef").unwrap();
+        a.insert_field(MAIN, 2, "PAGE", "7").unwrap();
+        (a, 2..10_usize)
+    };
+    // A bookmark around "cd": its start, "cd" and its end at 2..6. Merged: a copy at 0..4, "abef" at 4..8 and a copy at 8..12.
+    let bookmark = || {
+        let mut a = document(1);
+        a.insert_text(MAIN, 0, "abcdef").unwrap();
+        a.insert_bookmark(MAIN, 2..4, "_Toc1").unwrap();
+        (a, 2..6_usize)
+    };
+    type Case = (
+        &'static str,
+        fn(&mut Document) -> Result<(), EditError>,
+        Result<&'static str, EditError>,
+    );
+    let field_cases: [Case; 5] = [
+        (
+            "delete the first copy",
+            |a| a.delete(MAIN, 0..8),
+            Ok("abcdef7\n"),
+        ),
+        (
+            "delete the second copy",
+            |a| a.delete(MAIN, 14..22),
+            Ok("7abcdef\n"),
+        ),
+        (
+            "move the first copy to the end",
+            |a| a.move_range(MAIN, 0..8, MAIN, 22),
+            Ok("abcdef7PAGE7\n"),
+        ),
+        (
+            "move the second copy to the start",
+            |a| a.move_range(MAIN, 14..22, MAIN, 0),
+            Ok("7PAGE7abcdef\n"),
+        ),
+        (
+            "delete part of the first copy",
+            |a| a.delete(MAIN, 0..2),
+            Err(EditError::WouldUnbalance),
+        ),
+    ];
+    let bookmark_cases: [Case; 5] = [
+        (
+            "delete the first copy",
+            |a| a.delete(MAIN, 0..4),
+            Ok("abefcd\n"),
+        ),
+        (
+            "delete the second copy",
+            |a| a.delete(MAIN, 8..12),
+            Ok("cdabef\n"),
+        ),
+        (
+            "move the first copy to the end",
+            |a| a.move_range(MAIN, 0..4, MAIN, 12),
+            Ok("abefcdcd\n"),
+        ),
+        (
+            "move the second copy to the start",
+            |a| a.move_range(MAIN, 8..12, MAIN, 0),
+            Ok("cdcdabef\n"),
+        ),
+        (
+            "delete the first copy's start only",
+            |a| a.delete(MAIN, 0..1),
+            Err(EditError::WouldUnbalance),
+        ),
+    ];
+    for (build, cases, merged) in [
+        (
+            &field as &dyn Fn() -> (Document, std::ops::Range<usize>),
+            field_cases,
+            "7abcdefPAGE7\n",
+        ),
+        (&bookmark, bookmark_cases, "cdabefcd\n"),
+    ] {
+        for a_moves_to_start in [true, false] {
+            for (name, edit, expected) in &cases {
+                let (a, content) = build();
+                let (mut a, mut b) = moved_twice(a, content, a_moves_to_start);
+                assert_eq!(text(&a), merged, "{name}");
+                let before = valid_view(&a);
+                match expected {
+                    Ok(expected) => {
+                        edit(&mut a).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+                        assert_eq!(text(&a), *expected, "{name}");
+                    }
+                    Err(error) => {
+                        assert_eq!(edit(&mut a).as_ref(), Err(error), "{name}");
+                        assert_eq!(valid_view(&a), before, "{name}");
+                    }
+                }
+                sync_both(&mut a, &mut b);
+                assert_eq!(valid_view(&a), valid_view(&b), "{name}");
+            }
+        }
+    }
+}
+
+/// A move may not put a table or a comment reference into a story inside it, however deep: the view could then never reach either (review of CORE-004, second round, item A3).
+#[test]
+fn moves_into_a_story_nested_inside_the_moved_content_are_refused() {
+    // A table whose cell holds a comment's reference may not move into that comment's story.
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "x").unwrap();
+    let table = a.insert_table(MAIN, 0, 1, 1).unwrap();
+    let view = valid_view(&a);
+    let cell_story = view.cells[&view.rows[&view.tables[&table].rows[0]].cells[0]].story;
+    a.insert_text(cell_story, 0, "note").unwrap();
+    let comment = a.add_comment(cell_story, 0..4, "author", "remark").unwrap();
+    let comment_story = valid_view(&a).comments[&comment].story;
+    let before = valid_view(&a);
+    assert_eq!(
+        a.move_range(MAIN, 0..1, comment_story, 0),
+        Err(EditError::WouldCreateCycle)
+    );
+    assert_eq!(valid_view(&a), before);
+
+    // A comment's reference may not move into a table inside that comment's own story.
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "hello").unwrap();
+    let comment = a.add_comment(MAIN, 0..5, "author", "remark").unwrap();
+    let comment_story = valid_view(&a).comments[&comment].story;
+    let table = a.insert_table(comment_story, 0, 1, 1).unwrap();
+    let view = valid_view(&a);
+    let cell_story = view.cells[&view.rows[&view.tables[&table].rows[0]].cells[0]].story;
+    let before = valid_view(&a);
+    // The reference stands right after "hello".
+    assert_eq!(
+        a.move_range(MAIN, 5..6, cell_story, 0),
+        Err(EditError::WouldCreateCycle)
+    );
+    assert_eq!(valid_view(&a), before);
+    // Moving the whole table out of the comment, or the reference elsewhere in the main story, is fine.
+    a.move_range(comment_story, 0..1, MAIN, 0).unwrap();
+    valid_view(&a);
+}
+
+/// Content that starts with a table lands only at a block position, as `insert_table` requires; before, the move was accepted, and undoing it left the paragraph end that materialization wrote (review of CORE-004, second round, item A3).
+#[test]
+fn a_table_moves_only_to_a_block_position() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abcd").unwrap();
+    a.split_paragraph(MAIN, 4).unwrap();
+    a.insert_table(MAIN, 5, 1, 1).unwrap();
+    let before = valid_view(&a);
+    assert_eq!(
+        a.insert_table(MAIN, 2, 1, 1),
+        Err(EditError::NotABlockPosition)
+    );
+    assert_eq!(
+        a.move_range(MAIN, 5..6, MAIN, 2),
+        Err(EditError::NotABlockPosition)
+    );
+    assert_eq!(valid_view(&a), before);
+    // To a block position it moves, and undo takes the move back.
+    a.move_range(MAIN, 5..6, MAIN, 0).unwrap();
+    assert_eq!(bayan_model::normalize(&a.raw()).1.n4, 0);
+    assert!(a.undo().unwrap());
+    assert_eq!(valid_view(&a), before);
 }

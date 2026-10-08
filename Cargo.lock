@@ -130,6 +130,7 @@ name = "bayan-model"
 version = "0.0.0"
 dependencies = [
  "bayan-crdt",
+ "loro",
 ]
 
 [[package]]

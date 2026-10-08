@@ -126,6 +126,8 @@ pub struct MaterializationCheck {
     pub performed: usize,
     /// Materializations after which the view differed from the view before them. Materialization must never change the view (document model §14), so this must stay 0.
     pub changed_view: usize,
+    /// Materializations that failed, possibly after writing part of their structure. They must never happen, so this must stay 0.
+    pub failed: usize,
 }
 
 impl Document {
@@ -360,6 +362,7 @@ impl Document {
         value: &Value,
     ) -> Result<(), EditError> {
         check_mark_key(key)?;
+        check_storable(value)?;
         self.edit(story, |document, handle, positions| {
             let range = positions.range(handle, &range)?;
             if marks::is_run_property(key) {
@@ -465,6 +468,7 @@ impl Document {
         value: &Value,
     ) -> Result<(), EditError> {
         self.check_attached()?;
+        check_storable(value)?;
         let map = self
             .registry(registry::PARAGRAPHS)?
             .get(&paragraph.to_string())
@@ -800,7 +804,7 @@ impl Document {
         })
     }
 
-    /// Moves `range` of story `from` to position `to_pos` of story `to` (cut and paste of the same content): text keeps its marks, and atoms keep their entities, so a table, object, field or comment moves with its identity. Everything is checked before anything is cut: the range must hold whole fields and both ends of every range in it ([`EditError::WouldUnbalance`]), a move may not put a table inside itself or a comment reference into a comment, and content that does not end with a paragraph end or a table may not land at the block position before a table, as for typing. Moving content to its own start or end changes nothing. Replicas that move the same content concurrently can still duplicate a reference, which normalization resolves (N7).
+    /// Moves `range` of story `from` to position `to_pos` of story `to` (cut and paste of the same content): text keeps its marks, and atoms keep their entities, so a table, object, field or comment moves with its identity. Everything is checked before anything is cut: the range must hold whole fields and both ends of every range in it ([`EditError::WouldUnbalance`]), a move may not put a table or a comment reference into a story inside it, or a comment reference into a comment ([`EditError::WouldCreateCycle`]), content that starts with a table may land only at a block position, as for [`Document::insert_table`], and content that does not end with a paragraph end or a table may not land at the block position before a table, as for typing ([`EditError::NotABlockPosition`]); marks whose value the adapter cannot store (which another replica may have stored) are not pasted, as the view does not show them. Moving content to its own start or end changes nothing. Replicas that move the same content concurrently can still duplicate a reference, which normalization resolves (N7).
     ///
     /// # Errors
     ///
@@ -857,27 +861,36 @@ impl Document {
         if !ends_a_block && before_block_after_cut(&target, paste, same.then_some(&cut)) {
             return Err(EditError::NotABlockPosition);
         }
+        // A table lands only at a block position, as `insert_table` requires: elsewhere it would stand in the middle of a paragraph, and the paragraph end that materialization would write there is not part of the move, so undoing the move would leave it.
+        let starts_with_table =
+            runs.first().and_then(|run| run.text.chars().next()) == Some(TABLE_BLOCK);
+        if starts_with_table && !at_block_position_after_cut(&target, paste, same.then_some(&cut)) {
+            return Err(EditError::NotABlockPosition);
+        }
         source.delete(cut.clone())?;
         let mut pos = paste;
         for run in &runs {
             let len = run.len();
+            // A mark whose value the adapter cannot store (another replica may store one) cannot be pasted; the view leaves it out anyway, so it is dropped, as everything is checked before the cut.
+            let own: Props = run
+                .marks
+                .iter()
+                .filter(|(_, value)| value.is_storable())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
             target.insert(pos, &run.text)?;
             // The pasted characters keep exactly their own marks: marks they inherited by expansion are removed.
             for inherited in target.runs_in(pos..pos + len)? {
                 for key in inherited.marks.keys() {
-                    if !run.marks.contains_key(key) {
+                    if !own.contains_key(key) {
                         target.unmark(pos..pos + len, key)?;
                     }
                 }
             }
-            for (key, value) in &run.marks {
+            for (key, value) in &own {
                 target.mark(pos..pos + len, key, value)?;
             }
             pos += len;
-        }
-        if runs.iter().any(|run| run.text.contains(TABLE_BLOCK)) {
-            // A moved table may now stand in the middle of a paragraph: the next edit of the story materializes the split that normalization shows.
-            self.clean.remove(&to);
         }
         self.note_structure(from, &source, cut.start);
         self.note_structure(to, &target, pos);
@@ -1009,19 +1022,26 @@ impl Document {
             if needs_materialization(handle) {
                 // One normalization finds the structure to write, and is the view before it for the check.
                 let (before, report) = normalize(&self.raw());
-                inserted = self.materialize(story, handle, report)?;
-                if !inserted.is_empty() {
+                let written = self.materialize(story, handle, report);
+                if let Ok(positions) = &written
+                    && !positions.is_empty()
+                {
                     self.crdt.commit_without_undo();
-                    if self.check.is_some() {
-                        let after = self.view();
-                        if let Some(check) = &mut self.check {
-                            check.performed += 1;
-                            if after != before {
-                                check.changed_view += 1;
-                            }
+                }
+                // A materialization that failed may have written part of its structure, so it is checked too (it should never fail: it writes only values the adapter can store).
+                if self.check.is_some() && !written.as_ref().is_ok_and(Vec::is_empty) {
+                    let after = self.view();
+                    if let Some(check) = &mut self.check {
+                        check.performed += 1;
+                        if written.is_err() {
+                            check.failed += 1;
+                        }
+                        if after != before {
+                            check.changed_view += 1;
                         }
                     }
                 }
+                inserted = written?;
             }
             self.clean.insert(story);
         }
@@ -1099,12 +1119,16 @@ impl Document {
             .create(&paragraph.to_string())?)
     }
 
+    /// The properties of a stored paragraph that can be copied: values the adapter cannot store (which another replica may have stored) are left out, as the view leaves them out, so that copying them never fails halfway.
     fn paragraph_props(&self, paragraph: EntityId) -> Props {
         self.registry(registry::PARAGRAPHS)
             .ok()
             .and_then(|paragraphs| paragraphs.get(&paragraph.to_string()))
             .map(|map| map.entries())
             .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, value)| value.is_storable())
+            .collect()
     }
 
     fn new_paragraph(&mut self, props: &Props) -> Result<EntityId, EditError> {
@@ -1215,95 +1239,100 @@ impl Document {
             .copied()
     }
 
-    /// Refuses moves that would put a table inside itself, or a comment reference into a comment.
+    /// Refuses moves that would put content inside itself, which the view could then never reach: a table, or a comment reference, into a story inside it (a story of one of the table's cells, the comment's own story, or any story nested inside those, through tables and comment references). Also refuses a comment reference into a comment's story (comments do not hold comments).
     fn check_move_target(
         &self,
         runs: &[bayan_crdt::Run],
         target: EntityId,
     ) -> Result<(), EditError> {
-        let bound = |kind: AtomKind| -> Vec<EntityId> {
-            runs.iter()
-                .filter(|run| run.text.contains(kind.placeholder()))
-                .filter_map(|run| {
-                    run.marks
-                        .get(ATOM_KEY)
-                        .and_then(Value::as_str)
-                        .and_then(decode_binding)
-                })
-                .filter(|(bound, _)| *bound == kind)
-                .map(|(_, id)| id)
-                .collect()
-        };
-        let comments = bound(AtomKind::CommentReference);
-        let tables = bound(AtomKind::TableBlock);
-        if comments.is_empty() && tables.is_empty() {
+        let moved: Vec<(AtomKind, EntityId)> = runs.iter().filter_map(holder_binding).collect();
+        if moved.is_empty() {
             return Ok(());
         }
         let raw = self.raw();
-        if !comments.is_empty()
-            && raw.comments.values().any(|comment| {
-                comment
-                    .get(registry::STORY)
-                    .and_then(Value::as_str)
-                    .and_then(EntityId::parse)
-                    == Some(target)
-            })
+        let moves_comment = moved
+            .iter()
+            .any(|(kind, _)| *kind == AtomKind::CommentReference);
+        if moves_comment
+            && raw
+                .comments
+                .values()
+                .any(|comment| story_of(comment) == Some(target))
         {
             return Err(EditError::WouldCreateCycle);
         }
-        // Every story inside the moved tables, at any depth.
-        let mut pending = tables;
-        let mut inside: BTreeSet<EntityId> = BTreeSet::new();
-        let mut visited: BTreeSet<EntityId> = BTreeSet::new();
-        while let Some(table) = pending.pop() {
-            if !visited.insert(table) {
-                continue;
-            }
-            let Some(entry) = raw.tables.get(&table) else {
-                continue;
-            };
-            for row in entry
-                .rows
-                .iter()
-                .filter_map(|item| item.as_str().and_then(EntityId::parse))
-            {
-                let Some(row) = raw.rows.get(&row) else {
-                    continue;
-                };
-                for cell in row
-                    .cells
-                    .iter()
-                    .filter_map(|item| item.as_str().and_then(EntityId::parse))
-                {
-                    let Some(story) = raw.cells.get(&cell).and_then(|cell| {
-                        cell.get(registry::STORY)
-                            .and_then(Value::as_str)
-                            .and_then(EntityId::parse)
-                    }) else {
-                        continue;
-                    };
-                    if inside.insert(story)
-                        && let Some(runs) = raw.stories.get(&story)
-                    {
-                        for run in runs.iter().filter(|run| run.text.contains(TABLE_BLOCK)) {
-                            if let Some((AtomKind::TableBlock, nested)) = run
-                                .marks
-                                .get(ATOM_KEY)
-                                .and_then(Value::as_str)
-                                .and_then(decode_binding)
-                            {
-                                pending.push(nested);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if inside.contains(&target) {
+        if stories_inside(&raw, moved).contains(&target) {
             return Err(EditError::WouldCreateCycle);
         }
         Ok(())
     }
+}
+
+/// The table or comment reference that a run's binding names, if the run holds its placeholder: the atoms that hold stories.
+fn holder_binding(run: &Run) -> Option<(AtomKind, EntityId)> {
+    run.marks
+        .get(ATOM_KEY)
+        .and_then(Value::as_str)
+        .and_then(decode_binding)
+        .filter(|(kind, _)| {
+            matches!(kind, AtomKind::TableBlock | AtomKind::CommentReference)
+                && run.text.contains(kind.placeholder())
+        })
+}
+
+/// The story that a cell's or a comment's properties name.
+fn story_of(props: &Props) -> Option<EntityId> {
+    props
+        .get(registry::STORY)
+        .and_then(Value::as_str)
+        .and_then(EntityId::parse)
+}
+
+/// Every story inside the given tables and comment references, at any depth: the stories of the tables' cells and the comments' own stories, then, for every table and comment reference in those stories, theirs, and so on.
+fn stories_inside(raw: &RawDocument, holders: Vec<(AtomKind, EntityId)>) -> BTreeSet<EntityId> {
+    let mut pending = holders;
+    let mut visited = BTreeSet::new();
+    let mut inside = BTreeSet::new();
+    while let Some((kind, id)) = pending.pop() {
+        if !visited.insert((kind, id)) {
+            continue;
+        }
+        let stories: Vec<EntityId> = match kind {
+            AtomKind::TableBlock => raw
+                .tables
+                .get(&id)
+                .map(|table| {
+                    table
+                        .rows
+                        .iter()
+                        .filter_map(|item| item.as_str().and_then(EntityId::parse))
+                        .filter_map(|row| raw.rows.get(&row))
+                        .flat_map(|row| {
+                            row.cells
+                                .iter()
+                                .filter_map(|item| item.as_str().and_then(EntityId::parse))
+                        })
+                        .filter_map(|cell| raw.cells.get(&cell).and_then(story_of))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            AtomKind::CommentReference => raw
+                .comments
+                .get(&id)
+                .and_then(story_of)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for story in stories {
+            if inside.insert(story)
+                && let Some(runs) = raw.stories.get(&story)
+            {
+                pending.extend(runs.iter().filter_map(holder_binding));
+            }
+        }
+    }
+    inside
 }
 
 /// Whether a story may need materialization: it does not end with a paragraph end, or a table follows something other than a paragraph end or another table. A cheap check of the stored characters; the normalization decides.
@@ -1336,38 +1365,81 @@ fn would_break_blocks(handle: &Story, range: &Range<usize>) -> bool {
 
 /// Whether `pos` is the block position right before a table in the story as it is once `cut` (a range of the same story, if any) is removed.
 fn before_block_after_cut(handle: &Story, pos: usize, cut: Option<&Range<usize>>) -> bool {
-    let before_cut = |at: usize| match cut {
-        Some(cut) if at >= cut.start => at + cut.len(),
-        _ => at,
-    };
-    handle.char_at(before_cut(pos)) == Some(TABLE_BLOCK)
-        && (pos == 0
-            || matches!(
-                handle.char_at(before_cut(pos - 1)),
-                Some(PARAGRAPH_END | TABLE_BLOCK)
-            ))
+    handle.char_at(position_before_cut(pos, cut)) == Some(TABLE_BLOCK)
+        && at_block_position_after_cut(handle, pos, cut)
 }
 
-/// Refuses the atom binding, which only the adapter writes, and keys of no mark family of the model, whose expansion no replica configured.
-fn check_mark_key(key: &str) -> Result<(), EditError> {
-    let family = key.split(':').next().unwrap_or(key);
-    if key == ATOM_KEY || !marks::FAMILIES.iter().any(|known| known.name == family) {
-        Err(EditError::InvalidKey)
-    } else {
+/// Whether `pos` is a block position in the story as it is once `cut` (a range of the same story, if any) is removed.
+fn at_block_position_after_cut(handle: &Story, pos: usize, cut: Option<&Range<usize>>) -> bool {
+    pos == 0
+        || matches!(
+            handle.char_at(position_before_cut(pos - 1, cut)),
+            Some(PARAGRAPH_END | TABLE_BLOCK)
+        )
+}
+
+/// The position in the story before `cut` was removed of position `at` in the story after.
+fn position_before_cut(at: usize, cut: Option<&Range<usize>>) -> usize {
+    match cut {
+        Some(cut) if at >= cut.start => at + cut.len(),
+        _ => at,
+    }
+}
+
+/// Refuses a value the adapter cannot store before anything is written (writing it would fail, possibly after other writes of the same operation).
+fn check_storable(value: &Value) -> Result<(), EditError> {
+    if value.is_storable() {
         Ok(())
+    } else {
+        Err(EditError::Crdt(CrdtError::InvalidValue(
+            "unsupported value",
+        )))
+    }
+}
+
+/// Refuses the atom binding, which only the adapter writes, and keys that name no mark of the model: a key is `family:name`, with a name, in a family of the model whose expansion every replica configures, or `link` itself, the one key of the hyperlink family (document model §5). A bare family name such as `r` would be a mark that no rule of the model handles (a run property is stopped before a closing paragraph end only when its key starts with `r:`).
+fn check_mark_key(key: &str) -> Result<(), EditError> {
+    let valid = match key.split_once(':') {
+        Some((family, name)) => {
+            !name.is_empty()
+                && family != marks::LINK
+                && marks::FAMILIES.iter().any(|known| known.name == family)
+        }
+        None => key == marks::LINK,
+    };
+    if valid && key != ATOM_KEY {
+        Ok(())
+    } else {
+        Err(EditError::InvalidKey)
     }
 }
 
 /// Refuses to cut `range` out of a story when it holds some but not all of the delimiters of a field (begin, separator, end), or one end of a range without the other: what is left would be repaired by normalization (N2, N3) into something nobody wrote, such as a field code shown as text.
+///
+/// Only the first delimiter of each role and entity in the story counts, because that is the one the view keeps: when replicas moved the same field or range concurrently, the story holds a second copy, which normalization drops (N7), so either copy may be deleted or moved whole, and the second copy's delimiters never refuse a cut. (N7 also drops a copy when an earlier story in document order holds one; this check looks at one story, so it may refuse a partial cut of such a copy, which the view does not show: a refusal, never a broken field.)
 fn check_whole_markers(handle: &Story, range: &Range<usize>) -> Result<(), EditError> {
-    if range.is_empty() {
+    if range.is_empty() || !holds_markers(&handle.runs_in(range.clone())?) {
         return Ok(());
     }
-    let inside = markers(&handle.runs_in(range.clone())?);
-    if inside.is_empty() {
-        return Ok(());
+    let mut first = BTreeSet::new();
+    let mut inside: BTreeMap<EntityId, usize> = BTreeMap::new();
+    let mut everywhere: BTreeMap<EntityId, usize> = BTreeMap::new();
+    let mut pos = 0;
+    for run in handle.runs() {
+        let start = pos;
+        pos += run.len();
+        let Some((kind, id)) = marker_binding(&run) else {
+            continue;
+        };
+        for (offset, character) in run.text.chars().enumerate() {
+            if character == kind.placeholder() && first.insert((kind, id)) {
+                *everywhere.entry(id).or_insert(0) += 1;
+                if range.contains(&(start + offset)) {
+                    *inside.entry(id).or_insert(0) += 1;
+                }
+            }
+        }
     }
-    let everywhere = markers(&handle.runs());
     if inside
         .iter()
         .any(|(entity, count)| everywhere.get(entity) != Some(count))
@@ -1377,35 +1449,29 @@ fn check_whole_markers(handle: &Story, range: &Range<usize>) -> Result<(), EditE
     Ok(())
 }
 
-/// How many field and range delimiters of each field or range the runs hold.
-fn markers(runs: &[Run]) -> BTreeMap<EntityId, usize> {
-    let mut counts = BTreeMap::new();
-    for run in runs {
-        let Some((kind, id)) = run
-            .marks
-            .get(ATOM_KEY)
-            .and_then(Value::as_str)
-            .and_then(decode_binding)
-        else {
-            continue;
-        };
-        if matches!(
-            kind,
-            AtomKind::FieldBegin
-                | AtomKind::FieldSeparator
-                | AtomKind::FieldEnd
-                | AtomKind::RangeStart
-                | AtomKind::RangeEnd
-        ) {
-            let placeholders = run
-                .text
-                .chars()
-                .filter(|character| *character == kind.placeholder())
-                .count();
-            *counts.entry(id).or_insert(0) += placeholders;
-        }
-    }
-    counts
+/// Whether the runs hold a field or range delimiter.
+fn holds_markers(runs: &[Run]) -> bool {
+    runs.iter().any(|run| {
+        marker_binding(run).is_some_and(|(kind, _)| run.text.contains(kind.placeholder()))
+    })
+}
+
+/// The field or range delimiter that a run's binding names, if it names one.
+fn marker_binding(run: &Run) -> Option<(AtomKind, EntityId)> {
+    run.marks
+        .get(ATOM_KEY)
+        .and_then(Value::as_str)
+        .and_then(decode_binding)
+        .filter(|(kind, _)| {
+            matches!(
+                kind,
+                AtomKind::FieldBegin
+                    | AtomKind::FieldSeparator
+                    | AtomKind::FieldEnd
+                    | AtomKind::RangeStart
+                    | AtomKind::RangeEnd
+            )
+        })
 }
 
 /// How positions that a caller computed on a story before its materialization map onto the story after it, and the checks of those positions. A refused position is reported as the caller gave it, with the length of the story the caller saw.

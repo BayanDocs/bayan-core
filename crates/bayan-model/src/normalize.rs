@@ -4,7 +4,7 @@
 //!
 //! For each story the rules apply in this order:
 //!
-//! 1. **Decoding and N5.** Placeholder characters become atoms when their binding names an entity of the right kind that exists; otherwise they are dropped (N5). Other control characters are dropped (placeholders never leak into the view). The binding mark itself, null marks and unsupported values are removed.
+//! 1. **Decoding and N5.** Placeholder characters become atoms when their binding names an entity of the right kind that exists; otherwise they are dropped (N5). Other control characters are dropped (placeholders never leak into the view). The binding mark itself, null marks, and marks and property values that the adapter cannot store (a floating-point number, a container reference or a value nested too deeply, which another replica may store) are removed: the model reads such a value as missing.
 //! 2. **N7, with N6 and nesting.** An atom whose entity already has an atom of the same role earlier in document order is dropped (N7). A table atom that survives is entered at once: its rows and cells are read, rows without cells are omitted, and a table without rows is omitted together with its atom (N6). Tables nested deeper than [`MAX_TABLE_DEPTH`] are dropped (a resource limit, proposed as rule N9).
 //! 3. **N2.** Field delimiters are matched like brackets: a separator belongs to the innermost open field if that field has none yet, an end closes the innermost open field if it is that field's end; every delimiter that is not part of a complete field is dropped, and the text between them becomes ordinary text.
 //! 4. **N3.** A range end is kept only after its range's start in the same story; a start without an end gets a zero-length range (an end right after it).
@@ -307,7 +307,7 @@ impl<'a> Normalizer<'a> {
             self.view.rows.insert(
                 row_id,
                 Row {
-                    props: row.props.clone(),
+                    props: storable(&row.props),
                     cells,
                 },
             );
@@ -320,7 +320,7 @@ impl<'a> Normalizer<'a> {
         self.view.tables.insert(
             id,
             Table {
-                props: table.props.clone(),
+                props: storable(&table.props),
                 rows,
             },
         );
@@ -490,7 +490,12 @@ impl<'a> Normalizer<'a> {
         self.report.n1 += 1;
         let [high, low] = story.halves();
         let id = self.virtual_paragraph_id(&[high, low, TAG_N1]);
-        let props = self.raw.paragraphs.get(&id).cloned().unwrap_or_default();
+        let props = self
+            .raw
+            .paragraphs
+            .get(&id)
+            .map(storable)
+            .unwrap_or_default();
         self.report
             .virtual_paragraph_ends
             .push(VirtualParagraphEnd {
@@ -542,14 +547,19 @@ impl<'a> Normalizer<'a> {
                             self.view
                                 .paragraphs
                                 .get(&id)
-                                .or_else(|| self.raw.paragraphs.get(&id))
+                                .cloned()
+                                .or_else(|| self.raw.paragraphs.get(&id).map(storable))
                         })
-                        .cloned()
                         .unwrap_or_default();
                     self.report.n4 += 1;
                     let [high, low] = block.halves();
                     let id = self.virtual_paragraph_id(&[high, low, TAG_N4]);
-                    let props = self.raw.paragraphs.get(&id).cloned().unwrap_or(containing);
+                    let props = self
+                        .raw
+                        .paragraphs
+                        .get(&id)
+                        .map(storable)
+                        .unwrap_or(containing);
                     self.report
                         .virtual_paragraph_ends
                         .push(VirtualParagraphEnd {
@@ -647,7 +657,7 @@ impl<'a> Normalizer<'a> {
             AtomKind::Tab | AtomKind::TableBlock | AtomKind::CommentReference => return,
         };
         if let Some(props) = registry.get(&id) {
-            view.entry(id).or_insert_with(|| props.clone());
+            view.entry(id).or_insert_with(|| storable(props));
         }
     }
 
@@ -680,7 +690,7 @@ impl<'a> Normalizer<'a> {
 
     /// N8: the final section's properties, with defaults for those I7 requires.
     fn section(&mut self) {
-        let mut section = self.raw.body.clone();
+        let mut section = storable(&self.raw.body);
         for (key, default) in SECTION_DEFAULTS {
             let valid = section
                 .get(key)
@@ -704,13 +714,11 @@ fn section_value_allowed(key: &str, value: i64) -> bool {
     }
 }
 
-/// The marks the view keeps: everything except the binding, null values and unsupported values.
+/// The marks the view keeps: everything except the binding, null values and values the adapter cannot store (see [`storable`]).
 fn clean_marks(marks: &Props) -> Props {
     marks
         .iter()
-        .filter(|(key, value)| {
-            key.as_str() != ATOM_KEY && !value.is_null() && **value != Value::Unsupported
-        })
+        .filter(|(key, value)| key.as_str() != ATOM_KEY && !value.is_null() && value.is_storable())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
@@ -773,8 +781,17 @@ fn push_text(pieces: &mut Vec<Piece>, chunk: &mut String, marks: &Props) {
     chunk.clear();
 }
 
+/// The properties the view keeps: those whose value the adapter can store. Another replica can store what this adapter refuses (a floating-point number, a container reference, a value nested too deeply); the model reads such a value as missing, as it does for marks, so that copying properties into new structure (a split paragraph, a materialized paragraph end) never fails halfway.
+fn storable(props: &Props) -> Props {
+    props
+        .iter()
+        .filter(|(_, value)| value.is_storable())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 fn without_story(props: &Props) -> Props {
-    let mut props = props.clone();
+    let mut props = storable(props);
     props.remove(registry::STORY);
     props
 }
