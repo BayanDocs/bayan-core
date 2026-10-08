@@ -4,4 +4,5 @@
 channel = "1.99.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
-targets = ["wasm32-unknown-unknown"]
+# wasm32-unknown-unknown is the web app's engine (ADR-0014); wasm32-wasip1 runs the tests in WebAssembly with Node.js (CORE-002; see WASM_TEST_TARGET in xtask/src/verify.rs).
+targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]

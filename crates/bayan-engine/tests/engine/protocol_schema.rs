@@ -3,6 +3,7 @@
 //! - The committed copies in `crates/bayan-engine/protocol/` are exactly what the generators produce from the current types. After changing a protocol type, regenerate them with `BAYAN_UPDATE_GENERATED=1 cargo test -p bayan-engine --test engine` and review the difference like any other change.
 //! - Sample messages, both those a shell sends and every message the engine sent during a session that uses every v0 message, validate against the schema; messages that break it are refused by the schema and by the engine alike.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use crate::support::schema_validator::Validator;
@@ -11,14 +12,19 @@ use crate::support::{
     whole_page,
 };
 use bayan_engine::protocol::{Direction, MESSAGES};
-use bayan_engine::{schema, typescript};
+use bayan_engine::schema;
+#[cfg(not(target_arch = "wasm32"))]
+use bayan_engine::typescript;
 use serde_json::{Value, json};
 
+// The checks of the committed files read and write files, so they run on the host only: the gate also runs these tests in WebAssembly (wasm32-wasip1), where they have no access to files.
+#[cfg(not(target_arch = "wasm32"))]
 fn generated_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("protocol")
 }
 
 /// Compares a committed generated file with what the generator produces now, or rewrites it when `BAYAN_UPDATE_GENERATED` is set.
+#[cfg(not(target_arch = "wasm32"))]
 fn check_generated(file: &str, generated: &str) {
     let path = generated_dir().join(file);
     if std::env::var_os("BAYAN_UPDATE_GENERATED").is_some() {
@@ -36,11 +42,13 @@ fn check_generated(file: &str, generated: &str) {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_committed_schema_is_current() {
     check_generated(schema::SCHEMA_FILE, &schema::json_schema_file().unwrap());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_committed_typescript_declarations_are_current() {
     check_generated(

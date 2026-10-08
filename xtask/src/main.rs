@@ -35,9 +35,10 @@ const USAGE: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  verify   Run the verification gate: formatting, lints, tests, WebAssembly build,
-           documentation, dependency policy, the lint guardrails and the
-           supply-chain checks. Run it before every push; CI runs the same command.
+  verify   Run the verification gate: formatting, lints, tests (on the host and in
+           WebAssembly), WebAssembly build, documentation, dependency policy, the lint
+           guardrails, the supply-chain checks and the determinism checks.
+           Run it before every push; CI runs the same command.
   check-exact-pins
            Check that every dependency is pinned exactly (=x.y.z), in
            [workspace.dependencies] and in every crate (ADR-0017 rule 5).

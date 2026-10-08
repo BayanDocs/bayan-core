@@ -30,6 +30,14 @@ schemars = "=1.2.2"
 wasm-bindgen = "=0.2.129"
 # Generates the C header of bayan-ffi (ADR-0012 §3); a test dependency only, which checks that the committed header is current. Without default features, so without its command-line parser. Published 2026-06-09; MPL-2.0.
 cbindgen = { version = "=0.29.4", default-features = false }
+# The Serialize and Deserialize traits without the derive macro, for types that implement them by hand (bayan-units). The same traits that `serde` re-exports, so both crates' types work with every serde format. Published 2026-07-18; MIT OR Apache-2.0.
+serde_core = { version = "=1.0.229", default-features = false }
+# Test-only. Property-based testing. Without its default features it seeds every run with the same fixed value, so a failure reproduces on every platform, and it needs no operating-system randomness: its `std` feature would pull in getrandom, which does not build for wasm32-unknown-unknown. `no_std` makes num-traits use libm for the float strategies proptest offers. Published 2026-03-24; MIT OR Apache-2.0.
+proptest = { version = "=1.11.0", default-features = false, features = ["alloc", "no_std"] }
+# Test-only. Arbitrary-precision integers for the independent reference implementations that the rounding, parsing and trigonometry tests compare against. Published 2026-07-05; MIT OR Apache-2.0.
+num-bigint = { version = "=0.5.1", default-features = false }
+# Test-only. Checks Serialize and Deserialize implementations against the exact serde calls they make. Published 2024-08-05; MIT OR Apache-2.0.
+serde_test = "=1.0.177"
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.

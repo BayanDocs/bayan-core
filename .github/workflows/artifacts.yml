@@ -35,6 +35,7 @@ env:
   # Node.js for the Node.js driver: the version of bayan-web's .nvmrc and of the BayanDocs cloud environment, released 2026-09-07. The
   # checksums in the Node.js step come from nodejs.org's SHASUMS256.txt for this version, whose signature by a key of the Node.js release
   # team (nodejs/release-keys) was checked on 2026-10-07; npmmirror's copy agrees. Change them only in the monthly dependency session.
+  # Must equal NODE_VERSION in xtask/src/verify.rs, the Node.js that runs the gate's tests in WebAssembly (a test checks this).
   NODE_VERSION: 24.21.0
   # wasm-bindgen's command-line tool, which turns the engine's module into the package (released 2026-09-25). Must equal the wasm-bindgen
   # crate in Cargo.lock and WASM_BINDGEN_VERSION in scripts/dev-setup.sh, and the checksum in the WebAssembly job must equal that script's
@@ -336,7 +337,7 @@ jobs:
           rustc --version
 
       - name: Install Miri on the pinned nightly toolchain (scripts/dev-setup.sh)
-        run: scripts/dev-setup.sh --no-wasm-bindgen
+        run: scripts/dev-setup.sh --no-wasm-bindgen --no-node
 
       - name: Run bayan-ffi's unit tests under Miri
         run: cargo xtask miri

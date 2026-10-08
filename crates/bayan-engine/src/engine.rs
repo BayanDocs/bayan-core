@@ -1055,6 +1055,8 @@ mod tests {
         )
     }
 
+    // Host only: in WebAssembly (wasm32-wasip1) a panic aborts the whole test program instead of unwinding, so the engine cannot catch it.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_panic_while_rendering_a_tile_directly_becomes_an_error_and_a_fresh_session() {
         let (mut engine, doc_id) = engine_with_document();
