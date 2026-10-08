@@ -645,3 +645,27 @@ fn a_comment_highlight_leaves_the_view_with_its_comment() {
     assert!(view.comments.contains_key(&comment));
     assert!(crate::common::marks_at(&view, MAIN, 1).contains_key(&key));
 }
+
+/// Setting a paragraph property is one undo step, reaches other replicas, and is refused for a paragraph that does not exist (review of CORE-004, item 24).
+#[test]
+fn setting_a_paragraph_property() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abc").unwrap();
+    let paragraph = a.paragraphs_in(MAIN)[0];
+    a.set_paragraph_property(paragraph, "jc", &Value::from("center"))
+        .unwrap();
+    assert_eq!(
+        valid_view(&a).paragraphs[&paragraph].get("jc"),
+        Some(&Value::from("center"))
+    );
+    let b = replica_of(&a, 2);
+    assert_eq!(valid_view(&b), valid_view(&a));
+    let missing = EntityId(42);
+    assert_eq!(
+        a.set_paragraph_property(missing, "jc", &Value::from("left")),
+        Err(EditError::NoSuchParagraph(missing))
+    );
+    assert!(a.undo().unwrap());
+    assert!(!valid_view(&a).paragraphs[&paragraph].contains_key("jc"));
+    assert_eq!(text(&a), "abc\n");
+}

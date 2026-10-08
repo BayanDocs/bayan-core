@@ -174,3 +174,35 @@ fn undo_and_redo_retrace_every_view() {
         assert_eq!(&valid_view(&a), expected);
     }
 }
+
+/// Pins how Loro 1.16.2's undo composes with text another replica typed inside a deleted range (review of CORE-004, item 24): undoing the delete restores the deleted text as one block, before the concurrent insertion, not around it ("abcdeYf" rather than "abcYdef"). Both replicas converge; an editing layer that wants the text restored around the insertion has to do it itself.
+#[test]
+fn undoing_a_delete_restores_the_text_before_what_another_replica_typed_inside_it() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abcdef").unwrap();
+    let mut b = replica_of(&a, 2);
+    a.delete(MAIN, 2..5).unwrap();
+    b.insert_text(MAIN, 3, "Y").unwrap();
+    sync_both(&mut a, &mut b);
+    assert_eq!(text(&a), "abYf\n");
+    assert!(a.undo().unwrap());
+    sync_both(&mut a, &mut b);
+    assert_eq!(text(&a), "abcdeYf\n");
+    assert_eq!(valid_view(&a), valid_view(&b));
+}
+
+/// Pins how a move composes with text typed inside the moved range concurrently (review of CORE-004, item 24): a move is a cut and a paste of the same content, so text another replica typed inside the range stays where the range was ("Zdefabc"), and undoing the move pastes the range back before it ("abcZdef"). Both replicas converge.
+#[test]
+fn text_typed_inside_a_moved_range_stays_behind_and_undo_restores_the_range_before_it() {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "abcdef").unwrap();
+    let mut b = replica_of(&a, 2);
+    a.move_range(MAIN, 0..3, MAIN, 6).unwrap();
+    b.insert_text(MAIN, 1, "Z").unwrap();
+    sync_both(&mut a, &mut b);
+    assert_eq!(text(&a), "Zdefabc\n");
+    assert!(a.undo().unwrap());
+    sync_both(&mut a, &mut b);
+    assert_eq!(text(&a), "abcZdef\n");
+    assert_eq!(valid_view(&a), valid_view(&b));
+}
