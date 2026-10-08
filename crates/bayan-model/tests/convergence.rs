@@ -11,7 +11,7 @@ fn setting(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The repairs that only concurrency can make necessary, now that local operations keep fields and ranges whole: N2, N3, N4, N6 and N7 (of the rules N1–N7 in `Stats::repairs`).
+/// The repairs that local operations should not need, because they keep fields and ranges whole and tables at block positions: N2, N3, N4, N6 and N7 (of the rules N1–N7 in `Stats::repairs`). N4 was local too until the second review round, when a move could still put a table in the middle of a paragraph; the test compares with the same plans on one replica alone rather than assuming 0.
 fn concurrent_repairs(repairs: &[usize; 7]) -> usize {
     repairs[1] + repairs[2] + repairs[3] + repairs[5] + repairs[6]
 }
@@ -59,7 +59,7 @@ fn replicas_converge_to_identical_valid_views() {
     }
     // Concurrent edits did produce states that needed repairing beyond what one replica alone needs, so the views were not trivially valid.
     println!(
-        "repairs only concurrency causes (N2, N3, N4, N6, N7): {concurrent} with three replicas, {baseline} with one"
+        "repairs of N2, N3, N4, N6 and N7: {concurrent} with three replicas, {baseline} with one"
     );
     assert!(
         concurrent > baseline,
