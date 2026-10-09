@@ -1065,15 +1065,48 @@ fn nested_field_codes(depth: u128) -> RawDocument {
     raw
 }
 
-/// Deeply nested field codes cost linear time in the plain text export too (the earlier version looked at every open field for every item); the time is checked, so that a quadratic export fails the test (review of CORE-004, second round, item A4).
+/// `depth` fields nested in each other's results.
+fn nested_field_results(depth: u128) -> RawDocument {
+    let paragraph = EntityId(0xA);
+    let mut raw = RawDocument::default();
+    raw.paragraphs.insert(paragraph, BTreeMap::new());
+    for level in 0..depth {
+        let field = EntityId(0x1_0000 + level);
+        raw.fields.insert(field, BTreeMap::new());
+        raw.main.push(atom(AtomKind::FieldBegin, field));
+        raw.main.push(text("c"));
+        raw.main.push(atom(AtomKind::FieldSeparator, field));
+        raw.main.push(text("r"));
+    }
+    for level in (0..depth).rev() {
+        raw.main
+            .push(atom(AtomKind::FieldEnd, EntityId(0x1_0000 + level)));
+    }
+    raw.main.push(atom(AtomKind::ParagraphEnd, paragraph));
+    raw
+}
+
+/// Deeply nested fields cost linear time in the plain text export too, nested in codes as in results: the earlier version looked at every open field for every item, which was quadratic for fields nested in results (it stopped at the first field still in its code, so fields nested in codes were linear already). The time is checked, so that a quadratic export fails the test (review of CORE-004, second round, item A4, and the final check).
 #[test]
-fn deeply_nested_field_codes_export_in_linear_time() {
+fn deeply_nested_fields_export_in_linear_time() {
+    // Nested in codes: only the outermost field's result is outside every code.
     let (small, _) = normalize(&nested_field_codes(2_500));
     let (view, _) = normalize(&nested_field_codes(20_000));
-    // Only the outermost field's result is outside every code.
     assert_eq!(view.plain_text(EntityId::MAIN_STORY), "r\n");
     assert_linear(
-        "plain text",
+        "plain text, fields in codes",
+        || drop(small.plain_text(EntityId::MAIN_STORY)),
+        || drop(view.plain_text(EntityId::MAIN_STORY)),
+    );
+    // Nested in results: every result is shown, and every code hidden.
+    let (small, _) = normalize(&nested_field_results(2_500));
+    let (view, _) = normalize(&nested_field_results(20_000));
+    assert_eq!(
+        view.plain_text(EntityId::MAIN_STORY),
+        format!("{}\n", "r".repeat(20_000))
+    );
+    assert_linear(
+        "plain text, fields in results",
         || drop(small.plain_text(EntityId::MAIN_STORY)),
         || drop(view.plain_text(EntityId::MAIN_STORY)),
     );
