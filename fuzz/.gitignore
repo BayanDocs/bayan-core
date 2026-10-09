@@ -1,0 +1,5 @@
+# Built by cargo-fuzz, and the corpora and crash artifacts that fuzzing produces locally.
+/target/
+/corpus/
+/artifacts/
+/coverage/
