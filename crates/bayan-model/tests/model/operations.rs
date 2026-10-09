@@ -237,6 +237,75 @@ fn a_cell_stored_twice_counts_once_in_column_operations() {
     }
 }
 
+/// A new row gets as many cells as the view shows in the row it is inserted next to, not as many as that row's stored list holds (review of 9c43419): after the history of [`column_stored_twice`], whose rows list four cells and show three, a row inserted anywhere got four.
+#[test]
+fn a_new_row_gets_as_many_cells_as_the_view_shows_in_its_neighbor() {
+    for index in 0..=2 {
+        let (mut a, mut b, table) = column_stored_twice();
+        a.insert_row(table, index).unwrap();
+        assert!(!a.has_pending_changes());
+        let shape: Vec<usize> = shown_cells(&a, table).iter().map(Vec::len).collect();
+        assert_eq!(shape, [3, 3, 3], "index {index}");
+        sync_both(&mut a, &mut b);
+        assert_eq!(valid_view(&a), valid_view(&b));
+    }
+}
+
+/// A 1×2 table that one replica gives a third column while another gives it a second row, and whose columns 0 and 1 the two replicas then delete concurrently: the first row keeps one cell and the second none, so the view omits the second (N6).
+fn table_with_a_row_the_view_omits() -> (Document, Document, EntityId) {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "x").expect("typing");
+    let table = a.insert_table(MAIN, 0, 1, 2).expect("a table");
+    let mut b = replica_of(&a, 2);
+    a.insert_column(table, 2).expect("a column");
+    b.insert_row(table, 1).expect("a row");
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.table_shape(table).expect("the table"), [3, 2]);
+    a.delete_column(table, 0).expect("a column deletion");
+    b.delete_column(table, 1).expect("another column deletion");
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.table_shape(table).expect("the table"), [1, 0]);
+    assert_eq!(bayan_model::normalize(&a.raw()).1.n6, 1);
+    (a, b, table)
+}
+
+/// Inserting a column gives a cell only to the rows that the view shows, so a row that concurrent column deletions emptied stays hidden; and a table in which no row shows a cell, which the view omits, is refused by the column and row insertions and deletions before anything is written (review of 9c43419). Before, the row and the table came back.
+#[test]
+fn column_and_row_insertions_leave_rows_and_tables_the_view_omits_hidden() {
+    let (mut a, mut b, table) = table_with_a_row_the_view_omits();
+    let shape = |document: &Document| -> Vec<usize> {
+        shown_cells(document, table).iter().map(Vec::len).collect()
+    };
+    assert_eq!(shape(&a), [1]);
+    a.insert_column(table, 0).unwrap();
+    assert!(!a.has_pending_changes());
+    assert_eq!(a.table_shape(table).unwrap(), [2, 0]);
+    assert_eq!(shape(&a), [2]);
+    sync_both(&mut a, &mut b);
+    assert_eq!(valid_view(&a), valid_view(&b));
+    // Two replicas delete different columns of a 2×2 table, which then leaves the view.
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "x").unwrap();
+    let table = a.insert_table(MAIN, 0, 2, 2).unwrap();
+    let mut b = replica_of(&a, 2);
+    a.delete_column(table, 0).unwrap();
+    b.delete_column(table, 1).unwrap();
+    sync_both(&mut a, &mut b);
+    let before = valid_view(&a);
+    assert!(!before.tables.contains_key(&table));
+    assert_eq!(
+        a.insert_column(table, 0),
+        Err(EditError::NoSuchTable(table))
+    );
+    assert_eq!(a.insert_row(table, 0), Err(EditError::NoSuchTable(table)));
+    assert_eq!(
+        a.delete_column(table, 0),
+        Err(EditError::NoSuchTable(table))
+    );
+    assert!(!a.has_pending_changes());
+    assert_eq!(valid_view(&a), before);
+}
+
 #[test]
 fn comments_fields_objects_and_bookmarks() {
     let mut a = document(1);

@@ -523,11 +523,11 @@ impl Document {
         })
     }
 
-    /// Inserts a row before row `index` of `table` (`index` equal to the row count appends), with as many cells as the row it is inserted next to. Returns its identifier.
+    /// Inserts a row before row `index` of `table` (`index` equal to the row count appends), with as many cells as the view shows in the row it is inserted next to, or, when the view shows none there, in the widest row. Returns its identifier.
     ///
     /// # Errors
     ///
-    /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], or the errors of the CRDT.
+    /// [`EditError::NoSuchTable`], also when no row of the table shows a cell (the view then omits the table, N6); [`EditError::InvalidPosition`]; or the errors of the CRDT.
     pub fn insert_row(&mut self, table: EntityId, index: usize) -> Result<EntityId, EditError> {
         self.check_attached()?;
         let list = self.rows_list(table)?;
@@ -537,13 +537,16 @@ impl Document {
                 len: list.len(),
             });
         }
+        let widest = self.widest_shown_row(table)?;
+        let registered = self.registry(registry::CELLS)?;
         let neighbor = list
             .items()
             .get(index.min(list.len().saturating_sub(1)))
-            .and_then(|item| item.as_str().and_then(EntityId::parse));
-        let columns = neighbor
+            .and_then(|item| item.as_str().and_then(EntityId::parse))
             .and_then(|row| self.cells_list(row))
-            .map_or(1, |cells| cells.len().max(1));
+            .map_or(0, |cells| shown_in(&cells, &registered).len());
+        // A stored list of cells can hold a cell twice (two replicas delete the same column and both undo), which the view shows once (N7): its length is not the number of columns the view shows.
+        let columns = if neighbor > 0 { neighbor } else { widest };
         let row = self.new_row(columns)?;
         self.crdt.commit_without_undo();
         list.insert(index, &row.to_string())?;
@@ -585,15 +588,18 @@ impl Document {
         Ok(())
     }
 
-    /// Inserts a column before column `index` of `table`: a new cell in every row, before the cell that the view shows at `index`, or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends). Columns are counted as the view shows them: a row that the stored state lists twice gets one cell, and a cell that a row's list holds twice counts once.
+    /// Inserts a column before column `index` of `table`: a new cell in every row that the view shows, before the cell that the view shows at `index`, or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends). Columns are counted as the view shows them: a row that the stored state lists twice gets one cell, a cell that a row's list holds twice counts once, and a row that shows no cell (concurrent column deletions can empty one, and the view omits it, N6) gets none, so that it stays hidden.
     ///
     /// # Errors
     ///
-    /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], or the errors of the CRDT.
+    /// [`EditError::NoSuchTable`], also when no row of the table shows a cell (the view then omits the table, N6); [`EditError::InvalidPosition`]; or the errors of the CRDT.
     pub fn insert_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
         let rows = self.shown_cells(table)?;
         let widest = rows.iter().map(|(_, shown)| shown.len()).max().unwrap_or(0);
+        if widest == 0 {
+            return Err(EditError::NoSuchTable(table));
+        }
         if index > widest {
             return Err(EditError::InvalidPosition {
                 pos: index,
@@ -602,6 +608,9 @@ impl Document {
         }
         let mut new_cells = Vec::with_capacity(rows.len());
         for (cells, shown) in rows {
+            if shown.is_empty() {
+                continue;
+            }
             let pos = shown.get(index).map_or(cells.len(), |(pos, _)| *pos);
             new_cells.push((cells, pos, self.new_cell()?));
         }
@@ -617,11 +626,14 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], [`EditError::LastRowOrColumn`], or the errors of the CRDT.
+    /// [`EditError::NoSuchTable`], also when no row of the table shows a cell (the view then omits the table, N6); [`EditError::InvalidPosition`]; [`EditError::LastRowOrColumn`]; or the errors of the CRDT.
     pub fn delete_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
         let rows = self.shown_cells(table)?;
         let widest = rows.iter().map(|(_, shown)| shown.len()).max().unwrap_or(0);
+        if widest == 0 {
+            return Err(EditError::NoSuchTable(table));
+        }
         if index >= widest {
             return Err(EditError::InvalidPosition {
                 pos: index,
@@ -1253,19 +1265,23 @@ impl Document {
             .cell_lists(table)?
             .into_iter()
             .map(|cells| {
-                let mut seen = BTreeSet::new();
-                let shown = cells
-                    .items()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(pos, item)| Some((pos, item.as_str().and_then(EntityId::parse)?)))
-                    .filter(|(_, cell)| {
-                        registered.get(&cell.to_string()).is_some() && seen.insert(*cell)
-                    })
-                    .collect();
+                let shown = shown_in(&cells, &registered);
                 (cells, shown)
             })
             .collect())
+    }
+
+    /// The number of cells that the widest row of `table` shows (see [`Document::shown_cells`]); refuses a table in which no row shows a cell, which the view omits (N6).
+    fn widest_shown_row(&self, table: EntityId) -> Result<usize, EditError> {
+        match self
+            .shown_cells(table)?
+            .iter()
+            .map(|(_, shown)| shown.len())
+            .max()
+        {
+            Some(widest) if widest > 0 => Ok(widest),
+            _ => Err(EditError::NoSuchTable(table)),
+        }
     }
 
     /// The entities of the atoms of `kind` in `range` of a story.
@@ -1331,6 +1347,21 @@ impl Document {
         }
         Ok(())
     }
+}
+
+/// The cells that the view shows in a row whose stored list of cells is `cells`, in order, with their positions in the list: each cell once, where it first appears in the row (N7), and no cell without an entry in `registered`, the cell registry (N5).
+fn shown_in(
+    cells: &bayan_crdt::IdList,
+    registered: &bayan_crdt::Registry,
+) -> Vec<(usize, EntityId)> {
+    let mut seen = BTreeSet::new();
+    cells
+        .items()
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, item)| Some((pos, item.as_str().and_then(EntityId::parse)?)))
+        .filter(|(_, cell)| registered.get(&cell.to_string()).is_some() && seen.insert(*cell))
+        .collect()
 }
 
 /// The table or comment reference that a run's binding names, if the run holds its placeholder: the atoms that hold stories.
