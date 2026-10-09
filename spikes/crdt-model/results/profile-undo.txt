@@ -1,0 +1,44 @@
+# callgrind, inclusive instruction counts: 20 undo steps on the replica that made the edits (one call of profile_undo), in the full 500-page model, commit 50dbc7a, 2026-10-08.
+# Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_undo*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
+
+ 22,926,636,767 (100.0%)  PROGRAM TOTALS
+ 22,926,636,767 (100.00%)  ???:crdt_model::bench::bench
+ 22,926,636,767 (100.00%)  ???:crdt_model::bench::profile_undo
+ 22,926,636,444 (100.00%)  ???:<bayan_model::document::Document>::undo
+ 22,926,634,712 (100.00%)  ???:<bayan_crdt::undo::UndoManager>::undo
+ 22,926,634,292 (100.00%)  ???:<loro::UndoManager>::undo
+ 22,926,634,272 (100.00%)  ???:<loro_internal::undo::UndoManager>::undo
+ 22,926,633,952 (100.00%)  ???:<loro_internal::undo::UndoManager>::perform::<<loro_internal::undo::UndoManager>::undo::{closure#0}, <loro_internal::undo::UndoManager>::undo::{closure#1}>
+ 22,926,216,955 (100.00%)  ???:<loro_internal::LoroDoc>::undo_internal
+ 22,925,691,664 (100.00%)  ???:<loro_internal::LoroDoc>::_checkout_without_emitting
+ 22,925,669,524 (100.00%)  ???:<loro_internal::LoroDoc>::_checkout_without_emitting_with_event
+ 22,917,747,915 (99.96%)  ???:<loro_internal::LoroDoc>::undo_internal::{closure#0}
+ 22,801,678,487 (99.45%)  ???:<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal
+ 22,718,529,243 (99.09%)  ???:<tracing::span::Span>::in_scope::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}, ()>
+ 22,569,890,876 (98.44%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator as loro_internal::diff_calc::DiffCalculatorTrait>::calculate_diff::<<loro_internal::diff_calc::DiffCalculator>::calc_diff_internal::{closure#9}::{closure#0}>
+ 22,504,869,647 (98.16%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::build_full_crdt_tracker
+ 22,504,465,261 (98.16%)  ???:loro_internal::diff_calc::replay_container_ops_from_empty
+ 19,134,030,348 (83.46%)  ???:<<loro_internal::diff_calc::RichtextDiffCalculator>::build_full_crdt_tracker::RichtextRebuildVisitor as loro_internal::diff_calc::RebuildOpVisitor>::visit
+ 15,677,282,264 (68.38%)  ???:<loro_internal::diff_calc::RichtextDiffCalculator>::apply_crdt_op_to_tracker
+ 15,248,132,131 (66.51%)  ???:<loro_internal::container::richtext::tracker::Tracker>::insert
+ 14,972,943,610 (65.31%)  ???:<loro_internal::container::richtext::tracker::Tracker>::_insert_inner
+ 13,463,066,277 (58.72%)  ???:<loro_internal::container::richtext::tracker::crdt_rope::CrdtRope>::insert::<<loro_internal::container::richtext::tracker::Tracker>::_insert_inner::{closure#0}>
+  4,482,457,418 (19.55%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::iter_range::<core::ops::range::RangeFrom<generic_btree::Cursor>>
+  4,028,274,987 (17.57%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::insert_by_path
+  3,751,345,338 (16.36%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::get_path
+  3,354,394,389 (14.63%)  ???:<loro_internal::container::richtext::tracker::Tracker>::_checkout
+  2,747,038,697 (11.98%)  ???:<loro_internal::oplog::OpLog>::iter_from_replay_base_causally
+  2,671,794,104 (11.65%)  ???:<loro_internal::oplog::change_store::ChangeStore>::iter_changes
+  2,455,468,502 (10.71%)  ???:<loro_internal::oplog::change_store::ChangeStore>::ensure_block_loaded_in_range
+  2,406,679,226 (10.50%)  ???:<quick_cache::sync::Cache<usize, alloc::sync::Arc<loro_kv_store::block::Block>, loro_kv_store::sstable::BlockDataWeighter>>::get_or_insert_with::<usize, loro_common::error::LoroError, <loro_kv_store::sstable::SsTable>::read_block_cached::{closure#0}>
+  2,378,720,576 (10.38%)  ???:<loro_kv_store::sstable::SsTable>::read_block
+  2,374,336,204 (10.36%)  ???:<loro_kv_store::block::Block>::try_decode
+  2,371,327,151 (10.34%)  ???:loro_kv_store::compress::decompress
+  2,363,200,181 (10.31%)  ???:<lz4_flex::frame::decompress::FrameDecoder<&[u8]> as alloc::io::read::Read>::read_to_end
+  2,323,503,672 (10.13%)  ???:<loro_kv_store::mem_store::MemStoreIterator<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<bytes::bytes::Bytes, bytes::bytes::Bytes>, <loro_kv_store::mem_store::MemKvStore>::scan::{closure#2}>, loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter>> as core::iter::traits::iterator::Iterator>::next
+  2,321,540,010 (10.13%)  ???:<loro_kv_store::iter::MergeIterator<loro_kv_store::sstable::SsTableIter> as core::iter::traits::iterator::Iterator>::next
+  2,313,026,838 (10.09%)  ???:<loro_kv_store::sstable::SsTableIter as core::iter::traits::iterator::Iterator>::next
+  2,305,638,241 (10.06%)  ???:<loro_kv_store::sstable::SsTableIter>::next
+  1,950,648,433 ( 8.51%)  ./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+  1,779,480,351 ( 7.76%)  ???:<generic_btree::BTree<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait>>::query_with_finder_return::<loro_internal::container::richtext::tracker::crdt_rope::ActiveLenQueryPreferLeft>
+  1,745,519,314 ( 7.61%)  ???:<generic_btree::iter::Iter<loro_internal::container::richtext::tracker::crdt_rope::CrdtRopeTrait> as core::iter::traits::iterator::Iterator>::next

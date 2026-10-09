@@ -1,0 +1,22 @@
+# crdt-model generate --mode full --small --out <data>/full-10-native.bin
+# native x86_64-unknown-linux-gnu, release build, unmodified Loro 1.16.2
+# commit 50dbc7a; Rust 1.99.0; Node.js v24.21.0; run 2026-10-08T15:32:19Z; load average before: 0.64 2.48 1.69
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+metric build_ms 12.571 ms
+metric export_snapshot_ms 4.510 ms
+metric snapshot_bytes 185188 bytes
+metric shallow_snapshot_bytes 109912 bytes
+metric ops 35075 count
+metric changes 13 count
+metric main_len 31173 count
+metric paragraphs 300 count
+metric tables 4 count
+metric cells 80 count
+metric comments 40 count
+metric fields 10 count
+metric objects 2 count
+metric bookmarks 4 count
+metric view_violations 0 count
+metric view_repairs 0 count
+metric view_paragraphs 420 count
+metric view_stories 121 count

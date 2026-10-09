@@ -8,5 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+bayan-crdt = { path = "../bayan-crdt" }
+
+# Tests only: a test plays a replica that stores, through Loro's own API, values this adapter refuses (tests/model/foreign.rs). The model itself uses Loro only through bayan-crdt.
+[dev-dependencies]
+loro = { workspace = true }
+
 [lints]
 workspace = true

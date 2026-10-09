@@ -1,0 +1,20 @@
+[package]
+name = "crdt-model-automerge"
+description = "CORE-004 spike: the Automerge comparison (one text object with marks and block markers) on the shared crdt-workload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+automerge.workspace = true
+crdt-workload = { path = "../crdt-workload" }
+
+# Automerge needs its `wasm` feature (getrandom's JavaScript backend) on wasm32-unknown-unknown, which the gate builds every crate for. It stays off on wasm32-wasip1, where the benchmark runs under Node.js and getrandom uses WASI's random_get instead.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+automerge = { workspace = true, features = ["wasm"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,35 @@
+# crdt-model bench --mode full --snapshot <data>/full-500.bin
+# native x86_64-unknown-linux-gnu, release build, unmodified Loro 1.16.2
+# commit 50dbc7a; Rust 1.99.0; Node.js v24.21.0; run 2026-10-08T15:32:19Z; load average before: 0.75 2.47 1.69
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+metric snapshot_bytes 9190558 bytes
+metric load_ms 24.811 ms
+metric raw_read_ms 2491.584 ms
+metric normalize_ms 111.262 ms
+metric read_ms 2602.846 ms
+metric load_and_read_ms 2627.657 ms
+metric view_main_items 45182 count
+metric view_violations 0 count
+metric memory_after_load_rss_delta 176996352 bytes
+metric local_edits_ms 358.118 ms
+metric edits_applied 999 count
+metric edits_refused 1 count
+metric update_bytes_per_edit_avg 105 bytes
+metric update_bytes 18619 bytes
+metric apply_update_ms 54.692 ms
+metric read_after_update_ms 376.839 ms
+metric replicas_equal true bool
+metric view_violations_after_update 0 count
+metric undo_steps 20 count
+metric undo_ms_avg 198.733 ms
+metric export_snapshot_after_edits_ms 85.608 ms
+metric snapshot_after_edits_bytes 9238116 bytes
+metric shallow_snapshot_after_edits_bytes 5440589 bytes
+metric apply_later_update_ms_avg 8.257 ms
+metric apply_keystroke_ms_avg 0.033 ms
+metric concurrent_keystroke_first_ms 0.196 ms
+metric concurrent_keystroke_ms_avg 0.139 ms
+metric concurrent_update_bytes 17728 bytes
+metric concurrent_apply_update_ms 117.828 ms
+metric concurrent_replicas_equal true bool
+metric peak_rss 473817088 bytes

@@ -1,0 +1,21 @@
+The change to Loro used for the "with fix" measurements (CORE-004 report, F1): the rich-text state decoder of loro-internal 1.16.2 counts the characters it has not consumed yet once and then subtracts, instead of counting them again for every span, which made decoding a snapshot quadratic in the length of a story.
+
+Only the three changed lines are given (a diff without context lines, `diff -U0`). To build the spike with it:
+
+1. Copy the unmodified crate, for example `cp -r ~/.cargo/registry/src/index.crates.io-*/loro-internal-1.16.2 "$PATCHED"` (after any build has downloaded it), and apply this file: `patch -p1 -d "$PATCHED" < spikes/crdt-model/results/loro-f1-fix.patch`.
+2. Make a scratch copy of this repository (`git worktree add`, or a plain copy) and append to its root `Cargo.toml`:
+
+       [patch.crates-io]
+       loro-internal = { path = "<the value of $PATCHED>" }
+
+3. Build there with a target folder of its own, so that no build of the unmodified workspace is reused (`CARGO_TARGET_DIR=<scratch>/target cargo build --release -p crdt-model`, without `--locked`: the patch changes how `Cargo.lock` records loro-internal). The gate's supply-chain step rejects such a copy on purpose; nothing in the repository uses it.
+
+--- a/src/state/richtext_state.rs
++++ b/src/state/richtext_state.rs
+@@ -1506,0 +1507 @@
++            let mut remaining_chars = string.chars().count();
+@@ -1572 +1573 @@
+-                        if s.as_str().chars().count() < len as usize {
++                        if remaining_chars < len as usize {
+@@ -1579,0 +1581 @@
++                        remaining_chars -= len as usize;

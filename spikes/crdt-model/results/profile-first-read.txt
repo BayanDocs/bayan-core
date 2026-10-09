@@ -1,0 +1,44 @@
+# callgrind, inclusive instruction counts: the first read of the full 500-page model after loading it (one call of profile_first_read: RawDocument::read, then normalize), commit 50dbc7a, 2026-10-08.
+# Release build with Loro's quadratic decoding fixed (loro-f1-fix.patch); collected only inside that call: valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*profile_first_read*' crdt-model bench --mode full --snapshot <file>. The top 40 functions; library paths shortened.
+
+  2,279,160,260 (100.0%)  PROGRAM TOTALS
+  2,279,160,260 (100.00%)  ???:crdt_model::bench::bench
+  2,279,160,260 (100.00%)  ???:crdt_model::bench::profile_first_read
+  1,930,828,723 (84.72%)  ???:<bayan_model::raw::RawDocument>::read
+    866,341,035 (38.01%)  ???:bayan_model::raw::read_props
+    846,472,415 (37.14%)  ???:<bayan_crdt::story::Story>::runs
+    778,066,646 (34.14%)  ???:<loro::LoroText>::to_delta
+    651,108,949 (28.57%)  ???:<loro_internal::handler::TextHandler>::get_richtext_value
+    474,903,998 (20.84%)  ???:<bayan_crdt::map::Registry>::entries
+    474,903,782 (20.84%)  ???:<loro_internal::handler::MapHandler>::for_each::<<loro::LoroMap>::for_each<<bayan_crdt::map::Registry>::entries::{closure#0}>::{closure#0}>
+    443,028,255 (19.44%)  ???:<alloc::vec::into_iter::IntoIter<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<(loro_common::internal_string::InternalString, loro_common::value::LoroValue), (alloc::string::String, loro_internal::handler::ValueOrHandler), (), <loro_internal::handler::MapHandler>::for_each<<loro::LoroMap>::for_each<<bayan_crdt::map::Stories>::entries::{closure#0}>::{closure#0}>::{closure#0}::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(alloc::string::String, loro_internal::handler::ValueOrHandler), <alloc::vec::Vec<(alloc::string::String, loro_internal::handler::ValueOrHandler)>>::extend_trusted<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)>, <loro_internal::handler::MapHandler>::for_each<<loro::LoroMap>::for_each<<bayan_crdt::map::Stories>::entries::{closure#0}>::{closure#0}>::{closure#0}::{closure#0}>>::{closure#0}>::{closure#0}>::{closure#0}>
+    398,530,955 (17.49%)  ???:<loro_internal::state::DocState>::get_map_entries
+    397,805,705 (17.45%)  ???:<loro_internal::state::container_store::inner_store::InnerStore>::with_container_for_read::<alloc::vec::Vec<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)>, <loro_internal::state::container_store::ContainerStore>::map_entries::{closure#0}>
+    397,164,858 (17.43%)  ???:<alloc::collections::btree::map::BTreeMap<bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>> as core::iter::traits::collect::FromIterator<(bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::collections::btree::map::IntoIter<alloc::string::String, bayan_crdt::map::PropertyMap>, bayan_model::raw::read_entities<alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>, <bayan_crdt::map::PropertyMap>::entries>::{closure#1}>>
+    394,402,173 (17.30%)  ???:<alloc::vec::Vec<(bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>)> as alloc::vec::spec_from_iter::SpecFromIter<(bayan_model::ids::EntityId, alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>), core::iter::adapters::filter_map::FilterMap<alloc::collections::btree::map::IntoIter<alloc::string::String, bayan_crdt::map::PropertyMap>, bayan_model::raw::read_entities<alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>, <bayan_crdt::map::PropertyMap>::entries>::{closure#1}>>>::from_iter
+    383,058,559 (16.81%)  ???:<&mut bayan_model::raw::read_entities<alloc::collections::btree::map::BTreeMap<alloc::string::String, bayan_crdt::value::Value>, <bayan_crdt::map::PropertyMap>::entries>::{closure#1} as core::ops::function::FnMut<((alloc::string::String, bayan_crdt::map::PropertyMap),)>>::call_mut
+    374,036,129 (16.41%)  ???:<bayan_crdt::map::PropertyMap>::entries
+    373,282,103 (16.38%)  ???:<loro_internal::handler::MapHandler>::for_each::<<loro::LoroMap>::for_each<<bayan_crdt::map::PropertyMap>::entries::{closure#0}>::{closure#0}>
+    352,725,803 (15.48%)  ???:__rustc::__rust_alloc
+    350,039,703 (15.36%)  ???:__rustc::__rdl_alloc
+    348,331,107 (15.28%)  ???:bayan_model::normalize::normalize
+    340,879,270 (14.96%)  ???:<alloc::vec::Vec<(alloc::string::String, loro_internal::handler::ValueOrHandler)> as alloc::vec::spec_from_iter::SpecFromIter<(alloc::string::String, loro_internal::handler::ValueOrHandler), core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<(loro_common::internal_string::InternalString, loro_common::value::LoroValue)>, <loro_internal::handler::MapHandler>::for_each<<loro::LoroMap>::for_each<<bayan_crdt::map::Registry>::entries::{closure#0}>::{closure#0}>::{closure#0}::{closure#0}>>>::from_iter
+    331,060,168 (14.53%)  ???:<bayan_model::normalize::Normalizer>::story
+    325,864,803 (14.30%)  ./malloc/./malloc/malloc.c:malloc
+    285,478,361 (12.53%)  ???:<loro_internal::state::container_store::ContainerStore>::get_or_create_mut
+    257,576,108 (11.30%)  ???:<loro_internal::utils::kv_wrapper::KvWrapper>::get
+    255,367,237 (11.20%)  ???:<loro_kv_store::mem_store::MemKvStore as loro_internal::kv_store::KvStore>::get
+    255,331,026 (11.20%)  ???:<loro_kv_store::mem_store::MemKvStore>::get
+    251,266,250 (11.02%)  ???:<loro_kv_store::sstable::SsTable>::get
+    237,822,944 (10.43%)  ???:loro_common::translate_mergeable_marker_value
+    236,901,326 (10.39%)  ???:<loro_internal::state::container_store::container_wrapper::ContainerWrapper>::decode_state
+    227,999,873 (10.00%)  ./malloc/./malloc/malloc.c:_int_malloc
+    225,952,611 ( 9.91%)  ???:<alloc::collections::btree::map::BTreeMap<bayan_model::ids::EntityId, alloc::vec::Vec<bayan_crdt::story::Run>> as core::iter::traits::collect::FromIterator<(bayan_model::ids::EntityId, alloc::vec::Vec<bayan_crdt::story::Run>)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::collections::btree::map::IntoIter<alloc::string::String, bayan_crdt::story::Story>, <bayan_model::raw::RawDocument>::read::{closure#0}>>
+    225,149,516 ( 9.88%)  ???:<alloc::vec::Vec<(bayan_model::ids::EntityId, alloc::vec::Vec<bayan_crdt::story::Run>)> as alloc::vec::spec_from_iter::SpecFromIter<(bayan_model::ids::EntityId, alloc::vec::Vec<bayan_crdt::story::Run>), core::iter::adapters::filter_map::FilterMap<alloc::collections::btree::map::IntoIter<alloc::string::String, bayan_crdt::story::Story>, <bayan_model::raw::RawDocument>::read::{closure#0}>>>::from_iter
+    224,897,723 ( 9.87%)  ???:__rustc::__rust_dealloc
+    223,930,023 ( 9.83%)  ???:<&mut <bayan_model::raw::RawDocument>::read::{closure#0} as core::ops::function::FnMut<((alloc::string::String, bayan_crdt::story::Story),)>>::call_mut
+    222,910,804 ( 9.78%)  ???:__rustc::__rdl_dealloc
+    220,923,885 ( 9.69%)  ./malloc/./malloc/malloc.c:free
+    203,421,753 ( 8.93%)  ???:<loro_internal::container::richtext::richtext_state::RichtextState>::get_richtext_value
+    200,063,736 ( 8.78%)  ???:<loro_internal::state::richtext_state::RichtextState as loro_internal::state::FastStateSnapshot>::decode_snapshot_fast
+    173,221,373 ( 7.60%)  ???:loro_internal::handler::value_to_value_or_handler

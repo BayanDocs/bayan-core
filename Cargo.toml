@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
-members = ["crates/*", "xtask", "xtask/lint-canary"]
+members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge"]
 # fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
 exclude = ["fuzz"]
 
@@ -38,6 +38,10 @@ proptest = { version = "=1.11.0", default-features = false, features = ["alloc",
 num-bigint = { version = "=0.5.1", default-features = false }
 # Test-only. Checks Serialize and Deserialize implementations against the exact serde calls they make. Published 2024-08-05; MIT OR Apache-2.0.
 serde_test = "=1.0.177"
+# The CRDT library of ADR-0008 (MIT, published 2026-09-21). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
+loro = "=1.16.2"
+# The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.
+automerge = "=0.12.0"
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.

@@ -1,0 +1,35 @@
+# BAYAN_NORMALIZATION_CASES=100000 cargo test --release --locked -p bayan-model --test normalization -- --nocapture
+# commit 50dbc7a; Rust 1.99.0; run 2026-10-08T15:41:11Z on the otherwise idle machine; load average before: 1.08 1.40 1.45
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+   Compiling thiserror v2.0.21
+   Compiling typenum v1.20.1
+   Compiling cobs v0.3.0
+   Compiling postcard v1.1.3
+   Compiling bitmaps v2.1.0
+   Compiling serde_columnar v0.3.14
+   Compiling loro-common v1.16.0
+   Compiling sized-chunks v0.6.5
+   Compiling im v15.1.0
+   Compiling loro-kv-store v1.16.0
+   Compiling loro-internal v1.16.2
+   Compiling loro v1.16.2
+   Compiling bayan-crdt v0.0.0 (<repository>/crates/bayan-crdt)
+   Compiling bayan-model v0.0.0 (<repository>/crates/bayan-model)
+    Finished `release` profile [optimized] target(s) in 44.95s
+     Running tests/normalization.rs (target/release/deps/normalization-691e5228ab72f496)
+
+running 10 tests
+test a_table_inside_its_own_cell_is_cut ... ok
+test a_derived_paragraph_end_never_takes_over_a_stored_one ... ok
+test a_repeated_reference_keeps_its_first_place ... ok
+test atoms_keep_their_marks_exactly_when_they_have_a_glyph ... ok
+test a_small_document_normalizes_as_expected ... ok
+test deeply_nested_tables_are_dropped_at_the_limit ... ok
+test the_plain_text_hides_fields_nested_in_a_field_code ... ok
+test deeply_nested_field_codes_export_in_linear_time ... ok
+test many_tables_in_one_paragraph_are_split_in_linear_time ... ok
+100000 cases: 70857 keep a field, 59024 a separator, 27370 a nested field
+test normalization_yields_invariant_views_and_is_deterministic_and_idempotent ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.63s
+

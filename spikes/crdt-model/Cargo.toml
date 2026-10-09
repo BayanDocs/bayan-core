@@ -1,0 +1,17 @@
+[package]
+name = "crdt-model"
+description = "CORE-004 spike: benchmarks, the long convergence run and the import fuzzer for the document model on Loro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bayan-crdt = { path = "../../crates/bayan-crdt" }
+bayan-model = { path = "../../crates/bayan-model" }
+crdt-workload = { path = "../crdt-workload" }
+
+[lints]
+workspace = true

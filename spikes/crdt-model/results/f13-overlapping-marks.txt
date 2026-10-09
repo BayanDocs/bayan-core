@@ -1,0 +1,25 @@
+# F13: importing an update with many overlapping marks into a replica that has a subscriber costs time and memory cubic in the number of marks (report §7 F13, §8.2, §8.3). Measured 2026-10-08 on commit d64ec12 (Loro 1.16.2, Rust 1.99.0, release builds, x86-64 Linux) on the machine of results/README.md, while other jobs ran (load averages 5 to 9 during the subscribed imports), so the times vary widely; the memory figures do not depend on the load.
+# Method: a scratch generator (not committed; it is a denial-of-service reproduction) builds one update from an empty document: a story of 2n+10 characters and n comment highlights `cmt:<id>`, each with its own 32-digit identifier and no comment entity, on the ranges [i, L-i] (nested), all on the same range (identical) or on [i, i+1) (disjoint). The update is imported once per process: through the adapter's Doc::import with ImportLimits::UPDATE, which every case passes (51 KB, 1 to 3 changes and 4,010 operations at n = 1,000), into a document with no subscriber, with a no-op subscriber, or with the adapter's undo manager; and through the model (Document::replica, which attaches the undo manager first, then Document::import). Peak memory is the process's VmHWM.
+# Profile (callgrind, n = 150, nested, a no-op subscriber): 98.3% of the import's instructions are in RichtextState::apply_diff_and_convert (loro-internal src/state/richtext_state.rs:379), which runs only while the document records events: for each mark's end it turns each segment's whole style set into a new map (to_option_map, line 550) and composes n deltas (lines 568 and 571), so nested marks build about n^3/3 map entries.
+
+Nested marks, through the adapter (Doc::import), one import per process
+n      update bytes   no subscriber   no-op subscriber        undo manager            peak memory with a subscriber
+100      4,986          1.7 ms           167 ms                 170 ms                   50 MiB
+250     12,608          9.2 ms         1,571 ms               1,769 ms                  665 MiB
+350     17,735         21.9 ms         4,631 ms               4,665 ms                1,826 MiB
+500     25,304           84 ms        22,740 ms              21,283 ms                5,174 MiB
+1000    50,757          343 ms         -                      -                       (see below)
+
+Nested marks, through the model: Document::replica + Document::import (the undo manager subscribed), then raw(), view() and normalize()
+n      replica + import            peak memory   raw()        view()       normalize()   mark entries in the runs
+100       84-237 ms                   51 MiB      3.3-5.1 ms    6-15 ms      2.6-6.7 ms        10,000
+250    1,342-1,704 ms                665 MiB       26-30 ms     45-53 ms     17.5-24 ms        62,500
+500   13,241-17,547 ms             5,175 MiB     119-138 ms   220-261 ms     105-169 ms       250,000
+1000  stopped by the kernel's out-of-memory killer after about 66 s at 12.4 GiB resident   1,000,000
+(Document::load, which imports before the undo manager subscribes, took 1.6, 8.1, 52 and 306 ms for n = 100, 250, 500 and 1,000.)
+
+Growth between sizes, with a subscriber: memory exponent 2.82 (100 to 250), 3.00 (250 to 350), 2.92 (350 to 500); time exponent 2.56 to about 3 (the largest step is inflated by allocating 5 GiB under load). Without a subscriber the exponent rises from about 1.8 to 3.3 between n = 50 and 1,000, at times 250 to 400 times smaller. normalize() grows with the number of mark entries (n^2), so linearly in what it reads.
+
+Variants at n = 500, through the model
+identical ranges   subscribed import 3.0-3.3 s, peak 87 MiB (time cubic, memory flat); 48 ms with no subscriber
+disjoint ranges    subscribed import 3.5-3.9 ms; negligible

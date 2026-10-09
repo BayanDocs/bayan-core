@@ -1,0 +1,119 @@
+# crdt-model supervise --seconds 4500 --workers 2 --out <private folder in memory (tmpfs)>   (commit 50dbc7a, release build, 2 MiB stacks (the default, the engine thread's); started 2026-10-08T18:19:40Z, in parallel with the convergence run, at a higher priority)
+# Inputs are counted from each round's running totals, which a worker writes every 1,000 inputs; a round that aborted is counted up to its last thousand inputs, while its panics are all counted per site (each is logged when it happens), so the panic sites can add up to more than the panicked total (report §8.2). The aborting inputs themselves are kept out of the repository (report §7).
+supervise: 2 workers with 2 MiB stacks, 4500 s, seed 0xc0de000400f22000
+worker 1: round 0 aborted after 64 s (memory allocation of  bytes failed); input kept as abort-b14-u-s43-d16d12caabe661b0
+worker 0: round 0 aborted after 76 s (memory allocation of  bytes failed); input kept as abort-b7-u-s22-ae5064cc884c7446
+worker 1: round 1 aborted after 122 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-cbbafebf2d8c91b9
+worker 1: round 2 aborted after 28 s (memory allocation of  bytes failed); input kept as abort-b1-u-s4-29f5620832f840d2
+worker 0: round 1 aborted after 167 s (memory allocation of  bytes failed); input kept as abort-b7-u-s22-59c7542d64db1924
+worker 1: round 3 aborted after 100 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-4a9a4cfd61908277
+worker 1: round 4 aborted after 50 s (memory allocation of  bytes failed); input kept as abort-b6-u-s19-896c48243cf5c3f8
+worker 1: round 5 aborted after 602 s (memory allocation of  bytes failed); input kept as abort-b14-u-s43-389a7df289f9630c
+worker 0: round 2 aborted after 733 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-016e8b6aa57efb7c
+worker 0: round 3 aborted after 192 s (memory allocation of  bytes failed); input kept as abort-b12-u-s37-60c4c8bcbd8e7c57
+worker 0: round 4 aborted after 12 s (memory allocation of  bytes failed); input kept as abort-b2-u-s7-f9098c8ca62fd0c5
+worker 0: round 5 aborted after 56 s (memory allocation of  bytes failed); input kept as abort-b7-u-s22-17c4bea09fe4d7ea
+worker 1: round 6 aborted after 295 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-bcfc41c3747a30f6
+worker 0: round 6 aborted after 30 s (memory allocation of  bytes failed); input kept as abort-b4-u-s12-639ef73e03e818be
+worker 0: round 7 aborted after 37 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-d7b810eb24b981fa
+worker 1: round 7 aborted after 82 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-3d13d1fda8861016
+worker 1: round 8 aborted after 5 s (memory allocation of  bytes failed); input kept as abort-b12-u-s37-2d736ef97c39b2e1
+worker 0: round 8 aborted after 53 s (memory allocation of  bytes failed); input kept as abort-b2-u-s6-051ad60a74117646
+worker 0: round 9 aborted after 306 s (memory allocation of  bytes failed); input kept as abort-b14-u-s43-84c14d71954df4d0
+worker 0: round 10 aborted after 13 s (memory allocation of  bytes failed); input kept as abort-b15-u-s45-9f3ee485a1cec6d0
+worker 0: round 11 aborted after 110 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-aaa1eacdca437029
+worker 0: round 12 aborted after 48 s (memory allocation of  bytes failed); input kept as abort-b2-u-s7-fd4a1763752eefa7
+worker 1: round 9 aborted after 519 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-7e74ab25a0ced568
+worker 0: round 13 aborted after 150 s (memory allocation of  bytes failed); input kept as abort-b14-u-s42-2525184f64cf82b3
+worker 1: round 10 aborted after 184 s (memory allocation of  bytes failed); input kept as abort-b10-u-s31-5d719bd219eeae79
+worker 0: round 14 aborted after 159 s (memory allocation of  bytes failed); input kept as abort-b11-u-s34-463ace1ac69f767d
+worker 1: round 11 aborted after 132 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-9afd3495476fd878
+worker 1: round 12 aborted after 35 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-4e260326dd2488e5
+worker 0: round 15 aborted after 303 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-e59caaab874af14e
+worker 0: round 16 aborted after 166 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-c07071ccb655a2cd
+worker 1: round 13 aborted after 449 s (memory allocation of  bytes failed); input kept as abort-b9-u-s27-1da5ed6cbb4ae96b
+worker 0: round 17 aborted after 139 s (memory allocation of  bytes failed); input kept as abort-b2-u-s7-ced2f9f0732df3de
+worker 0: round 18 aborted after 237 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-ffc6603178558e10
+worker 1: round 14 aborted after 328 s (memory allocation of  bytes failed); input kept as abort-b13-u-s39-e90a282d6ba5530e
+worker 1: round 15 aborted after 321 s (memory allocation of  bytes failed); input kept as abort-b4-u-s12-0614b743b4cffa41
+worker 0: round 19 aborted after 475 s (memory allocation of  bytes failed); input kept as abort-b8-u-s25-f8ae60c559ae6d72
+worker 0: round 20 aborted after 140 s (memory allocation of  bytes failed); input kept as abort-b4-u-s12-f2a43ded12c23c30
+worker 1: round 16 aborted after 429 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-076dfd6a43a31260
+worker 0: round 21 aborted after 180 s (memory allocation of  bytes failed); input kept as abort-b15-u-s45-a1c088d28669cb91
+worker 0: round 22 aborted after 173 s (memory allocation of  bytes failed); input kept as abort-b14-u-s42-a55efabc44f4f9e5
+worker 1: round 17 aborted after 237 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-8069d6446388d1d3
+worker 1: round 18 aborted after 10 s (memory allocation of  bytes failed); input kept as abort-b4-u-s13-1d8f9e0b87ded1ac
+worker 0: round 23 aborted after 85 s (memory allocation of  bytes failed); input kept as abort-b2-u-s7-8e752ed03fa10159
+worker 0: round 24 aborted after 88 s (memory allocation of  bytes failed); input kept as abort-b11-u-s34-d7a6f9d5f9f6cf5b
+worker 0: round 25 aborted after 24 s (memory allocation of  bytes failed); input kept as abort-b11-u-s34-7e1150fc56d75134
+summary: 13141572 inputs in 9001 s of fuzzing (47 rounds on 2 workers, 4500 s wall clock); 929023 imported (all normalized into valid views), 12184437 refused; 28112 panicked at 22 source locations (0 of them not contained by the adapter); 45 aborted the process; 0 invariant failures; slowest input 7536 ms (inputs of a round that aborted are counted up to its last thousand)
+panic site: generic-btree-0.10.7/src/lib.rs:618: 13378 inputs, during import, contained by the adapter
+panic site: loro-common-1.16.0/src/lib.rs:1001: 8 inputs, during import, contained by the adapter
+panic site: loro-delta-1.13.0/src/delta_rope/compose.rs:136: 5 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/change.rs:237: 9 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:1718: 1342 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:2277: 2446 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/tracker/crdt_rope.rs:106: 1700 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1071: 182 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1296: 3 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1630: 205 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:2183: 23 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:969: 7 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:921: 4 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:980: 20 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/oplog/loro_dag.rs:445: 102 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1053: 5506 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1056: 3038 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1210: 156 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:564: 3 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:568: 1 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:575: 10 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:637: 7 inputs, during import, contained by the adapter
+abort: abort-b14-u-s43-d16d12caabe661b0: memory allocation of  bytes failed
+abort: abort-b7-u-s22-ae5064cc884c7446: memory allocation of  bytes failed
+abort: abort-b3-u-s10-cbbafebf2d8c91b9: memory allocation of  bytes failed
+abort: abort-b1-u-s4-29f5620832f840d2: memory allocation of  bytes failed
+abort: abort-b7-u-s22-59c7542d64db1924: memory allocation of  bytes failed
+abort: abort-b3-u-s9-4a9a4cfd61908277: memory allocation of  bytes failed
+abort: abort-b6-u-s19-896c48243cf5c3f8: memory allocation of  bytes failed
+abort: abort-b14-u-s43-389a7df289f9630c: memory allocation of  bytes failed
+abort: abort-b3-u-s10-016e8b6aa57efb7c: memory allocation of  bytes failed
+abort: abort-b12-u-s37-60c4c8bcbd8e7c57: memory allocation of  bytes failed
+abort: abort-b2-u-s7-f9098c8ca62fd0c5: memory allocation of  bytes failed
+abort: abort-b7-u-s22-17c4bea09fe4d7ea: memory allocation of  bytes failed
+abort: abort-b8-u-s25-bcfc41c3747a30f6: memory allocation of  bytes failed
+abort: abort-b4-u-s12-639ef73e03e818be: memory allocation of  bytes failed
+abort: abort-b3-u-s9-d7b810eb24b981fa: memory allocation of  bytes failed
+abort: abort-b3-u-s10-3d13d1fda8861016: memory allocation of  bytes failed
+abort: abort-b12-u-s37-2d736ef97c39b2e1: memory allocation of  bytes failed
+abort: abort-b2-u-s6-051ad60a74117646: memory allocation of  bytes failed
+abort: abort-b14-u-s43-84c14d71954df4d0: memory allocation of  bytes failed
+abort: abort-b15-u-s45-9f3ee485a1cec6d0: memory allocation of  bytes failed
+abort: abort-b8-u-s25-aaa1eacdca437029: memory allocation of  bytes failed
+abort: abort-b2-u-s7-fd4a1763752eefa7: memory allocation of  bytes failed
+abort: abort-b3-u-s10-7e74ab25a0ced568: memory allocation of  bytes failed
+abort: abort-b14-u-s42-2525184f64cf82b3: memory allocation of  bytes failed
+abort: abort-b10-u-s31-5d719bd219eeae79: memory allocation of  bytes failed
+abort: abort-b11-u-s34-463ace1ac69f767d: memory allocation of  bytes failed
+abort: abort-b3-u-s9-9afd3495476fd878: memory allocation of  bytes failed
+abort: abort-b3-u-s10-4e260326dd2488e5: memory allocation of  bytes failed
+abort: abort-b3-u-s10-e59caaab874af14e: memory allocation of  bytes failed
+abort: abort-b3-u-s9-c07071ccb655a2cd: memory allocation of  bytes failed
+abort: abort-b9-u-s27-1da5ed6cbb4ae96b: memory allocation of  bytes failed
+abort: abort-b2-u-s7-ced2f9f0732df3de: memory allocation of  bytes failed
+abort: abort-b3-u-s9-ffc6603178558e10: memory allocation of  bytes failed
+abort: abort-b13-u-s39-e90a282d6ba5530e: memory allocation of  bytes failed
+abort: abort-b4-u-s12-0614b743b4cffa41: memory allocation of  bytes failed
+abort: abort-b8-u-s25-f8ae60c559ae6d72: memory allocation of  bytes failed
+abort: abort-b4-u-s12-f2a43ded12c23c30: memory allocation of  bytes failed
+abort: abort-b3-u-s10-076dfd6a43a31260: memory allocation of  bytes failed
+abort: abort-b15-u-s45-a1c088d28669cb91: memory allocation of  bytes failed
+abort: abort-b14-u-s42-a55efabc44f4f9e5: memory allocation of  bytes failed
+abort: abort-b3-u-s9-8069d6446388d1d3: memory allocation of  bytes failed
+abort: abort-b4-u-s13-1d8f9e0b87ded1ac: memory allocation of  bytes failed
+abort: abort-b2-u-s7-8e752ed03fa10159: memory allocation of  bytes failed
+abort: abort-b11-u-s34-d7a6f9d5f9f6cf5b: memory allocation of  bytes failed
+abort: abort-b11-u-s34-7e1150fc56d75134: memory allocation of  bytes failed
+# exit status 0, finished 2026-10-08T19:34:41Z
+# CPU time of the fuzzing processes (user, system), from the shell's times builtin:
+# 143m19.051s 4m6.952s

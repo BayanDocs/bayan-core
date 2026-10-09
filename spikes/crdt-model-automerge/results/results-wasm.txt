@@ -1,0 +1,138 @@
+# CORE-004 Automerge benchmark, WebAssembly (wasm32-wasip1, release build, Rust 1.99.0, automerge 0.12.0 without its wasm feature) under Node.js v24.21.0 (node:wasi preview1)
+# commit 50dbc7a; run 2026-10-08T15:40:00Z
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+# module: target/wasm32-wasip1/release/crdt-model-automerge.wasm (2642912 bytes, sha256 87a50f4393eaed8a...)
+# runner: spikes/crdt-model/run-wasi.mjs (sha256 fb17f879a17761c2...)
+# snapshot: <data>/am-500.bin, sha256 21fe9cb6df914c6ca2eba0d1626d147c0bb41a2ce2c379f32f3315528e9e7ed0
+
+## sanity: node run-wasi.mjs <module> <data> bench --snapshot /data/am-10.bin
+metric load_ms 74.600 ms
+metric read_ms 12.509 ms
+metric text_fnv1a64 2fe368cd5c2c29b5 hash
+metric memory_after_load_wasm_linear 7667712 bytes
+metric memory_load_only_wasm_linear 7667712 bytes
+metric blocks_read 300 count
+metric marks_read 113 count
+metric read_text_ms 2.661 ms
+metric local_edits_ms 132.577 ms
+metric edits 1000 count
+metric update_bytes_per_edit_avg 134 bytes
+metric update_bytes 134250 bytes
+metric update_changes 1000 count
+metric update_bundle_bytes 13806 bytes
+metric apply_update_ms 86.679 ms
+metric replicas_equal true bool
+metric replicas_content_equal true bool
+metric heads_equal true bool
+metric read_after_update_ms 11.302 ms
+metric final_text_fnv1a64 94cbfa01531b2c76 hash
+metric final_sequence_len 32581 count
+metric final_blocks 337 count
+metric final_marks 191 count
+metric wasm_linear_memory_end 7798784 bytes
+metric apply_later_update_ms_avg 74.249 ms
+metric apply_keystroke_ms_avg 17.390 ms
+metric apply_first_change_ms 11.629 ms
+metric first_change_bytes 134 bytes
+metric wasm.module_bytes 2642912 bytes
+metric wasm.compile_ms 10.073 ms
+metric wasm.linear_memory_final 10027008 bytes
+
+## run 1: node run-wasi.mjs <module> <data> bench --snapshot /data/am-500.bin   (load average before: 1.18 1.44 1.47)
+metric load_ms 2452.140 ms
+metric read_ms 246.564 ms
+metric text_fnv1a64 2d2e9e2dc8af0e5b hash
+metric memory_after_load_wasm_linear 330235904 bytes
+metric memory_load_only_wasm_linear 330235904 bytes
+metric blocks_read 15000 count
+metric marks_read 5643 count
+metric read_text_ms 69.699 ms
+metric local_edits_ms 135.082 ms
+metric edits 1000 count
+metric update_bytes_per_edit_avg 135 bytes
+metric update_bytes 135241 bytes
+metric update_changes 1000 count
+metric update_bundle_bytes 15024 bytes
+metric apply_update_ms 1315.358 ms
+metric replicas_equal true bool
+metric replicas_content_equal true bool
+metric heads_equal true bool
+metric read_after_update_ms 401.665 ms
+metric final_text_fnv1a64 efd47631a795be2e hash
+metric final_sequence_len 1522849 count
+metric final_blocks 15038 count
+metric final_marks 5718 count
+metric wasm_linear_memory_end 908984320 bytes
+metric apply_later_update_ms_avg 609.143 ms
+metric apply_keystroke_ms_avg 539.971 ms
+metric apply_first_change_ms 515.816 ms
+metric first_change_bytes 132 bytes
+metric wasm.module_bytes 2642912 bytes
+metric wasm.compile_ms 6.310 ms
+metric wasm.linear_memory_final 908984320 bytes
+
+## run 2: node run-wasi.mjs <module> <data> bench --snapshot /data/am-500.bin   (load average before: 1.14 1.42 1.46)
+metric load_ms 2357.123 ms
+metric read_ms 240.214 ms
+metric text_fnv1a64 2d2e9e2dc8af0e5b hash
+metric memory_after_load_wasm_linear 330235904 bytes
+metric memory_load_only_wasm_linear 330235904 bytes
+metric blocks_read 15000 count
+metric marks_read 5643 count
+metric read_text_ms 73.908 ms
+metric local_edits_ms 123.323 ms
+metric edits 1000 count
+metric update_bytes_per_edit_avg 135 bytes
+metric update_bytes 135241 bytes
+metric update_changes 1000 count
+metric update_bundle_bytes 15024 bytes
+metric apply_update_ms 1224.451 ms
+metric replicas_equal true bool
+metric replicas_content_equal true bool
+metric heads_equal true bool
+metric read_after_update_ms 382.351 ms
+metric final_text_fnv1a64 efd47631a795be2e hash
+metric final_sequence_len 1522849 count
+metric final_blocks 15038 count
+metric final_marks 5718 count
+metric wasm_linear_memory_end 908984320 bytes
+metric apply_later_update_ms_avg 633.415 ms
+metric apply_keystroke_ms_avg 544.615 ms
+metric apply_first_change_ms 541.275 ms
+metric first_change_bytes 132 bytes
+metric wasm.module_bytes 2642912 bytes
+metric wasm.compile_ms 7.134 ms
+metric wasm.linear_memory_final 908984320 bytes
+
+## run 3: node run-wasi.mjs <module> <data> bench --snapshot /data/am-500.bin   (load average before: 1.52 1.50 1.48)
+metric load_ms 2372.983 ms
+metric read_ms 254.639 ms
+metric text_fnv1a64 2d2e9e2dc8af0e5b hash
+metric memory_after_load_wasm_linear 330235904 bytes
+metric memory_load_only_wasm_linear 330235904 bytes
+metric blocks_read 15000 count
+metric marks_read 5643 count
+metric read_text_ms 66.212 ms
+metric local_edits_ms 122.718 ms
+metric edits 1000 count
+metric update_bytes_per_edit_avg 135 bytes
+metric update_bytes 135241 bytes
+metric update_changes 1000 count
+metric update_bundle_bytes 15024 bytes
+metric apply_update_ms 1221.711 ms
+metric replicas_equal true bool
+metric replicas_content_equal true bool
+metric heads_equal true bool
+metric read_after_update_ms 386.039 ms
+metric final_text_fnv1a64 efd47631a795be2e hash
+metric final_sequence_len 1522849 count
+metric final_blocks 15038 count
+metric final_marks 5718 count
+metric wasm_linear_memory_end 908984320 bytes
+metric apply_later_update_ms_avg 625.391 ms
+metric apply_keystroke_ms_avg 528.392 ms
+metric apply_first_change_ms 500.623 ms
+metric first_change_bytes 132 bytes
+metric wasm.module_bytes 2642912 bytes
+metric wasm.compile_ms 7.122 ms
+metric wasm.linear_memory_final 908984320 bytes

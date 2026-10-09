@@ -1,0 +1,41 @@
+# crdt-model supervise --seconds 4500 --workers 2 --out <private folder on the machine's disk>   (commit 50dbc7a, release build, 2 MiB stacks (the default, the engine thread's); started 2026-10-08T17:02:45Z, in parallel with the convergence run, at a higher priority)
+# Kept for one number, not for its findings: this attempt at the main run wrote its output folder, and so every input before importing it, to the machine's disk (ext4, mounted with discard), and its CPU time (the last line) is 1,956 s of the workers' 9,001 s of running time, about a fifth: each worker spent about three quarters of its time waiting for the disk. The main run (fuzz-supervise-4500s.log) kept the folder in memory, repeated every round of this attempt from the same seed and streams, went further in the two rounds that ran out of time, and found everything this one found (report §8.2).
+# Inputs are counted from each round's running totals, which a worker writes every 1,000 inputs; a round that aborted is counted up to its last thousand inputs, while its panics are all counted per site. The aborting inputs themselves are kept out of the repository (report §7).
+supervise: 2 workers with 2 MiB stacks, 4500 s, seed 0xc0de000400f22000
+worker 1: round 0 aborted after 419 s (memory allocation of  bytes failed); input kept as abort-b14-u-s43-d16d12caabe661b0
+worker 0: round 0 aborted after 492 s (memory allocation of  bytes failed); input kept as abort-b7-u-s22-ae5064cc884c7446
+worker 1: round 1 aborted after 783 s (memory allocation of  bytes failed); input kept as abort-b3-u-s10-cbbafebf2d8c91b9
+worker 1: round 2 aborted after 183 s (memory allocation of  bytes failed); input kept as abort-b1-u-s4-29f5620832f840d2
+worker 0: round 1 aborted after 1065 s (memory allocation of  bytes failed); input kept as abort-b7-u-s22-59c7542d64db1924
+worker 1: round 3 aborted after 633 s (memory allocation of  bytes failed); input kept as abort-b3-u-s9-4a9a4cfd61908277
+worker 1: round 4 aborted after 333 s (memory allocation of  bytes failed); input kept as abort-b6-u-s19-896c48243cf5c3f8
+summary: 2040808 inputs in 9001 s of fuzzing (9 rounds on 2 workers, 4500 s wall clock); 144343 imported (all normalized into valid views), 1892228 refused; 4237 panicked at 19 source locations (0 of them not contained by the adapter); 7 aborted the process; 0 invariant failures; slowest input 1336 ms (inputs of a round that aborted are counted up to its last thousand)
+panic site: generic-btree-0.10.7/src/lib.rs:618: 2020 inputs, during import, contained by the adapter
+panic site: loro-common-1.16.0/src/lib.rs:1001: 4 inputs, during import, contained by the adapter
+panic site: loro-delta-1.13.0/src/delta_rope/compose.rs:136: 1 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:1718: 212 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/richtext_state.rs:2277: 384 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/container/richtext/tracker/crdt_rope.rs:106: 254 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1071: 26 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:1630: 31 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:2183: 4 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/diff_calc.rs:969: 1 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:921: 1 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/history_cache.rs:980: 3 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/oplog/loro_dag.rs:445: 14 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1053: 837 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1056: 425 inputs, during import, contained by the adapter
+panic site: loro-internal-1.16.2/src/state/movable_list_state.rs:1210: 22 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:568: 1 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:575: 1 inputs, during import, contained by the adapter
+panic site: serde_columnar-0.3.14/src/strategy/rle.rs:637: 2 inputs, during import, contained by the adapter
+abort: abort-b14-u-s43-d16d12caabe661b0: memory allocation of  bytes failed
+abort: abort-b7-u-s22-ae5064cc884c7446: memory allocation of  bytes failed
+abort: abort-b3-u-s10-cbbafebf2d8c91b9: memory allocation of  bytes failed
+abort: abort-b1-u-s4-29f5620832f840d2: memory allocation of  bytes failed
+abort: abort-b7-u-s22-59c7542d64db1924: memory allocation of  bytes failed
+abort: abort-b3-u-s9-4a9a4cfd61908277: memory allocation of  bytes failed
+abort: abort-b6-u-s19-896c48243cf5c3f8: memory allocation of  bytes failed
+# exit status 0, finished 2026-10-08T18:17:46Z
+# CPU time of the fuzzing processes (user, system), from the shell's times builtin:
+# 27m55.790s 4m40.308s

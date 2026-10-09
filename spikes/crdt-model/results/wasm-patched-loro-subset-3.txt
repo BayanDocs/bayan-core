@@ -1,0 +1,33 @@
+# node run-wasi.mjs <module> <data> bench --mode subset --snapshot /data/subset-500.bin
+# wasm32-wasip1 release build under Node.js v24.21.0 (node:wasi), Loro 1.16.2 with the F1 fix of loro-f1-fix.patch through [patch.crates-io], in a scratch copy of the workspace with its own target folder
+# commit 50dbc7a; Rust 1.99.0; Node.js v24.21.0; run 2026-10-08T15:38:30Z; load average before: 1.18 1.51 1.49
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+metric snapshot_bytes 5009149 bytes
+metric load_ms 39.441 ms
+metric read_ms 296.582 ms
+metric load_and_read_ms 336.024 ms
+metric text_fnv1a64 2d2e9e2dc8af0e5b hash
+metric marks_read 5643 count
+metric blocks_read 15000 count
+metric paragraph_entities_read 15000 count
+metric memory_after_load_wasm_linear 65667072 bytes
+metric local_edits_ms 71.513 ms
+metric update_bytes_per_edit_avg 104 bytes
+metric update_bytes 17559 bytes
+metric apply_update_ms 68.325 ms
+metric replicas_equal true bool
+metric read_after_update_ms 120.692 ms
+metric final_text_fnv1a64 3838c90c4f76f74a hash
+metric final_sequence_len 1522849 count
+metric undo_steps 20 count
+metric undo_ms_avg 196.792 ms
+metric apply_later_update_ms_avg 6.835 ms
+metric concurrent_keystroke_first_ms 0.568 ms
+metric concurrent_keystroke_ms_avg 0.147 ms
+metric concurrent_update_bytes 11895 bytes
+metric concurrent_apply_update_ms 8.908 ms
+metric concurrent_replicas_equal true bool
+metric wasm_linear_memory_end 201981952 bytes
+metric wasm.module_bytes 4750674 bytes
+metric wasm.compile_ms 10.763 ms
+metric wasm.linear_memory_final 201981952 bytes

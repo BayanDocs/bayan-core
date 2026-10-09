@@ -1,0 +1,35 @@
+# crdt-model bench --mode full --snapshot <data>/full-500.bin
+# native x86_64-unknown-linux-gnu, release build, Loro 1.16.2 with the F1 fix of loro-f1-fix.patch through [patch.crates-io], in a scratch copy of the workspace with its own target folder
+# commit 50dbc7a; Rust 1.99.0; Node.js v24.21.0; run 2026-10-08T15:34:52Z; load average before: 1.10 1.93 1.60
+# machine: 4 CPUs, Intel(R) Xeon(R) Processor @ 2.10GHz, 15 GiB RAM, Linux 6.18.44-fc-v80
+metric snapshot_bytes 9190558 bytes
+metric load_ms 33.216 ms
+metric raw_read_ms 369.266 ms
+metric normalize_ms 111.453 ms
+metric read_ms 480.720 ms
+metric load_and_read_ms 513.937 ms
+metric view_main_items 45182 count
+metric view_violations 0 count
+metric memory_after_load_rss_delta 176848896 bytes
+metric local_edits_ms 386.173 ms
+metric edits_applied 999 count
+metric edits_refused 1 count
+metric update_bytes_per_edit_avg 105 bytes
+metric update_bytes 18619 bytes
+metric apply_update_ms 62.884 ms
+metric read_after_update_ms 444.768 ms
+metric replicas_equal true bool
+metric view_violations_after_update 0 count
+metric undo_steps 20 count
+metric undo_ms_avg 213.400 ms
+metric export_snapshot_after_edits_ms 85.799 ms
+metric snapshot_after_edits_bytes 9238116 bytes
+metric shallow_snapshot_after_edits_bytes 5440589 bytes
+metric apply_later_update_ms_avg 8.299 ms
+metric apply_keystroke_ms_avg 0.032 ms
+metric concurrent_keystroke_first_ms 0.217 ms
+metric concurrent_keystroke_ms_avg 0.147 ms
+metric concurrent_update_bytes 17728 bytes
+metric concurrent_apply_update_ms 113.300 ms
+metric concurrent_replicas_equal true bool
+metric peak_rss 473948160 bytes
