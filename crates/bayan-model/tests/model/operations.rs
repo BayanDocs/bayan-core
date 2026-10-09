@@ -177,6 +177,66 @@ fn a_row_stored_twice_gains_and_loses_one_cell_per_column_operation() {
     assert_eq!(valid_view(&a), valid_view(&b));
 }
 
+/// Two replicas delete the same column of a two-row, three-column table and both undo: each undo inserts the column's cells again, so every row's stored list holds its middle cell twice, and the view shows it once (N7).
+fn column_stored_twice() -> (Document, Document, EntityId) {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "x").expect("typing");
+    let table = a.insert_table(MAIN, 0, 2, 3).expect("a table");
+    let mut b = replica_of(&a, 2);
+    a.delete_column(table, 1).expect("a column deletion");
+    b.delete_column(table, 1).expect("the same column deletion");
+    sync_both(&mut a, &mut b);
+    assert!(a.undo().expect("an undo"));
+    assert!(b.undo().expect("an undo"));
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.table_shape(table).expect("the table"), [4, 4]);
+    (a, b, table)
+}
+
+/// The cells of every row of `table`, as the view shows them.
+fn shown_cells(document: &Document, table: EntityId) -> Vec<Vec<EntityId>> {
+    let view = valid_view(document);
+    view.tables[&table]
+        .rows
+        .iter()
+        .map(|row| view.rows[row].cells.clone())
+        .collect()
+}
+
+#[test]
+fn a_cell_stored_twice_counts_once_in_column_operations() {
+    let (a, _, table) = column_stored_twice();
+    let shown = shown_cells(&a, table);
+    assert!(shown.iter().all(|row| row.len() == 3));
+    // Before the fix, deleting column 1 deleted one copy of the middle cell, and the other copy kept it in the view; deleting column 2 deleted that second copy instead of the last cell.
+    for (index, kept) in [(1, [0, 2]), (2, [0, 1])] {
+        let (mut a, mut b, table) = column_stored_twice();
+        a.delete_column(table, index).unwrap();
+        assert!(!a.has_pending_changes());
+        let expected: Vec<Vec<EntityId>> = shown
+            .iter()
+            .map(|row| kept.iter().map(|column| row[*column]).collect())
+            .collect();
+        assert_eq!(shown_cells(&a, table), expected);
+        sync_both(&mut a, &mut b);
+        assert_eq!(valid_view(&a), valid_view(&b));
+    }
+    // Inserting a column adds one cell to every row, before the cell the view shows at that index or, at index 3, after the last one (before the fix, it landed before the last cell).
+    for index in [1, 3] {
+        let (mut a, mut b, table) = column_stored_twice();
+        a.insert_column(table, index).unwrap();
+        assert!(!a.has_pending_changes());
+        for (row, before) in shown_cells(&a, table).iter().zip(&shown) {
+            assert_eq!(row.len(), 4);
+            let mut others = row.clone();
+            others.remove(index);
+            assert_eq!(&others, before);
+        }
+        sync_both(&mut a, &mut b);
+        assert_eq!(valid_view(&a), valid_view(&b));
+    }
+}
+
 #[test]
 fn comments_fields_objects_and_bookmarks() {
     let mut a = document(1);

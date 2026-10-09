@@ -15,6 +15,9 @@ use crate::view::View;
 use crate::{AtomKind, EntityId, IdGenerator, Props, Report, SECTION_DEFAULTS, marks, normalize};
 
 const PARAGRAPH_END: char = '\u{0D}';
+
+/// A stored row's cell list, with the cells that the view shows in that row and their positions in the list.
+type ShownRow = (bayan_crdt::IdList, Vec<(usize, EntityId)>);
 const TABLE_BLOCK: char = '\u{07}';
 
 /// Why an operation was refused.
@@ -582,15 +585,15 @@ impl Document {
         Ok(())
     }
 
-    /// Inserts a column before column `index` of `table`: a new cell in every row, at `index` or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends). A row that the stored state lists twice gets one cell, as the view shows it once.
+    /// Inserts a column before column `index` of `table`: a new cell in every row, before the cell that the view shows at `index`, or at the end of a shorter row. `index` may be at most the number of cells of the longest row (which appends). Columns are counted as the view shows them: a row that the stored state lists twice gets one cell, and a cell that a row's list holds twice counts once.
     ///
     /// # Errors
     ///
     /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], or the errors of the CRDT.
     pub fn insert_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let rows = self.cell_lists(table)?;
-        let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
+        let rows = self.shown_cells(table)?;
+        let widest = rows.iter().map(|(_, shown)| shown.len()).max().unwrap_or(0);
         if index > widest {
             return Err(EditError::InvalidPosition {
                 pos: index,
@@ -598,41 +601,57 @@ impl Document {
             });
         }
         let mut new_cells = Vec::with_capacity(rows.len());
-        for cells in rows {
-            new_cells.push((cells, self.new_cell()?));
+        for (cells, shown) in rows {
+            let pos = shown.get(index).map_or(cells.len(), |(pos, _)| *pos);
+            new_cells.push((cells, pos, self.new_cell()?));
         }
         self.crdt.commit_without_undo();
-        for (cells, cell) in new_cells {
-            cells.insert(index.min(cells.len()), &cell.to_string())?;
+        for (cells, pos, cell) in new_cells {
+            cells.insert(pos, &cell.to_string())?;
         }
         self.crdt.commit();
         Ok(())
     }
 
-    /// Deletes column `index` of `table`: the cell at `index` of every row that has one and keeps at least one cell. Refused when no row has a cell at `index`, or when no row could lose one. A row that the stored state lists twice loses one cell, as the view shows it once.
+    /// Deletes column `index` of `table`: the cell that the view shows at `index` in every row that has one and keeps at least one cell, with every copy of it that the row's list holds. Refused when no row has a cell at `index`, or when no row could lose one. Columns are counted as the view shows them, as for [`Document::insert_column`].
     ///
     /// # Errors
     ///
     /// [`EditError::NoSuchTable`], [`EditError::InvalidPosition`], [`EditError::LastRowOrColumn`], or the errors of the CRDT.
     pub fn delete_column(&mut self, table: EntityId, index: usize) -> Result<(), EditError> {
         self.check_attached()?;
-        let rows = self.cell_lists(table)?;
-        let widest = rows.iter().map(bayan_crdt::IdList::len).max().unwrap_or(0);
+        let rows = self.shown_cells(table)?;
+        let widest = rows.iter().map(|(_, shown)| shown.len()).max().unwrap_or(0);
         if index >= widest {
             return Err(EditError::InvalidPosition {
                 pos: index,
                 len: widest,
             });
         }
-        let lists: Vec<_> = rows
-            .into_iter()
-            .filter(|cells| cells.len() > index && cells.len() > 1)
-            .collect();
-        if lists.is_empty() {
+        let mut deletions = Vec::new();
+        for (cells, shown) in rows {
+            if shown.len() <= index || shown.len() == 1 {
+                continue;
+            }
+            let cell = Value::Str(shown[index].1.to_string());
+            // Every copy of the cell, from the last, so that each position stays valid.
+            let positions: Vec<usize> = cells
+                .items()
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, item)| **item == cell)
+                .map(|(pos, _)| pos)
+                .collect();
+            deletions.push((cells, positions));
+        }
+        if deletions.is_empty() {
             return Err(EditError::LastRowOrColumn);
         }
-        for cells in lists {
-            cells.delete(index)?;
+        for (cells, positions) in deletions {
+            for pos in positions {
+                cells.delete(pos)?;
+            }
         }
         self.crdt.commit();
         Ok(())
@@ -1224,6 +1243,28 @@ impl Document {
             .into_iter()
             .filter(|row| seen.insert(*row))
             .filter_map(|row| self.cells_list(row))
+            .collect())
+    }
+
+    /// The cell lists of the stored rows of `table` (each row once, as [`Document::cell_lists`]), each with the cells that the view shows in that row, in order, and their positions in the stored list: a cell that the list holds twice (two replicas delete the same column and both undo) only where it first appears (N7), and no cell without an entry (N5).
+    fn shown_cells(&self, table: EntityId) -> Result<Vec<ShownRow>, EditError> {
+        let registered = self.registry(registry::CELLS)?;
+        Ok(self
+            .cell_lists(table)?
+            .into_iter()
+            .map(|cells| {
+                let mut seen = BTreeSet::new();
+                let shown = cells
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pos, item)| Some((pos, item.as_str().and_then(EntityId::parse)?)))
+                    .filter(|(_, cell)| {
+                        registered.get(&cell.to_string()).is_some() && seen.insert(*cell)
+                    })
+                    .collect();
+                (cells, shown)
+            })
             .collect())
     }
 
