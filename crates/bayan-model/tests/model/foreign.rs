@@ -318,3 +318,51 @@ fn materialization_avoids_identifiers_where_another_replica_stored_an_entry() {
         }
     }
 }
+
+/// A mergeable map under the identifier that normalization derives, as an earlier materialization of the same paragraph end leaves it when that end is deleted, is reused rather than avoided (review of 9c43419): the view shows its properties, materializing into it changes nothing the view shows, and every replica derives that identifier whether or not it received the map.
+#[test]
+fn materialization_reuses_a_mergeable_map_under_the_derived_identifier() {
+    for n1 in [false, true] {
+        let mut a = needs_a_derived_paragraph_end(n1);
+        let derived = derived_paragraph_end(&a);
+        foreign_replica_writes(&mut a, |replica| {
+            replica
+                .get_map("paragraphs")
+                .ensure_mergeable_map(&derived.to_string())
+                .expect("a mergeable map")
+                .insert("style", "Heading1")
+                .expect("a property");
+        });
+        assert_eq!(derived_paragraph_end(&a), derived, "n1 {n1}");
+        let before = valid_view(&a);
+        assert_eq!(
+            before.paragraphs[&derived].get("style"),
+            Some(&Value::from("Heading1"))
+        );
+        a.check_materializations();
+        a.insert_text(MAIN, 0, "Q").unwrap();
+        assert!(!a.has_pending_changes());
+        assert_eq!(
+            a.materialization_check(),
+            Some(MaterializationCheck {
+                performed: 1,
+                changed_view: 0,
+                failed: 0
+            }),
+            "n1 {n1}"
+        );
+        // The stored paragraph end now binds the derived identifier, whose map keeps its properties.
+        assert!(
+            bayan_model::normalize(&a.raw())
+                .1
+                .virtual_paragraph_ends
+                .is_empty()
+        );
+        assert_eq!(
+            valid_view(&a).paragraphs[&derived].get("style"),
+            Some(&Value::from("Heading1"))
+        );
+        assert!(a.undo().unwrap());
+        assert_eq!(valid_view(&a), before);
+    }
+}

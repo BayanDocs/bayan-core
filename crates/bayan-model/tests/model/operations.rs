@@ -429,6 +429,68 @@ fn materialization_does_not_change_the_view_even_when_replicas_materialize_concu
     );
 }
 
+/// The paragraph ends that the view of the main story shows, in order.
+fn main_paragraph_ends(document: &Document) -> Vec<EntityId> {
+    valid_view(document)
+        .main()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom {
+                kind: AtomKind::ParagraphEnd,
+                id,
+                ..
+            } => *id,
+            _ => None,
+        })
+        .collect()
+}
+
+/// Concurrent materializations of the same virtual paragraph end merge into one entity even when one replica received an earlier materialization of it, since deleted, and the other did not: the earlier materialization left a mergeable map under the derived identifier, which both derive again and reuse (review of 9c43419). Deriving another identifier on the replicas that received the map made the two materializations two paragraph ends, one an empty paragraph nobody typed.
+#[test]
+fn replicas_derive_the_same_paragraph_end_whether_or_not_they_received_an_earlier_materialization()
+{
+    // A (peer 2) and B (peer 1) show "first¶typed¶[T]¶", whose paragraph end before the table T only normalization added (N4); C (peer 3) receives everything, and from here on B is cut off.
+    let (mut a, mut b, table) =
+        replicas_with_a_virtual_split(2, 1).expect("this peer order puts the typed text first");
+    let mut c = replica_of(&a, 3);
+    let virtual_end = |document: &Document| {
+        let ends = bayan_model::normalize(&document.raw())
+            .1
+            .virtual_paragraph_ends;
+        assert_eq!(ends.len(), 1);
+        ends[0].id
+    };
+    let derived = virtual_end(&a);
+    // A types "Q", which materializes that paragraph end, and syncs with C only.
+    a.insert_text(MAIN, 0, "Q").unwrap();
+    sync_both(&mut a, &mut c);
+    assert_eq!(a.story_text(MAIN).unwrap().chars().count(), 15);
+    // C types "y" before "typed" while A deletes "typed" and the paragraph end it materialized.
+    c.insert_text(MAIN, 7, "y").unwrap();
+    a.delete(MAIN, 7..13).unwrap();
+    sync_both(&mut a, &mut c);
+    // "Qfirst¶y[T]¶": the table is in the middle of a paragraph again. Both A, which holds the map of the deleted paragraph end, and B, which never received it, derive the same identifier.
+    assert_eq!(virtual_end(&a), derived);
+    assert_eq!(virtual_end(&b), derived);
+    // A and B type, each materializing the paragraph end, and everyone syncs.
+    a.insert_text(MAIN, 0, "A").unwrap();
+    b.insert_text(MAIN, 0, "B").unwrap();
+    for _ in 0..2 {
+        sync_both(&mut a, &mut b);
+        sync_both(&mut a, &mut c);
+        sync_both(&mut b, &mut c);
+    }
+    let view = valid_view(&a);
+    assert_eq!(valid_view(&b), view);
+    assert_eq!(valid_view(&c), view);
+    // Both materializations stored a paragraph end bound to the same entity, which the view shows once (N7): three paragraph ends, not four.
+    let ends = main_paragraph_ends(&a);
+    assert_eq!(ends.len(), 3);
+    assert_eq!(ends[1], derived);
+    assert!(view.tables.contains_key(&table));
+    assert_eq!(bayan_model::normalize(&a.raw()).1.n7, 1);
+}
+
 /// The edit that materializes the split is one undo step: undoing it returns to the view before it, with the split still stored.
 #[test]
 fn undoing_an_edit_that_materialized_a_split_returns_to_the_view_before_it() {

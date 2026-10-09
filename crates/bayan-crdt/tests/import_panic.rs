@@ -182,6 +182,7 @@ fn a_poisoned_document_and_its_handles_refuse_everything() {
     }
     // Registries, maps and lists obtained before.
     assert!(registry_before.ids().is_empty());
+    assert!(registry_before.unmergeable_ids().is_empty());
     assert!(registry_before.entries().is_empty());
     assert_eq!(registry_before.len(), 0);
     assert!(registry_before.is_empty());

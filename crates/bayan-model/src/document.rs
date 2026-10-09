@@ -1130,7 +1130,7 @@ impl Document {
         Ok(self.crdt.registry(name)?)
     }
 
-    /// Creates the property map of `paragraph`, an identifier with no entry in the paragraph registry yet (a new one, or one that normalization derived, which avoids every identifier with an entry): the library refuses to create a map over a value or over a map it did not create this way.
+    /// Creates the property map of `paragraph`, or returns it when it exists: a new identifier, or one that normalization derived, whose entry in the paragraph registry is missing or the mergeable map that an earlier materialization left (normalization avoids every other entry): the library refuses to create a map over a value or over a map it did not create this way.
     fn paragraph_map(&self, paragraph: EntityId) -> Result<PropertyMap, EditError> {
         Ok(self
             .registry(registry::PARAGRAPHS)?

@@ -225,6 +225,54 @@ fn entities_created_concurrently_with_the_same_identifier_merge() {
     assert_eq!(text, b.stories().get("s").unwrap().text());
 }
 
+/// [`bayan_crdt::Registry::unmergeable_ids`] lists every entry that is not the mergeable map that `create` makes, here or on another replica: what a misbehaving replica writes with the CRDT library directly (a value, a null, a map created as a regular child, a mergeable container of another kind). `create` returns the mergeable map an identifier has, refuses a value or a regular container, and replaces a null or a mergeable container of another kind.
+#[test]
+fn unmergeable_ids_are_the_entries_create_did_not_make() {
+    let a = doc(1);
+    let paragraphs = a.registry("paragraphs").unwrap();
+    paragraphs
+        .create("made")
+        .unwrap()
+        .set("style", &Value::from("Title"))
+        .unwrap();
+    a.commit();
+    let b = doc(2);
+    b.registry("paragraphs")
+        .unwrap()
+        .create("made-elsewhere")
+        .unwrap();
+    b.commit();
+    sync(&b, &a);
+    let foreign = loro::LoroDoc::new();
+    foreign.set_peer_id(66).expect("a valid peer");
+    let map = foreign.get_map("paragraphs");
+    map.insert("value", 1.5).expect("a value");
+    map.insert("null", loro::LoroValue::Null).expect("a null");
+    map.insert_container("plain", loro::LoroMap::new())
+        .expect("a regular child map");
+    map.ensure_mergeable_list("list").expect("a mergeable list");
+    foreign.commit();
+    let update = foreign
+        .export(loro::ExportMode::all_updates())
+        .expect("exporting the update");
+    a.import(&update, &ImportLimits::UPDATE).unwrap();
+    assert_eq!(
+        paragraphs.unmergeable_ids(),
+        ["list", "null", "plain", "value"]
+    );
+    assert_eq!(
+        paragraphs.create("made").unwrap().get("style"),
+        Some(Value::from("Title"))
+    );
+    assert!(paragraphs.create("made-elsewhere").is_ok());
+    assert!(paragraphs.create("plain").is_err());
+    assert!(paragraphs.create("value").is_err());
+    assert!(paragraphs.create("null").is_ok());
+    assert!(paragraphs.create("list").is_ok());
+    a.commit();
+    assert_eq!(paragraphs.unmergeable_ids(), ["plain", "value"]);
+}
+
 #[test]
 fn snapshots_shallow_snapshots_and_checkout() {
     let a = doc(1);

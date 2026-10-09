@@ -64,8 +64,8 @@ pub struct RawDocument {
     pub stories: BTreeMap<EntityId, Vec<Run>>,
     /// Paragraph properties.
     pub paragraphs: BTreeMap<EntityId, Props>,
-    /// Identifiers whose entry in the paragraph registry is not a property map (a value or another kind of container that a misbehaving replica stored there): no paragraph, but taken, so that normalization never derives one of them for a paragraph end that materialization would then have to write there.
-    pub other_paragraph_entries: BTreeSet<EntityId>,
+    /// Identifiers whose entry in the paragraph registry is not the mergeable property map that materialization creates: a value, another kind of container, or a map created another way, which only a misbehaving replica stores (the view still shows such a map's properties, see `paragraphs`). Taken, so that normalization never derives one of them for a paragraph end that materialization would then have to write there. A mergeable map, which an earlier materialization leaves behind when its paragraph end is deleted, is not taken: every replica derives that identifier again, whether or not it received the map, so that their materializations still merge.
+    pub unmergeable_paragraph_entries: BTreeSet<EntityId>,
     /// Tables.
     pub tables: BTreeMap<EntityId, RawTable>,
     /// Rows.
@@ -109,19 +109,18 @@ impl RawDocument {
                 .unwrap_or_default(),
         });
         let paragraphs = read_props(doc, registry::PARAGRAPHS);
-        let other_paragraph_entries = doc
+        let unmergeable_paragraph_entries = doc
             .registry(registry::PARAGRAPHS)
-            .map(|registry: Registry| registry.ids())
+            .map(|registry: Registry| registry.unmergeable_ids())
             .unwrap_or_default()
             .into_iter()
             .filter_map(|key| EntityId::parse(&key))
-            .filter(|id| !paragraphs.contains_key(id))
             .collect();
         Self {
             main: doc.main_story().runs(),
             stories,
             paragraphs,
-            other_paragraph_entries,
+            unmergeable_paragraph_entries,
             tables,
             rows,
             cells: read_props(doc, registry::CELLS),

@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use loro::{LoroMap, LoroMovableList, ValueOrContainer};
+use loro::{
+    ContainerID, ContainerTrait, ContainerType, LoroMap, LoroMovableList, ValueOrContainer,
+};
 
 use crate::poison::Poison;
 use crate::{CrdtError, Story, Value};
@@ -256,6 +258,29 @@ impl Registry {
             return Vec::new();
         }
         let mut ids: Vec<String> = self.map.keys().map(|key| key.to_string()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The identifiers whose entry is not the mergeable map that [`Registry::create`] makes for them, in identifier order: a value, a container of another kind, or a map that was created another way, all of which only a misbehaving replica writes. [`Registry::create`] refuses such an entry or replaces it; it returns the mergeable map that an identifier already has, and creates one where there is no entry.
+    #[must_use]
+    pub fn unmergeable_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        if self.poison.is_set() {
+            return ids;
+        }
+        let registry = self.map.id();
+        self.map.for_each(|key, item| {
+            // The library reads a mergeable map's marker as the container whose identity derives from the registry and the key (see `Registry::create`), so any other container, of whatever kind or origin, has another identity.
+            let mergeable = matches!(
+                &item,
+                ValueOrContainer::Container(container)
+                    if container.id() == ContainerID::new_mergeable(&registry, key, ContainerType::Map)
+            );
+            if !mergeable {
+                ids.push(key.to_owned());
+            }
+        });
         ids.sort_unstable();
         ids
     }
