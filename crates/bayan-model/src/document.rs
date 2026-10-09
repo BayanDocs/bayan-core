@@ -19,7 +19,7 @@ const TABLE_BLOCK: char = '\u{07}';
 
 /// Why an operation was refused.
 ///
-/// Every operation checks everything that can make it fail before it writes anything, so a refused operation changes nothing, except that it may have materialized the story first (see [`Document`]), which does not change the view. Only an error of the CRDT itself ([`EditError::Crdt`]) can come after a write; the written part then stays pending and is committed with the next operation.
+/// Every operation checks everything that can make it fail before it writes anything, so a refused operation changes nothing and leaves nothing pending (see [`Document::has_pending_changes`]), except that it may have materialized the story first (see [`Document`]), which does not change the view and is committed. Values that another replica stored and the adapter cannot store are skipped, never copied, and entries it stored where a property map belongs are written into when they are maps and left out when they are not, as the view leaves them out. One case is known where an error of the CRDT can still come after a write: identifiers come from a generator that is not cryptographic, so a replica that has seen some of this replica's identifiers can compute its next ones and store a value under one first; creating that entity then fails after the operation's earlier writes (CORE-004 report §11, a follow-up for CORE-101).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     /// The CRDT refused.
@@ -349,7 +349,7 @@ impl Document {
         })
     }
 
-    /// Sets the mark `key` to `value` on `range` of `story`. A run property (`r:…`) is applied to the characters, stopping before a paragraph end that closes the range, and to the paragraph-mark formatting (`rPr.…` properties) of every paragraph end in the range, because run-property marks expand after their end and would otherwise spread into the next paragraph.
+    /// Sets the mark `key` to `value` on `range` of `story`. A run property (`r:…`) is applied to the characters, stopping before a paragraph end that closes the range, and to the paragraph-mark formatting (`rPr.…` properties) of every paragraph end in the range that has a property map (the view shows no other), because run-property marks expand after their end and would otherwise spread into the next paragraph.
     ///
     /// # Errors
     ///
@@ -367,8 +367,8 @@ impl Document {
             let range = positions.range(handle, &range)?;
             if marks::is_run_property(key) {
                 let property = format!("rPr.{}", key.trim_start_matches("r:"));
-                for paragraph in document.atoms_in(handle, &range, AtomKind::ParagraphEnd)? {
-                    document.paragraph_map(paragraph)?.set(&property, value)?;
+                for map in document.paragraph_maps_in(handle, &range)? {
+                    map.set(&property, value)?;
                 }
                 let end = if range.end > range.start
                     && handle.char_at(range.end - 1) == Some(PARAGRAPH_END)
@@ -401,8 +401,8 @@ impl Document {
             let range = positions.range(handle, &range)?;
             if marks::is_run_property(key) {
                 let property = format!("rPr.{}", key.trim_start_matches("r:"));
-                for paragraph in document.atoms_in(handle, &range, AtomKind::ParagraphEnd)? {
-                    document.paragraph_map(paragraph)?.remove(&property)?;
+                for map in document.paragraph_maps_in(handle, &range)? {
+                    map.remove(&property)?;
                 }
             }
             handle.unmark(range, key)?;
@@ -990,7 +990,7 @@ impl Document {
         self.undo.undo_count()
     }
 
-    /// Whether writes wait for the next commit. Every operation, applied or refused, leaves none: whatever were pending would become part of the next operation's change and undo step.
+    /// Whether writes wait for the next commit. Every operation, applied or refused, leaves none (with the one exception that [`EditError`] describes): whatever were pending would become part of the next operation's change and undo step.
     #[must_use]
     pub fn has_pending_changes(&self) -> bool {
         self.crdt.has_pending_changes()
@@ -1111,10 +1111,25 @@ impl Document {
         Ok(self.crdt.registry(name)?)
     }
 
+    /// Creates the property map of `paragraph`, an identifier with no entry in the paragraph registry yet (a new one, or one that normalization derived, which avoids every identifier with an entry): the library refuses to create a map over a value or over a map it did not create this way.
     fn paragraph_map(&self, paragraph: EntityId) -> Result<PropertyMap, EditError> {
         Ok(self
             .registry(registry::PARAGRAPHS)?
             .create(&paragraph.to_string())?)
+    }
+
+    /// The property maps of the paragraph ends in `range` of a story, all obtained before the caller writes into any of them. A paragraph end whose entry in the paragraph registry is not a map (missing, or a value another replica stored) is left out: the view does not show it (N5), and creating a map for it could fail halfway or make it appear. A map that another replica stored by other means is written into, as the view already shows its properties.
+    fn paragraph_maps_in(
+        &self,
+        handle: &Story,
+        range: &Range<usize>,
+    ) -> Result<Vec<PropertyMap>, EditError> {
+        let paragraphs = self.registry(registry::PARAGRAPHS)?;
+        Ok(self
+            .atoms_in(handle, range, AtomKind::ParagraphEnd)?
+            .into_iter()
+            .filter_map(|paragraph| paragraphs.get(&paragraph.to_string()))
+            .collect())
     }
 
     /// The properties of a stored paragraph that can be copied: values the adapter cannot store (which another replica may have stored) are left out, as the view leaves them out, so that copying them never fails halfway.

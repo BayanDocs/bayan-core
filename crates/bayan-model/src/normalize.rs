@@ -162,7 +162,7 @@ struct Normalizer<'a> {
     seen_stories: BTreeSet<EntityId>,
     /// Comment stories to normalize after the main story, in the order of their references.
     comment_stories: VecDeque<EntityId>,
-    /// Every paragraph identifier that a stored atom binds, in any story; collected the first time an identifier is derived.
+    /// Every paragraph identifier that the stored state takes (bound by a stored atom, in any story, or with an entry in the paragraph registry); collected the first time an identifier is derived.
     stored_paragraphs: Option<BTreeSet<EntityId>>,
 }
 
@@ -583,9 +583,9 @@ impl<'a> Normalizer<'a> {
         result
     }
 
-    /// A derived paragraph identifier that no stored atom binds, in any story, and that no paragraph end of the view has taken yet (trying again with a counter if needed), reserved at once.
+    /// A derived paragraph identifier that no stored atom binds, in any story, that has no entry in the paragraph registry, and that no paragraph end of the view has taken yet (trying again with a counter if needed), reserved at once.
     ///
-    /// Avoiding only the paragraph ends met so far is not enough: a cell story is normalized in the middle of the story that contains its table, so a stored paragraph end later in that story would otherwise lose its identifier to a derived one and be dropped as a repeat (N7).
+    /// Avoiding only the paragraph ends met so far is not enough: a cell story is normalized in the middle of the story that contains its table, so a stored paragraph end later in that story would otherwise lose its identifier to a derived one and be dropped as a repeat (N7). An identifier with an entry is avoided too, whatever the entry holds, because materialization writes the view's properties into a new map there: an existing map (left by an earlier paragraph end since deleted, or stored by another replica) would add properties the view did not show, and a value or another container cannot be written at all.
     fn virtual_paragraph_id(&mut self, parts: &[u64]) -> EntityId {
         let raw = self.raw;
         let stored = self
@@ -723,7 +723,7 @@ fn clean_marks(marks: &Props) -> Props {
         .collect()
 }
 
-/// Every paragraph identifier that a placeholder of a stored story binds.
+/// Every paragraph identifier that the stored state takes: bound by a placeholder of a stored story, or with an entry, of any kind, in the paragraph registry.
 fn stored_paragraph_ends(raw: &RawDocument) -> BTreeSet<EntityId> {
     std::iter::once(&raw.main)
         .chain(raw.stories.values())
@@ -736,6 +736,8 @@ fn stored_paragraph_ends(raw: &RawDocument) -> BTreeSet<EntityId> {
                 .and_then(decode_binding)
         })
         .filter_map(|(kind, id)| (kind == AtomKind::ParagraphEnd).then_some(id))
+        .chain(raw.paragraphs.keys().copied())
+        .chain(raw.other_paragraph_entries.iter().copied())
         .collect()
 }
 

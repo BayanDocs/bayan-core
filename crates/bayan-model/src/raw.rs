@@ -1,6 +1,6 @@
 //! The raw state of a document as stored in the CRDT, before normalization.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bayan_crdt::{Doc, Registry, Run, Value};
 
@@ -64,6 +64,8 @@ pub struct RawDocument {
     pub stories: BTreeMap<EntityId, Vec<Run>>,
     /// Paragraph properties.
     pub paragraphs: BTreeMap<EntityId, Props>,
+    /// Identifiers whose entry in the paragraph registry is not a property map (a value or another kind of container that a misbehaving replica stored there): no paragraph, but taken, so that normalization never derives one of them for a paragraph end that materialization would then have to write there.
+    pub other_paragraph_entries: BTreeSet<EntityId>,
     /// Tables.
     pub tables: BTreeMap<EntityId, RawTable>,
     /// Rows.
@@ -106,10 +108,20 @@ impl RawDocument {
                 .map(|list| list.items())
                 .unwrap_or_default(),
         });
+        let paragraphs = read_props(doc, registry::PARAGRAPHS);
+        let other_paragraph_entries = doc
+            .registry(registry::PARAGRAPHS)
+            .map(|registry: Registry| registry.ids())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|key| EntityId::parse(&key))
+            .filter(|id| !paragraphs.contains_key(id))
+            .collect();
         Self {
             main: doc.main_story().runs(),
             stories,
-            paragraphs: read_props(doc, registry::PARAGRAPHS),
+            paragraphs,
+            other_paragraph_entries,
             tables,
             rows,
             cells: read_props(doc, registry::CELLS),

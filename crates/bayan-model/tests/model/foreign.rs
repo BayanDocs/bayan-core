@@ -2,9 +2,9 @@
 
 use bayan_crdt::{ATOM_KEY, ImportLimits, Value};
 use bayan_model::{
-    AtomKind, Document, EditError, EntityId, MaterializationCheck, encode_binding, marks,
+    AtomKind, Document, EditError, EntityId, Item, MaterializationCheck, encode_binding, marks,
 };
-use loro::{ExpandType, ExportMode, LoroDoc, StyleConfig, ValueOrContainer};
+use loro::{ExpandType, ExportMode, LoroDoc, LoroMap, StyleConfig, ValueOrContainer};
 
 use crate::common::{document, marks_at, replica_of, text, valid_view};
 
@@ -167,4 +167,154 @@ fn values_this_adapter_cannot_store_are_refused_before_anything_is_written() {
     assert_eq!(a.undo_count(), steps + 1);
     assert!(a.undo().unwrap());
     assert_eq!(valid_view(&a), before);
+}
+
+/// What another replica stores in the paragraph registry, under one paragraph's identifier.
+#[derive(Clone, Copy, Debug)]
+enum ForeignEntry {
+    /// A map container created directly, not as the adapter creates entity maps.
+    PlainMap,
+    /// A value where a map belongs.
+    Float,
+}
+
+/// Stores `entry` under `paragraph` in the paragraph registry, as the foreign replica, replacing what was there.
+fn replace_paragraph_entry(replica: &LoroDoc, paragraph: EntityId, entry: ForeignEntry) {
+    let paragraphs = replica.get_map("paragraphs");
+    match entry {
+        ForeignEntry::PlainMap => {
+            let map = paragraphs
+                .insert_container(&paragraph.to_string(), LoroMap::new())
+                .expect("storing a plain map");
+            map.insert("style", "Normal").expect("a property");
+        }
+        ForeignEntry::Float => {
+            paragraphs
+                .insert(&paragraph.to_string(), 1.5)
+                .expect("storing a float");
+        }
+    }
+}
+
+/// The identifier of the paragraph end that the view shows and the stored state does not bind: the one normalization derived.
+fn derived_paragraph_end(document: &Document) -> EntityId {
+    let raw = document.raw();
+    let stored: Vec<EntityId> = raw
+        .main
+        .iter()
+        .filter_map(|run| run.marks.get(ATOM_KEY).and_then(Value::as_str))
+        .filter_map(bayan_model::decode_binding)
+        .map(|(_, id)| id)
+        .collect();
+    let derived: Vec<EntityId> = valid_view(document)
+        .main()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Atom {
+                kind: AtomKind::ParagraphEnd,
+                id: Some(id),
+                ..
+            } if !stored.contains(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(derived.len(), 1, "exactly one derived paragraph end");
+    derived[0]
+}
+
+#[test]
+fn formatting_writes_into_or_leaves_out_paragraph_entries_another_replica_stored() {
+    for entry in [ForeignEntry::PlainMap, ForeignEntry::Float] {
+        let mut a = document(1);
+        a.insert_text(MAIN, 0, "abc").unwrap();
+        a.split_paragraph(MAIN, 2).unwrap();
+        a.split_paragraph(MAIN, 1).unwrap();
+        let paragraphs = a.paragraphs_in(MAIN);
+        assert_eq!(text(&a), "a\nb\nc\n");
+        // The second of the three paragraphs: before the fix, formatting wrote the first paragraph's mark property and then failed on this one, leaving the write pending.
+        let middle = paragraphs[1];
+        foreign_replica_writes(&mut a, |replica| {
+            replace_paragraph_entry(replica, middle, entry);
+        });
+        let before = valid_view(&a);
+        a.format(MAIN, 0..6, marks::BOLD, &Value::Bool(true))
+            .unwrap();
+        assert!(!a.has_pending_changes());
+        let view = valid_view(&a);
+        let bold = Some(&Value::Bool(true));
+        for paragraph in &paragraphs {
+            match (entry, *paragraph == middle) {
+                // A float is no map: the view does not show that paragraph end, and formatting leaves it alone.
+                (ForeignEntry::Float, true) => {
+                    assert!(!view.paragraphs.contains_key(paragraph));
+                    assert!(!a.raw().paragraphs.contains_key(paragraph));
+                }
+                // A plain map is written into, as the view shows its properties.
+                _ => assert_eq!(view.paragraphs[paragraph].get("rPr.b"), bold),
+            }
+        }
+        a.clear_format(MAIN, 0..6, marks::BOLD).unwrap();
+        assert!(!a.has_pending_changes());
+        let cleared = valid_view(&a);
+        assert!(
+            cleared
+                .paragraphs
+                .values()
+                .all(|props| !props.contains_key("rPr.b"))
+        );
+        assert!(a.undo().unwrap());
+        assert!(a.undo().unwrap());
+        assert_eq!(valid_view(&a), before);
+    }
+}
+
+/// Builds a main story whose view needs a paragraph end that the stored state lacks: before a table that another replica's typing left in the middle of a paragraph (N4), or at the end of a story whose final paragraph end another replica deleted (N1).
+fn needs_a_derived_paragraph_end(n1: bool) -> Document {
+    let mut a = document(1);
+    a.insert_text(MAIN, 0, "ab").expect("typing");
+    a.split_paragraph(MAIN, 2).expect("a split");
+    a.insert_table(MAIN, 3, 1, 1).expect("a table");
+    foreign_replica_writes(&mut a, |replica| {
+        let main = replica.get_text("main");
+        if n1 {
+            let len = main.len_unicode();
+            main.delete(len - 1, 1)
+                .expect("deleting the final paragraph end");
+        } else {
+            main.insert(3, "x").expect("typing before the table");
+        }
+    });
+    a
+}
+
+#[test]
+fn materialization_avoids_identifiers_where_another_replica_stored_an_entry() {
+    for n1 in [false, true] {
+        for entry in [ForeignEntry::PlainMap, ForeignEntry::Float] {
+            let mut a = needs_a_derived_paragraph_end(n1);
+            let derived = derived_paragraph_end(&a);
+            // Another replica stores an entry under the identifier that normalization derived for the missing paragraph end. Before the fix, normalization kept deriving it, and materializing it failed on every edit of the story.
+            foreign_replica_writes(&mut a, |replica| {
+                replace_paragraph_entry(replica, derived, entry);
+            });
+            assert_ne!(derived_paragraph_end(&a), derived);
+            a.check_materializations();
+            let before = valid_view(&a);
+            a.insert_text(MAIN, 0, "Q").unwrap();
+            assert!(!a.has_pending_changes());
+            assert_eq!(
+                a.materialization_check(),
+                Some(MaterializationCheck {
+                    performed: 1,
+                    changed_view: 0,
+                    failed: 0
+                }),
+                "{entry:?}, n1 {n1}"
+            );
+            assert_eq!(text(&a), format!("Q{}", before.plain_text(MAIN)));
+            assert!(a.undo().unwrap());
+            assert_eq!(valid_view(&a), before);
+            assert!(!a.has_pending_changes());
+        }
+    }
 }
