@@ -1153,6 +1153,99 @@ fn adds_relationships_one_after_another_quickly() {
 
 // Metadata memory: the XML of the metadata parts is held as a tree while it is parsed, which costs a few hundred bytes per node however small the node is in the input, so the number of nodes, and the total size of the metadata that opening a package parses, are limited (the review of pull request 17 opened a 13.8 MB package that needed 2 GB).
 
+#[test]
+fn refuses_names_and_identifiers_longer_than_their_limits() {
+    // The review of pull request 17 opened a 15 MiB package of UTF-16 metadata, where each character takes two bytes but three in memory, in 164 MiB: one override named a part of 4 million characters, kept four times over, and one relationship had an identifier of 2.6 million characters. A part name longer than a ZIP entry name may be could never name a part, and an identifier is an XML name, so both are refused now.
+    let wide = |text: &str| -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    };
+    let long: String = std::iter::repeat_n('中', 4_000_000).collect();
+    let types = format!(
+        "<Types xmlns=\"{CONTENT_TYPES_NAMESPACE}\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/{long}\" ContentType=\"a/b\"/></Types>"
+    );
+    let mut items = package_items();
+    items[0] = Item::stored("[Content_Types].xml", &wide(&types));
+    assert_eq!(
+        package_error(&Archive::new(items).build()),
+        Error::Package(PackageError::ContentTypes(
+            bayan_opc::ContentTypesError::NameTooLong
+        ))
+    );
+    let rels = format!(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"{}\" Type=\"t\" Target=\"word/document.xml\"/></Relationships>",
+        &long[..3 * 2_600_000]
+    );
+    let mut items = package_items();
+    items.push(Item::stored("_rels/.rels", &wide(&rels)));
+    assert!(matches!(
+        package_error(&Archive::new(items).build()),
+        Error::Package(PackageError::Relationships {
+            error: RelationshipsError::IdTooLong,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn reads_core_properties_within_what_opening_left() {
+    // Opening a package and reading its core properties share the two budgets of the metadata, its total size and its XML nodes, so that together they take no more memory than the budgets allow: a package whose relationships use nearly all of a budget has too little left for its core properties (the review of pull request 17 measured 125 MiB for both when the core properties had budgets of their own).
+    let core_type =
+        "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+    let core: &[u8] = b"<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>T</dc:title></cp:coreProperties>";
+    // A package whose relationships part holds `filler` tiny elements, and the uncompressed size of all its metadata, core properties included.
+    let package = |filler: usize| {
+        let mut rels = format!(
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" xmlns:x=\"urn:x\"><Relationship Id=\"rId1\" Type=\"{core_type}\" Target=\"docProps/core.xml\"/>"
+        );
+        rels.push_str(&"<x:a/>".repeat(filler));
+        rels.push_str("</Relationships>");
+        let mut items = package_items();
+        items.push(Item::stored("_rels/.rels", rels.as_bytes()));
+        items.push(Item::stored("docProps/core.xml", core));
+        let metadata: u64 = items
+            .iter()
+            .filter(|item| item.name != "word/document.xml")
+            .map(|item| item.size)
+            .sum();
+        (Archive::new(items).build(), metadata)
+    };
+    let title = |bytes: &[u8], limits: &Limits| {
+        Package::open(bytes, limits)
+            .unwrap()
+            .core_properties()
+            .map(|properties| properties.unwrap().title.unwrap())
+    };
+    // The content types stream has 5 nodes, the relationships part 7 and the filler, and the core properties part 5: its root, two namespace declarations, the title and its text.
+    let filler = |left: usize| Limits::default().max_xml_nodes - 12 - left;
+    let (bytes, _) = package(filler(5));
+    assert_eq!(title(&bytes, &Limits::default()).unwrap(), "T");
+    let (bytes, _) = package(filler(4));
+    assert!(matches!(
+        title(&bytes, &Limits::default()),
+        Err(Error::Xml {
+            error: bayan_opc::XmlError {
+                kind: XmlErrorKind::TooManyNodes,
+                ..
+            },
+            ..
+        })
+    ));
+    let (bytes, metadata) = package(10);
+    let total = |size: u64| Limits {
+        max_metadata_total_size: usize::try_from(size).unwrap(),
+        ..Limits::default()
+    };
+    assert_eq!(title(&bytes, &total(metadata)).unwrap(), "T");
+    assert!(matches!(
+        title(&bytes, &total(metadata - 1)),
+        Err(Error::Limit(LimitError::MetadataTotalTooLarge { .. }))
+    ));
+}
+
 /// A relationships part holding `count` tiny elements from another namespace.
 fn rels_with_elements(count: usize) -> Vec<u8> {
     let mut rels = String::from(

@@ -559,6 +559,8 @@ pub enum ContentTypesError {
     InvalidContentType,
     /// A `PartName` attribute is not a valid part name.
     InvalidPartName(PartNameError),
+    /// A `PartName` or `Extension` attribute is longer than a ZIP entry name may be ([`Limits::max_name_length`](crate::Limits::max_name_length) bytes, not counting a part name's leading slash), so it could never apply to a part.
+    NameTooLong,
 }
 
 impl fmt::Display for ContentTypesError {
@@ -574,6 +576,9 @@ impl fmt::Display for ContentTypesError {
             ContentTypesError::InvalidExtension => f.write_str("invalid extension"),
             ContentTypesError::InvalidContentType => f.write_str("invalid media type"),
             ContentTypesError::InvalidPartName(error) => write!(f, "invalid part name: {error}"),
+            ContentTypesError::NameTooLong => {
+                f.write_str("a part name or extension is longer than an entry name may be")
+            }
         }
     }
 }
@@ -604,6 +609,8 @@ pub enum RelationshipsError {
     InvalidCharacter,
     /// A relationship being added has an identifier that is not an XML identifier: a name without a colon (`xsd:ID`).
     InvalidId,
+    /// A relationship's identifier is longer than [`Limits::max_xml_name_length`](crate::Limits::max_xml_name_length) bytes, the limit on XML names, which identifiers are (`xsd:ID`).
+    IdTooLong,
 }
 
 impl fmt::Display for RelationshipsError {
@@ -622,6 +629,7 @@ impl fmt::Display for RelationshipsError {
             RelationshipsError::InvalidSource => "the name does not name a source part",
             RelationshipsError::InvalidCharacter => "a character that XML cannot hold",
             RelationshipsError::InvalidId => "the identifier is not an XML identifier",
+            RelationshipsError::IdTooLong => "the identifier is longer than an XML name may be",
         })
     }
 }

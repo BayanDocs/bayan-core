@@ -193,7 +193,8 @@ impl Relationships {
         for node in std::mem::take(&mut root.children) {
             match node {
                 Node::Element(element) if element.is(NAMESPACE, "Relationship") => {
-                    let relationship = read_relationship(&element).map_err(invalid)?;
+                    let relationship =
+                        read_relationship(&element, limits.max_xml_name_length).map_err(invalid)?;
                     if relationships.contains_key(&relationship.id) {
                         return Err(invalid(RelationshipsError::DuplicateId));
                     }
@@ -502,7 +503,11 @@ fn id_number(id: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn read_relationship(element: &Element) -> Result<Relationship, RelationshipsError> {
+/// Reads a `Relationship` element. Identifiers are XML names (`xsd:ID`), so one longer than `max_id_length` bytes, the limit on XML names, is refused: each is kept several times.
+fn read_relationship(
+    element: &Element,
+    max_id_length: usize,
+) -> Result<Relationship, RelationshipsError> {
     let nested = element.children.iter().any(|node| {
         matches!(node, Node::Element(child) if child.namespace.as_deref() == Some(NAMESPACE))
     });
@@ -516,6 +521,9 @@ fn read_relationship(element: &Element) -> Result<Relationship, RelationshipsErr
             .ok_or(RelationshipsError::MissingAttribute)
     };
     let id = required("Id")?;
+    if id.len() > max_id_length {
+        return Err(RelationshipsError::IdTooLong);
+    }
     let relationship_type = required("Type")?;
     let target = element
         .attribute("Target")
@@ -666,6 +674,20 @@ mod tests {
                 .add(Relationship::new("", "t", "x", TargetMode::Internal))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn refuses_identifiers_longer_than_xml_names() {
+        // Identifiers are XML names, and each is kept several times, so one longer than the limit on XML names is refused (the review of pull request 17).
+        let limit = Limits::default().max_xml_name_length;
+        let part = |length: usize| {
+            format!(
+                "<Relationships xmlns=\"{NAMESPACE}\"><Relationship Id=\"{}\" Type=\"t\" Target=\"x\"/></Relationships>",
+                "r".repeat(length)
+            )
+        };
+        assert!(parse(&part(limit)).is_ok());
+        assert_eq!(error(&part(limit + 1)), RelationshipsError::IdTooLong);
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl ContentTypes {
         for node in std::mem::take(&mut root.children) {
             match node {
                 Node::Element(element) => {
-                    let entry = read_entry(&element).map_err(invalid)?;
+                    let entry = read_entry(&element, limits.max_name_length).map_err(invalid)?;
                     content_types.push_read(entry).map_err(invalid)?;
                 }
                 Node::Text { span, value } if value.chars().all(xml::is_space) => {
@@ -520,7 +520,8 @@ impl ContentTypes {
 }
 
 /// Reads one `Default` or `Override` element.
-fn read_entry(element: &Element) -> Result<Entry, ContentTypesError> {
+/// Reads a `Default` or `Override` element. Names longer than any ZIP entry name may be (`max_name_length` bytes) are refused: they could never apply to a part, and each is kept several times.
+fn read_entry(element: &Element, max_name_length: usize) -> Result<Entry, ContentTypesError> {
     let is_default = element.is(NAMESPACE, "Default");
     if !is_default && !element.is(NAMESPACE, "Override") {
         return Err(ContentTypesError::UnexpectedElement);
@@ -555,6 +556,9 @@ fn read_entry(element: &Element) -> Result<Entry, ContentTypesError> {
         let extension = element
             .attribute("Extension")
             .ok_or(ContentTypesError::MissingAttribute)?;
+        if extension.len() > max_name_length {
+            return Err(ContentTypesError::NameTooLong);
+        }
         if !is_extension(extension) {
             return Err(ContentTypesError::InvalidExtension);
         }
@@ -566,8 +570,12 @@ fn read_entry(element: &Element) -> Result<Entry, ContentTypesError> {
             .attribute("PartName")
             .ok_or(ContentTypesError::MissingAttribute)?;
         // `PartName` is an xsd:anyURI, so non-ASCII characters may be percent-encoded, as in ZIP entry names.
-        let part_name = PartName::new(&percent::decode_ucschar(written))
-            .map_err(ContentTypesError::InvalidPartName)?;
+        let decoded = percent::decode_ucschar(written);
+        // The shortest entry name of a part is its name without the leading slash.
+        if decoded.len().saturating_sub(1) > max_name_length {
+            return Err(ContentTypesError::NameTooLong);
+        }
+        let part_name = PartName::new(&decoded).map_err(ContentTypesError::InvalidPartName)?;
         Kind::Override { part_name }
     };
     Ok(Entry {
@@ -848,6 +856,41 @@ mod tests {
         assert_eq!(
             read.content_type(&name("/word/styles.xml")),
             Some("application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml")
+        );
+    }
+
+    #[test]
+    fn refuses_names_longer_than_entry_names() {
+        // A part name or extension longer than a ZIP entry name may be could never apply to a part, and each is kept several times, so it is refused (the review of pull request 17: one override, written in UTF-16, made opening a package take 164 MiB).
+        let limit = Limits::default().max_name_length;
+        let types = |body: &str| format!("<Types xmlns=\"{NAMESPACE}\">{body}</Types>");
+        let part = |length: usize| {
+            format!(
+                "<Override PartName=\"/{}\" ContentType=\"a/b\"/>",
+                "a".repeat(length)
+            )
+        };
+        assert!(parse(&types(&part(limit))).is_ok());
+        assert_eq!(
+            error(&types(&part(limit + 1))),
+            ContentTypesError::NameTooLong
+        );
+        // Percent-encoded characters count as the characters they stand for, as in ZIP entry names: `%E4%B8%AD` is three bytes, `中`.
+        let encoded = format!(
+            "<Override PartName=\"/{}\" ContentType=\"a/b\"/>",
+            "%E4%B8%AD".repeat(limit / 3)
+        );
+        assert!(parse(&types(&encoded)).is_ok());
+        let extension = |length: usize| {
+            format!(
+                "<Default Extension=\"{}\" ContentType=\"a/b\"/>",
+                "e".repeat(length)
+            )
+        };
+        assert!(parse(&types(&extension(limit))).is_ok());
+        assert_eq!(
+            error(&types(&extension(limit + 1))),
+            ContentTypesError::NameTooLong
         );
     }
 

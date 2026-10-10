@@ -2,7 +2,7 @@
 
 /// The limits bayan-opc enforces while reading a package or a compound file (ADR-0006 §5: every parser limits sizes, depths and counts).
 ///
-/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata that opening a package parses is limited in total size and in XML nodes. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, and opening a package at most about 90 MiB for its metadata, whatever the input claims (the crate's documentation says how that was measured).
+/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata of a package, from the content types stream to the core properties, is limited in total size and in XML nodes, and so are the names and identifiers that its models keep several times. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, opening a package at most about 90 MiB for its metadata, and opening it and reading its core properties at most about 110 MiB together, whatever the input claims (the crate's documentation says how that was measured).
 ///
 /// The defaults ([`Limits::DEFAULT`]) open ordinary documents comfortably and stop malicious ones; a host can raise a limit (for example after asking the user, for a document with very large embedded media) by changing one field:
 ///
@@ -17,7 +17,7 @@
 pub struct Limits {
     /// The most entries a ZIP archive may have, folders included. Default: 10,000 (a typical document has 10 to 50 parts; one with hundreds of images has a few hundred).
     pub max_entries: usize,
-    /// The longest entry name, in bytes. Default: 1,024 (Word's own part names are short; Windows paths are limited to about 260 characters).
+    /// The longest entry name, in bytes. A content types stream may not name a longer part or extension either, since no part could have it. Default: 1,024 (Word's own part names are short; Windows paths are limited to about 260 characters).
     pub max_name_length: usize,
     /// The most bytes one entry may uncompress to, and the largest compound file stream that may be read. Default: 512 MiB.
     pub max_entry_size: u64,
@@ -29,15 +29,15 @@ pub struct Limits {
     pub compression_ratio_grace: u64,
     /// The largest metadata part (the content types stream, a relationships part or the core properties part) that is parsed, in bytes. Default: 8 MiB (a content types stream for 10,000 parts takes about 1.5 MB; a relationships part takes about 200 bytes per hyperlink, so 8 MiB holds about 40,000).
     pub max_metadata_size: usize,
-    /// The most bytes that the metadata parts which opening a package parses (the content types stream and every relationships part) may uncompress to together; a part that would pass it is refused before it is decompressed. Default: 16 MiB.
+    /// The most bytes that the metadata parts of a package (the content types stream, every relationships part, and the core properties part when [`Package::core_properties`](crate::Package::core_properties) reads it) may uncompress to together; a part that would pass it is refused before it is decompressed. Default: 16 MiB.
     pub max_metadata_total_size: usize,
-    /// The most nodes (elements, attributes, namespace declarations included, runs of text, CDATA sections, comments and processing instructions) in the XML of the metadata parts that opening a package parses, all of them together; a metadata part parsed on its own gets the whole budget. While a part is parsed, each of its nodes takes up to about 400 bytes, however short it is in the input, so this is what bounds the memory parsing takes. Default: 250,000 (a relationship takes 4 or 5 nodes, so this allows about 50,000 hyperlinks).
+    /// The most nodes (elements, attributes, namespace declarations included, runs of text, CDATA sections, comments and processing instructions) in the XML of the metadata parts of a package, all of them together, the core properties part included when [`Package::core_properties`](crate::Package::core_properties) reads it; a metadata part parsed on its own gets the whole budget. While a part is parsed, each of its nodes takes up to about 400 bytes, however short it is in the input, so this is what bounds the memory parsing takes. Default: 250,000 (a relationship takes 4 or 5 nodes, so this allows about 50,000 hyperlinks).
     pub max_xml_nodes: usize,
     /// The deepest nesting of elements in a metadata part. Default: 64 (these parts nest two or three levels deep). Values above 256 count as 256, because dropping a deeper tree could take too much stack space.
     pub max_xml_depth: usize,
     /// The most attributes, namespace declarations included, of one element in a metadata part. Default: 64.
     pub max_xml_attributes: usize,
-    /// The longest element or attribute name in a metadata part, in bytes. Default: 256.
+    /// The longest element or attribute name in a metadata part, and the longest relationship identifier, which is an XML name too (`xsd:ID`), in bytes. Default: 256.
     pub max_xml_name_length: usize,
     /// The most entries (storages and streams) of an OLE compound file. Default: 65,536.
     pub max_compound_file_entries: usize,

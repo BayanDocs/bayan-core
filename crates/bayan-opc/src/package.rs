@@ -24,6 +24,9 @@ pub struct Package<'a> {
     index: BTreeMap<String, usize>,
     /// The relationships of each source that has a relationships part.
     relationships: BTreeMap<RelationshipSource, Relationships>,
+    /// What opening used of the two budgets that the metadata parts share, [`Limits::max_metadata_total_size`] and [`Limits::max_xml_nodes`], so that [`Package::core_properties`] reads within the rest.
+    metadata_size: u64,
+    nodes_left: usize,
 }
 
 /// A part of a package: its name and the ZIP entry that holds it.
@@ -111,6 +114,8 @@ impl<'a> Package<'a> {
             parts,
             index,
             relationships,
+            metadata_size,
+            nodes_left: nodes,
         })
     }
 
@@ -164,7 +169,7 @@ impl<'a> Package<'a> {
     ///
     /// # Errors
     ///
-    /// [`PackageError::CoreProperties`] with [`CorePropertiesError::MultipleCoreProperties`] if there is more than one such relationship (§8.2), or with [`CorePropertiesError::MissingPart`] if it does not point to a part of the package; and the errors of [`CoreProperties::parse`].
+    /// [`PackageError::CoreProperties`] with [`CorePropertiesError::MultipleCoreProperties`] if there is more than one such relationship (§8.2), or with [`CorePropertiesError::MissingPart`] if it does not point to a part of the package; and the errors of [`CoreProperties::parse`]. The part shares the budgets of the metadata that opening the package parsed: [`LimitError::MetadataTotalTooLarge`] if it uncompresses to more than opening left of [`Limits::max_metadata_total_size`], and [`Error::Xml`] with [`XmlErrorKind::TooManyNodes`](crate::XmlErrorKind::TooManyNodes) if it has more XML nodes than opening left of [`Limits::max_xml_nodes`].
     pub fn core_properties(&self) -> Result<Option<CoreProperties>, Error> {
         let invalid = |error| Error::Package(PackageError::CoreProperties(error));
         let Some(relationships) = self.relationships.get(&RelationshipSource::Package) else {
@@ -186,9 +191,10 @@ impl<'a> Package<'a> {
         let part = self
             .find(&name)
             .ok_or(invalid(CorePropertiesError::MissingPart))?;
-        // Read on demand, after opening, with budgets of its own.
-        let bytes = read_metadata(&self.zip, part.entry, &self.limits, &mut 0)?;
-        let mut nodes = self.limits.max_xml_nodes;
+        // Read on demand, after opening, within what opening left of the two budgets that all the metadata parts of a package share, core properties included, so that opening a package and reading its core properties take no more memory together than the budgets allow.
+        let mut metadata_size = self.metadata_size;
+        let bytes = read_metadata(&self.zip, part.entry, &self.limits, &mut metadata_size)?;
+        let mut nodes = self.nodes_left;
         CoreProperties::parse_entry(&bytes, &self.limits, Some(part.entry), &mut nodes).map(Some)
     }
 
@@ -269,6 +275,8 @@ fn check_derivable(parts: &[Part], index: &BTreeMap<String, usize>) -> Result<()
 /// Writes a package deterministically, keeping everything that was not changed as it was.
 ///
 /// Made from an opened package ([`PackageWriter::from_package`]), it starts as an exact copy of the package's parts: written without changes, every part's stored bytes, and the content types stream and relationships parts, are copied unchanged from the original, so every part is byte-identical ([`ZipWriter::add_raw`]); ZIP entries that are not parts are left out. A part that is replaced, added or removed changes only itself; the content types stream and a relationships part are written anew only when they change, and even then keep every unchanged entry as it was written ([`ContentTypes`], [`Relationships`]).
+///
+/// The writer does not apply the reader's [`Limits`]: what it writes can exceed them, for example a part name longer than [`Limits::max_name_length`], or a relationships part larger than [`Limits::max_metadata_size`] (about 40,000 hyperlinks at the default), and [`Package::open`] with the same limits then refuses the package. A host that writes such a package opens it again with the limits raised.
 ///
 /// The output is deterministic: the content types stream comes first, then the parts in the order of the original package, then new parts in the order they were added, all with the ZIP writer's fixed timestamps and compression level. The same changes to the same package always give the same bytes.
 #[derive(Debug)]
