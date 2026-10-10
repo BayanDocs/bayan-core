@@ -115,9 +115,9 @@ pub(crate) fn check_name(name: &str) -> Option<bool> {
     Some(folder)
 }
 
-/// The key under which two entry names are the same: percent-encoded non-ASCII characters decoded (§7.3.5), then ASCII letters in lower case (the equivalence of part names, §6.2.2.3).
+/// The key under which two entry names are the same: the characters that part names hold as themselves percent-decoded, as [`PartName::from_zip_name`](crate::PartName::from_zip_name) decodes them (§7.3.5), then ASCII letters in lower case (the equivalence of part names, §6.2.2.3).
 pub(crate) fn equivalence_key(name: &str) -> String {
-    let mut key = percent::decode_non_ascii(name).into_owned();
+    let mut key = percent::decode_ucschar(name).into_owned();
     key.make_ascii_lowercase();
     key
 }

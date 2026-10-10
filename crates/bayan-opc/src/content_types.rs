@@ -566,7 +566,7 @@ fn read_entry(element: &Element) -> Result<Entry, ContentTypesError> {
             .attribute("PartName")
             .ok_or(ContentTypesError::MissingAttribute)?;
         // `PartName` is an xsd:anyURI, so non-ASCII characters may be percent-encoded, as in ZIP entry names.
-        let part_name = PartName::new(&percent::decode_non_ascii(written))
+        let part_name = PartName::new(&percent::decode_ucschar(written))
             .map_err(ContentTypesError::InvalidPartName)?;
         Kind::Override { part_name }
     };
@@ -578,9 +578,9 @@ fn read_entry(element: &Element) -> Result<Entry, ContentTypesError> {
     })
 }
 
-/// The key under which two extensions are the same: non-ASCII characters percent-decoded, ASCII letters in lower case (§7.2.3.4 c).
+/// The key under which two extensions are the same: the characters that part names hold as themselves percent-decoded, as in part names, and ASCII letters in lower case (§7.2.3.4 c).
 fn extension_key(extension: &str) -> String {
-    let mut key = percent::decode_non_ascii(extension).into_owned();
+    let mut key = percent::decode_ucschar(extension).into_owned();
     key.make_ascii_lowercase();
     key
 }

@@ -37,7 +37,7 @@ impl PartName {
         PartName { name, key }
     }
 
-    /// The part name of a ZIP entry name: non-ASCII characters percent-decoded and a slash added in front (§7.3.5).
+    /// The part name of a ZIP entry name: the characters that part names hold as themselves percent-decoded (`é` for `%C3%A9`, but `%C2%80` stays as it is) and a slash added in front (§7.3.5).
     ///
     /// # Errors
     ///
@@ -45,7 +45,7 @@ impl PartName {
     pub fn from_zip_name(zip_name: &str) -> Result<PartName, PartNameError> {
         let mut name = String::with_capacity(zip_name.len() + 1);
         name.push('/');
-        name.push_str(&percent::decode_non_ascii(zip_name));
+        name.push_str(&percent::decode_ucschar(zip_name));
         PartName::new(&name)
     }
 
@@ -196,7 +196,7 @@ impl RelationshipSource {
             RelationshipSource::Part(part) => part.as_str(),
         };
         let path = resolve_reference(base, target)?;
-        PartName::new(&percent::decode_non_ascii(&path)).map_err(TargetError::InvalidPartName)
+        PartName::new(&percent::decode_ucschar(&path)).map_err(TargetError::InvalidPartName)
     }
 }
 
@@ -296,7 +296,8 @@ fn validate_segment(segment: &str) -> Result<(), PartNameError> {
                 is_ascii_unreserved(char::from(byte)) || byte == b'/' || byte == b'\\'
             } else {
                 // A non-ASCII character, percent-encoded, is an unreserved character written in a form part names do not allow.
-                percent::decode_character(bytes, at).is_some_and(|(decoded, _)| is_ucschar(decoded))
+                percent::decode_character(bytes, at)
+                    .is_some_and(|(decoded, _)| percent::is_ucschar(decoded))
             };
             if forbidden {
                 return Err(PartNameError::ForbiddenPercentEncoding);
@@ -318,23 +319,12 @@ fn is_path_character(character: char) -> bool {
             character,
             '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | ':' | '@'
         )
-        || is_ucschar(character)
+        || percent::is_ucschar(character)
 }
 
 /// The unreserved ASCII characters of RFC 3986: letters, digits, `-`, `.`, `_` and `~`.
 fn is_ascii_unreserved(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '~')
-}
-
-/// The non-ASCII characters RFC 3987 allows in IRIs (`ucschar`): everything from U+00A0 except surrogates, the specials and private use areas, and the last two code points of each plane.
-fn is_ucschar(character: char) -> bool {
-    let code = u32::from(character);
-    match code {
-        0xA0..=0xD7FF | 0xF900..=0xFDCF | 0xFDF0..=0xFFEF => true,
-        0x1_0000..=0xD_FFFF => code & 0xFFFF <= 0xFFFD,
-        0xE_1000..=0xE_FFFD => true,
-        _ => false,
-    }
 }
 
 #[cfg(test)]

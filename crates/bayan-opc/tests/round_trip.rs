@@ -359,6 +359,60 @@ fn writes_new_core_properties() {
 }
 
 #[test]
+fn reads_back_every_part_name_it_writes() {
+    // A part name may hold a non-ASCII character that IRIs do not allow as itself (U+0080 here, which is not a `ucschar`) only percent-encoded; reading must leave that encoding alone, or the part would vanish (the review of pull request 17). `%C3%A9`, by contrast, is how a ZIP entry name writes `é`.
+    let odd = PartName::new("/a%C2%80.bin").unwrap();
+    let accented = PartName::new("/média/é.bin").unwrap();
+    let mut writer = PackageWriter::new();
+    for name in [&odd, &accented] {
+        writer
+            .add_part(name, "application/octet-stream", b"x".to_vec())
+            .unwrap();
+        // An override, as a part without a default for its extension gets one.
+        writer
+            .content_types_mut()
+            .set_override(name, "application/x-test")
+            .unwrap();
+    }
+    let relationships = writer
+        .relationships_mut(&RelationshipSource::Package)
+        .unwrap();
+    relationships
+        .add(Relationship::new(
+            "rId1",
+            "urn:test",
+            "a%C2%80.bin",
+            TargetMode::Internal,
+        ))
+        .unwrap();
+    relationships
+        .add(Relationship::new(
+            "rId2",
+            "urn:test",
+            "m%C3%A9dia/%C3%A9.bin",
+            TargetMode::Internal,
+        ))
+        .unwrap();
+    let bytes = writer.finish().unwrap();
+    let package = open(&bytes);
+    assert_eq!(names(&package)[..2], ["/a%C2%80.bin", "/média/é.bin"]);
+    for name in [&odd, &accented] {
+        assert_eq!(package.read_part(name).unwrap(), b"x");
+        assert_eq!(package.content_type(name), Some("application/x-test"));
+    }
+    let relationships = package.relationships(&RelationshipSource::Package).unwrap();
+    let target = |id| {
+        relationships
+            .get(id)
+            .unwrap()
+            .resolve(&RelationshipSource::Package)
+            .unwrap()
+    };
+    assert_eq!(target("rId1"), Target::Part(odd.clone()));
+    assert_eq!(target("rId2"), Target::Part(accented.clone()));
+}
+
+#[test]
 fn refuses_edits_that_would_break_the_rules() {
     let package = open(FIXTURES[0].1);
     let mut writer = PackageWriter::from_package(&package);
