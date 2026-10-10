@@ -324,6 +324,93 @@ fn removes_a_part_with_its_relationships_and_override() {
 }
 
 #[test]
+fn removes_the_override_of_a_removed_relationships_part() {
+    // A relationships part can have an override of its own instead of the default for `rels`; removing its part must remove that override too (the review of pull request 17).
+    let part = PartName::new("/a.xml").unwrap();
+    let source = RelationshipSource::Part(part.clone());
+    let relationships_part = source.relationships_part();
+    let mut writer = PackageWriter::new();
+    writer
+        .add_part(&part, "application/xml", b"<a/>".to_vec())
+        .unwrap();
+    writer
+        .relationships_mut(&source)
+        .unwrap()
+        .add(Relationship::new(
+            "rId1",
+            "urn:test",
+            "https://example.com/",
+            TargetMode::External,
+        ))
+        .unwrap();
+    writer
+        .content_types_mut()
+        .set_override(&relationships_part, bayan_opc::relationships::CONTENT_TYPE)
+        .unwrap();
+    let bytes = writer.finish().unwrap();
+    let package = open(&bytes);
+    let overrides = |package: &Package<'_>| -> Vec<String> {
+        package
+            .content_types()
+            .overrides()
+            .map(|(name, _)| name.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(overrides(&package), ["/_rels/a.xml.rels"]);
+    let mut writer = PackageWriter::from_package(&package);
+    writer.remove_part(&part).unwrap();
+    let written = writer.finish().unwrap();
+    let reopened = open(&written);
+    assert!(!reopened.contains(&relationships_part));
+    assert!(overrides(&reopened).is_empty());
+}
+
+#[test]
+fn refuses_relationships_parts_with_derivable_names() {
+    use bayan_opc::PackageError;
+    // A relationships part is a part too, so its name may not be derivable from another part's name, or the other way round, or the package would not open again (the review of pull request 17).
+    let refused = |result: Result<&mut bayan_opc::Relationships, bayan_opc::Error>| {
+        assert!(
+            matches!(
+                result,
+                Err(bayan_opc::Error::Package(PackageError::DerivableName))
+            ),
+            "{result:?}"
+        );
+    };
+    let mut writer = PackageWriter::new();
+    writer
+        .add_part(
+            &PartName::new("/_rels").unwrap(),
+            "application/xml",
+            Vec::new(),
+        )
+        .unwrap();
+    // `/_rels/.rels` would be derivable from `/_rels`.
+    refused(writer.relationships_mut(&RelationshipSource::Package));
+    let part = PartName::new("/w/a.xml").unwrap();
+    writer
+        .add_part(&part, "application/xml", Vec::new())
+        .unwrap();
+    writer
+        .add_part(
+            &PartName::new("/w/_rels/a.xml.rels/b.xml").unwrap(),
+            "application/xml",
+            Vec::new(),
+        )
+        .unwrap();
+    // `/w/_rels/a.xml.rels/b.xml` would be derivable from `/w/_rels/a.xml.rels`.
+    refused(writer.relationships_mut(&RelationshipSource::Part(part)));
+    // The refusals left nothing behind: the package opens.
+    let written = writer.finish().unwrap();
+    let package = open(&written);
+    assert_eq!(
+        names(&package),
+        ["/_rels", "/w/a.xml", "/w/_rels/a.xml.rels/b.xml"]
+    );
+}
+
+#[test]
 fn writes_new_core_properties() {
     let mut writer = PackageWriter::new();
     let core = PartName::new("/docProps/core.xml").unwrap();

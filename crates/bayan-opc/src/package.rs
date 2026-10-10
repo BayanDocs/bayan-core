@@ -268,7 +268,7 @@ fn check_derivable(parts: &[Part], index: &BTreeMap<String, usize>) -> Result<()
 
 /// Writes a package deterministically, keeping everything that was not changed as it was.
 ///
-/// Made from an opened package ([`PackageWriter::from_package`]), it starts as an exact copy: written without changes, every part's stored bytes, and the content types stream and relationships parts, are copied unchanged from the original, so every part is byte-identical ([`ZipWriter::add_raw`]). A part that is replaced, added or removed changes only itself; the content types stream and a relationships part are written anew only when they change, and even then keep every unchanged entry as it was written ([`ContentTypes`], [`Relationships`]).
+/// Made from an opened package ([`PackageWriter::from_package`]), it starts as an exact copy of the package's parts: written without changes, every part's stored bytes, and the content types stream and relationships parts, are copied unchanged from the original, so every part is byte-identical ([`ZipWriter::add_raw`]); ZIP entries that are not parts are left out. A part that is replaced, added or removed changes only itself; the content types stream and a relationships part are written anew only when they change, and even then keep every unchanged entry as it was written ([`ContentTypes`], [`Relationships`]).
 ///
 /// The output is deterministic: the content types stream comes first, then the parts in the order of the original package, then new parts in the order they were added, all with the ZIP writer's fixed timestamps and compression level. The same changes to the same package always give the same bytes.
 #[derive(Debug)]
@@ -319,7 +319,9 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         }
     }
 
-    /// A writer that starts as an exact copy of `package`.
+    /// A writer that starts as an exact copy of `package`'s parts and content types stream.
+    ///
+    /// Only parts are copied: ZIP entries that are not parts, which [`Package::open`] ignores (folder entries, and entries whose names are not valid part names, such as `image 1.png` with an unencoded space), are left out of the package it writes.
     pub fn from_package(package: &'p Package<'a>) -> Self {
         let mut slots = Vec::with_capacity(package.parts.len());
         let mut index = BTreeMap::new();
@@ -368,12 +370,7 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         if self.contains(name) {
             return Err(PackageError::PartExists.into());
         }
-        if self
-            .slots
-            .iter()
-            .flatten()
-            .any(|slot| slot.name.is_derivable_from(name) || name.is_derivable_from(&slot.name))
-        {
+        if self.is_derivable(name) {
             return Err(PackageError::DerivableName.into());
         }
         if !content_types::is_media_type(content_type) {
@@ -402,7 +399,7 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         Ok(())
     }
 
-    /// Removes the part named `name`, its override in the content types stream and its relationships part. Relationships that point to it from elsewhere are left as they are; removing them is up to the caller, who knows what they mean.
+    /// Removes the part named `name`, its override in the content types stream, and its relationships part with that part's override. Relationships that point to it from elsewhere are left as they are; removing them is up to the caller, who knows what they mean.
     ///
     /// # Errors
     ///
@@ -415,7 +412,9 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         self.content_types.remove_override(name);
         let source = RelationshipSource::Part(name.clone());
         if self.relationships.remove(&source).is_some() {
-            self.free(&source.relationships_part());
+            let relationships_part = source.relationships_part();
+            self.free(&relationships_part);
+            self.content_types.remove_override(&relationships_part);
         }
         Ok(())
     }
@@ -434,6 +433,14 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         {
             *slot = None;
         }
+    }
+
+    /// Whether `name` is derivable from the name of a part of the package being written, or the other way round (§6.2.2.3).
+    fn is_derivable(&self, name: &PartName) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|slot| slot.name.is_derivable_from(name) || name.is_derivable_from(&slot.name))
     }
 
     /// The content types stream as it will be written.
@@ -455,7 +462,7 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
     ///
     /// # Errors
     ///
-    /// [`PackageError::PartNotFound`] if `source` is a part that the package does not have, and [`PackageError::RelationshipsPartName`] if it is a relationships part, which cannot have relationships.
+    /// [`PackageError::PartNotFound`] if `source` is a part that the package does not have, [`PackageError::RelationshipsPartName`] if it is a relationships part, which cannot have relationships, and [`PackageError::DerivableName`] if the relationships part it would get has a name that is derivable from an existing part's name or the other way round.
     pub fn relationships_mut(
         &mut self,
         source: &RelationshipSource,
@@ -470,6 +477,9 @@ impl<'p, 'a> PackageWriter<'p, 'a> {
         }
         if !self.relationships.contains_key(source) {
             let name = source.relationships_part();
+            if self.is_derivable(&name) {
+                return Err(PackageError::DerivableName.into());
+            }
             self.index.insert(name.key().to_owned(), self.slots.len());
             self.slots.push(Some(Slot {
                 name,
