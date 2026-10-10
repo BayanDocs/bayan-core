@@ -829,11 +829,12 @@ fn refuses_junk_around_the_central_directory() {
 
 #[test]
 fn refuses_an_entry_count_that_cannot_fit_in_the_central_directory() {
-    // Every central directory header takes at least 46 bytes, so 2^40 entries cannot fit; the count is refused before anything is set aside for it, even when the entry limit would allow it.
+    // Every central directory header takes at least 46 bytes, so 2^40 entries cannot fit; the count is refused before anything is set aside for it, even when the entry limit would allow it. Where `usize` has 32 bits, as in WebAssembly, the raised entry limit stops at 2^32 - 1, so the count is that instead, or the limit would refuse it first.
+    let count = (1_u64 << 40).min(u64::try_from(usize::MAX).unwrap());
     let mut bytes = zip64_package();
     let record = bytes.len() - END - LOCATOR - ZIP64_END;
-    put64(&mut bytes, record + 24, 1 << 40);
-    put64(&mut bytes, record + 32, 1 << 40);
+    put64(&mut bytes, record + 24, count);
+    put64(&mut bytes, record + 32, count);
     let limits = Limits {
         max_entries: usize::MAX,
         ..Limits::default()
