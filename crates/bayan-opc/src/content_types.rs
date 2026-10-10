@@ -860,6 +860,17 @@ mod tests {
     }
 
     #[test]
+    fn compares_extensions_after_percent_decoding() {
+        // `Extension` is part of a URI, so `%C3%A9` stands for `é`, which part names hold as itself.
+        let types = parse(&format!(
+            "<Types xmlns=\"{NAMESPACE}\"><Default Extension=\"%C3%A9\" ContentType=\"a/b\"/></Types>"
+        ))
+        .unwrap();
+        assert_eq!(types.content_type(&name("/a.é")), Some("a/b"));
+        assert_eq!(types.content_type(&name("/a.É")), None);
+    }
+
+    #[test]
     fn refuses_names_longer_than_entry_names() {
         // A part name or extension longer than a ZIP entry name may be could never apply to a part, and each is kept several times, so it is refused (the review of pull request 17: one override, written in UTF-16, made opening a package take 164 MiB).
         let limit = Limits::default().max_name_length;

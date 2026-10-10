@@ -360,13 +360,17 @@ fn refuses_names_that_escape_or_confuse() {
             "{name:?}"
         );
     }
-    // Names that are not UTF-8 cannot be compared reliably.
-    let mut item = Item::stored("x", b"x");
-    item.name_bytes = Some(vec![b'w', 0xFF, b'x']);
-    assert_eq!(
-        zip_error(&Archive::new(vec![item]).build()),
-        ZipError::UnsafeName { entry: 0 }
-    );
+    // Names that are not UTF-8 cannot be compared reliably, with or without the flag that says they are.
+    for flags in [0, 1 << 11] {
+        let mut item = Item::stored("x", b"x");
+        item.name_bytes = Some(vec![b'w', 0xFF, b'x']);
+        item.flags = flags;
+        assert_eq!(
+            zip_error(&Archive::new(vec![item]).build()),
+            ZipError::UnsafeName { entry: 0 },
+            "{flags}"
+        );
+    }
     // Without the UTF-8 flag, a ZIP name is in code page 437, where the bytes of `é` in UTF-8 spell `Ã©`: another program would read another name, so such a name is refused.
     let mut item = Item::stored("é.xml", b"x");
     item.flags = 0;
@@ -657,7 +661,7 @@ fn reads_and_verifies_copies_from_the_longest_distance() {
 
 #[test]
 fn reads_verifies_and_copies_damaged_entries_alike() {
-    // A large entry compressed as usual, damaged in 24 places one at a time: `read`, `verify` and `raw_entry` give the same answer for each.
+    // A large entry compressed as usual, damaged in 24 places one at a time: each damage is refused, and `read`, `verify` and `raw_entry` give the same answer for each.
     let item = Item::deflated("text.txt", &craft::text(300 * 1024));
     let length = item.stored.len();
     for step in 0..24 {
@@ -667,6 +671,7 @@ fn reads_verifies_and_copies_damaged_entries_alike() {
         let bytes = Archive::new(vec![damaged]).build();
         let archive = open_zip(&bytes).unwrap();
         let verified = archive.verify(0);
+        assert!(verified.is_err(), "damage at {position}");
         assert_eq!(
             archive.read(0).map(|_| ()),
             verified,

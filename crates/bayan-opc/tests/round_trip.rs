@@ -322,17 +322,29 @@ fn an_edit_changes_only_what_it_touches() {
 
 #[test]
 fn removes_a_part_with_its_relationships_and_override() {
+    // `item1.xml` has a relationships part, and `itemProps1.xml` an override of its own in the content types stream.
     let package = open(FIXTURES[4].1);
     let item = PartName::new("/customXml/item1.xml").unwrap();
+    let properties = PartName::new("/customXml/itemProps1.xml").unwrap();
     let source = RelationshipSource::Part(item.clone());
+    let has_override = |package: &Package<'_>, part: &PartName| {
+        package
+            .content_types()
+            .overrides()
+            .any(|(name, _)| name == part)
+    };
     assert!(package.relationships(&source).is_some());
+    assert!(has_override(&package, &properties));
     let mut writer = PackageWriter::from_package(&package);
     writer.remove_part(&item).unwrap();
+    writer.remove_part(&properties).unwrap();
     let written = writer.finish().unwrap();
     let reopened = open(&written);
     assert!(!reopened.contains(&item));
     assert!(!reopened.contains(&source.relationships_part()));
     assert!(reopened.relationships(&source).is_none());
+    assert!(!reopened.contains(&properties));
+    assert!(!has_override(&reopened, &properties));
 }
 
 #[test]
