@@ -38,15 +38,16 @@ Commands:
                       without it, no path is recorded (always so for private documents).
                       Documents the exclusion list LIST names are skipped. Documents already
                       in the manifest are stored again if the store lacks them.
-  tag [--all]         Tag again the documents whose tags are missing or older than this
-                      tagger (version 1); --all tags every document again.
+  tag [--all]         Tag again the documents whose tags are missing or were made by an
+                      older tagger; --all tags every document again.
   verify [--exclude LIST]
                       Check the manifest, and with a store every object's SHA-256; with an
                       exclusion list, also that the manifest contains none of its documents.
   list [--feature NAME] [--font NAME] [--script NAME] [--source NAME] [--format text|json]
                       List documents, optionally filtered.
   stats [--format markdown|json] [--title TEXT]
-                      Frequencies by feature, font, script, language and compatibility mode.
+                      Frequencies by feature, font, script, language and compatibility mode,
+                      for manifests without private (T2) documents.
   schema              Print the JSON Schema of the manifest.
 
 Options for every command:

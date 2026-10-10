@@ -16,8 +16,8 @@ The Fidelity Lab measures how closely BayanDocs matches Microsoft Word ([Fidelit
 Build it with `cargo build --release -p bayan-lab`; the binary is `target/release/bayan-lab`. `bayan-lab --help` lists the commands:
 
 ```text
-bayan-lab corpus source add NAME --url URL --revision REV --license SPDX --copyright TEXT --license-file PATH=FILE…
-bayan-lab corpus add --source NAME [--tier T1] [--root DIR] [--exclude LIST] FILE…
+bayan-lab corpus source add NAME --url URL --revision REV --license SPDX --copyright TEXT --license-file PATH=FILE… [--notes TEXT]
+bayan-lab corpus add --source NAME [--tier T1] [--root DIR] [--notes TEXT] [--exclude LIST] FILE…
 bayan-lab corpus tag [--all]
 bayan-lab corpus verify [--exclude LIST]
 bayan-lab corpus list [--feature NAME] [--font NAME] [--script NAME] [--source NAME] [--format text|json]
@@ -25,7 +25,7 @@ bayan-lab corpus stats [--format markdown|json] [--title TEXT]
 bayan-lab corpus schema
 ```
 
-Every command takes `--manifest FILE` and, where it reads or writes documents, `--store ADDRESS` (or the environment variables `BAYAN_LAB_MANIFEST` and `BAYAN_LAB_STORE`). The exit status is 0 when everything succeeded, 1 when some documents or checks failed (the messages say which), and 2 when the command could not run.
+Every command takes `--manifest FILE` and, where it reads or writes documents, `--store ADDRESS` (or the environment variables `BAYAN_LAB_MANIFEST` and `BAYAN_LAB_STORE`); options are written `--name VALUE`, and a command refuses words it does not use. `corpus stats` reports on public manifests only, until LAB-101 adds the folding of rare names that a report on private documents needs. The exit status is 0 when everything succeeded, 1 when some documents or checks failed (the messages say which), and 2 when the command could not run.
 
 For example, to list the public corpus's documents that use tracked moves, and to check a local copy of it:
 
