@@ -12,6 +12,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::{Error, LimitError, Limits, XmlError, XmlErrorKind};
 
@@ -59,8 +60,8 @@ pub(crate) struct Element {
     pub(crate) qualified_name: String,
     /// The name without its prefix.
     pub(crate) local_name: String,
-    /// The namespace the name belongs to.
-    pub(crate) namespace: Option<String>,
+    /// The namespace the name belongs to, shared with every other name in it rather than copied.
+    pub(crate) namespace: Option<Arc<str>>,
     /// The attributes, without the namespace declarations.
     pub(crate) attributes: Vec<Attribute>,
     /// The content.
@@ -87,8 +88,8 @@ impl Element {
 pub(crate) struct Attribute {
     /// The name without its prefix.
     pub(crate) local_name: String,
-    /// The namespace the name belongs to; attributes without a prefix have none.
-    pub(crate) namespace: Option<String>,
+    /// The namespace the name belongs to, shared like an element's; attributes without a prefix have none.
+    pub(crate) namespace: Option<Arc<str>>,
     /// The value, with references replaced and white space normalized as XML 1.0 §3.3.3 requires.
     pub(crate) value: String,
 }
@@ -142,6 +143,7 @@ pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Document, XmlError>
             text: &text,
             position: 0,
             limits,
+            xml_namespace: Arc::from(XML_NAMESPACE),
         };
         parser.declaration(encoding)?;
         parser.miscellaneous()?;
@@ -227,10 +229,10 @@ struct Open {
     bindings_before: usize,
 }
 
-/// A namespace binding: a prefix (or `None` for the default namespace) and the namespace name (empty to undeclare the default namespace).
+/// A namespace binding: a prefix (or `None` for the default namespace) and the namespace name (empty to undeclare the default namespace). The name is stored once, here, and every element and attribute in the namespace shares it.
 struct Binding {
     prefix: Option<String>,
-    namespace: String,
+    namespace: Arc<str>,
 }
 
 /// What the parser found in an element's content.
@@ -247,6 +249,8 @@ struct Parser<'t> {
     text: &'t str,
     position: usize,
     limits: &'t Limits,
+    /// The namespace of the `xml:` prefix, made once for the names that use it.
+    xml_namespace: Arc<str>,
 }
 
 impl<'t> Parser<'t> {
@@ -648,11 +652,13 @@ impl<'t> Parser<'t> {
             }
             bindings.push(Binding {
                 prefix,
-                namespace: value.clone(),
+                namespace: Arc::from(value.as_str()),
             });
         }
         let (element_prefix, local_name) = split_name(&qualified_name).ok_or(namespace_error)?;
-        let namespace = resolve(bindings, element_prefix, true).ok_or(namespace_error)?;
+        let namespace = self
+            .resolve(bindings, element_prefix, true)
+            .ok_or(namespace_error)?;
         let mut attributes = Vec::new();
         let mut expanded = BTreeSet::new();
         for (name, value, span) in raw_attributes {
@@ -660,7 +666,9 @@ impl<'t> Parser<'t> {
                 continue;
             }
             let (prefix, local) = split_name(&name).ok_or(namespace_error)?;
-            let attribute_namespace = resolve(bindings, prefix, false).ok_or(namespace_error)?;
+            let attribute_namespace = self
+                .resolve(bindings, prefix, false)
+                .ok_or(namespace_error)?;
             if !expanded.insert((attribute_namespace.clone(), local.to_owned())) {
                 return Err(XmlError {
                     offset: span.start,
@@ -688,6 +696,32 @@ impl<'t> Parser<'t> {
             empty,
         ))
     }
+
+    /// The namespace of `prefix` in `bindings` (the innermost declaration wins), shared rather than copied. Element names without a prefix take the default namespace; attribute names without a prefix have none. `None` (the outer one) if the prefix is not declared.
+    fn resolve(
+        &self,
+        bindings: &[Binding],
+        prefix: Option<&str>,
+        element: bool,
+    ) -> Option<Option<Arc<str>>> {
+        match prefix {
+            Some("xml") => Some(Some(Arc::clone(&self.xml_namespace))),
+            Some(prefix) => bindings
+                .iter()
+                .rev()
+                .find(|binding| binding.prefix.as_deref() == Some(prefix))
+                .map(|binding| Some(Arc::clone(&binding.namespace))),
+            None if !element => Some(None),
+            None => Some(
+                bindings
+                    .iter()
+                    .rev()
+                    .find(|binding| binding.prefix.is_none())
+                    .map(|binding| Arc::clone(&binding.namespace))
+                    .filter(|namespace| !namespace.is_empty()),
+            ),
+        }
+    }
 }
 
 /// Checks a declaration of `prefix` as `namespace` against Namespaces in XML 1.0 §3: `xmlns` cannot be declared, `xml` only as its own namespace, no other prefix as either reserved namespace, and a prefix cannot be undeclared.
@@ -714,27 +748,6 @@ fn split_name(name: &str) -> Option<(Option<&str>, &str)> {
             Some((Some(prefix), local))
         }
         Some(_) => None,
-    }
-}
-
-/// The namespace of `prefix` in `bindings` (the innermost declaration wins). Element names without a prefix take the default namespace; attribute names without a prefix have none. `None` (the outer one) if the prefix is not declared.
-fn resolve(bindings: &[Binding], prefix: Option<&str>, element: bool) -> Option<Option<String>> {
-    match prefix {
-        Some("xml") => Some(Some(XML_NAMESPACE.to_owned())),
-        Some(prefix) => bindings
-            .iter()
-            .rev()
-            .find(|binding| binding.prefix.as_deref() == Some(prefix))
-            .map(|binding| Some(binding.namespace.clone())),
-        None if !element => Some(None),
-        None => Some(
-            bindings
-                .iter()
-                .rev()
-                .find(|binding| binding.prefix.is_none())
-                .map(|binding| binding.namespace.clone())
-                .filter(|namespace| !namespace.is_empty()),
-        ),
     }
 }
 
@@ -1123,6 +1136,40 @@ mod tests {
             parse(deep.as_bytes(), &Limits::default()).unwrap_err().kind,
             XmlErrorKind::TooDeep
         );
+    }
+
+    #[test]
+    fn shares_namespace_names_instead_of_copying_them() {
+        // Every element and attribute in a namespace refers to the one copy of its name that the declaration made, so a long name used by many elements costs its length once (the review of pull request 17 found an 863-byte package that needed 1 GiB when each element had a copy).
+        let document = parse_ok(
+            "<p:a xmlns:p='urn:a-long-namespace-name' xmlns='urn:d'><p:b p:x='1'/><p:c/><d xml:lang='en'/><e xml:space='preserve'/></p:a>",
+        );
+        let root = &document.root;
+        let children: Vec<&Element> = root
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(element) => Some(element),
+                _ => None,
+            })
+            .collect();
+        let namespace = |element: &Element| element.namespace.clone().unwrap();
+        let shared = namespace(root);
+        assert!(Arc::ptr_eq(&shared, &namespace(children[0])));
+        assert!(Arc::ptr_eq(&shared, &namespace(children[1])));
+        assert!(Arc::ptr_eq(
+            &shared,
+            children[0].attributes[0].namespace.as_ref().unwrap()
+        ));
+        // The default namespace, and the namespace of the `xml:` prefix, are shared the same way.
+        assert!(Arc::ptr_eq(
+            &namespace(children[2]),
+            &namespace(children[3])
+        ));
+        assert!(Arc::ptr_eq(
+            children[2].attributes[0].namespace.as_ref().unwrap(),
+            children[3].attributes[0].namespace.as_ref().unwrap()
+        ));
     }
 
     #[test]

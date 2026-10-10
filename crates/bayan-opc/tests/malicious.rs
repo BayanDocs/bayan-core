@@ -746,6 +746,26 @@ fn refuses_entity_expansion_in_metadata() {
 }
 
 #[test]
+fn opens_a_long_namespace_on_many_elements_cheaply() {
+    // An extension element in the package's relationships part binds a 32 KiB namespace name, then holds 32,768 empty elements in that namespace: under 1 KB compressed. Every element refers to the one stored copy of the name; when each element had its own copy, opening this package needed 1 GiB (the review of pull request 17), and a part just under 1 MiB could ask for tens of GiB.
+    let mut rels = format!(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><x:e xmlns:x=\"{}\">",
+        "u".repeat(32 * 1024)
+    );
+    rels.push_str(&"<x:b/>".repeat(32 * 1024));
+    rels.push_str("</x:e></Relationships>");
+    let mut items = package_items();
+    items.push(Item::deflated("_rels/.rels", rels.as_bytes()));
+    let bytes = Archive::new(items).build();
+    assert!(bytes.len() < 2_000, "{}", bytes.len());
+    let package = Package::open(&bytes, &Limits::default()).unwrap();
+    let relationships = package
+        .relationships(&bayan_opc::RelationshipSource::Package)
+        .unwrap();
+    assert!(relationships.is_empty());
+}
+
+#[test]
 fn refuses_oversized_metadata_before_decompressing_it() {
     let mut items = package_items();
     items[0].size = 1 << 40;
