@@ -3,7 +3,7 @@
 
 Usage: python3 -I inspect-content.py STORE MANIFEST [--contexts]
 
-STORE is a local store folder (`objects/ab/cdef….docx`), MANIFEST the corpus manifest. The script reads every document the manifest lists and reports, per document, what a curator must judge before the document may be published: the text of every part (every story, the properties and the relationship targets) against lists of markers (copyright and confidentiality notices, licenses, news agencies, picture libraries, standards bodies, publishers, Office.com template identifiers), e-mail addresses, bank account and payment card numbers and user folders in paths; every embedded object, by its content (programs, e-mail messages, documents and packages, with embedded Office documents inspected in turn); every picture's metadata (camera, author and copyright fields, GPS positions, picture-library credits); every embedded font (complete or subset, vendor and embedding permission); and every signature certificate. Names, addresses and numbers that could identify a person are masked (`Xxxx`), so the report can be shared; `--contexts` adds 60 characters around each marker, for the curator's own terminal only.
+STORE is a local store folder (`objects/ab/cdef….docx`), MANIFEST the corpus manifest. The script reads every document the manifest lists and reports, per document, what a curator must judge before the document may be published: the text of every part (every story, the properties, the relationship targets, SVG pictures, HTML and plain-text parts, and the text strings of parts of any other kind) against lists of markers (copyright and confidentiality notices, licenses, news agencies, picture libraries, standards bodies and the wording of ECMA-376's own definitions, publishers, Office.com template identifiers), e-mail addresses, bank account and payment card numbers and user folders in paths, both as the part stores it and with each paragraph's text runs joined, because Word splits a word across runs wherever its formatting, revisions or proofing marks change; every embedded object, by its content (programs, e-mail messages, documents and packages, with embedded Office documents inspected in turn), listed for every document that has one; every picture's metadata (camera, author and copyright fields, GPS positions, picture-library credits); every embedded font (complete or subset, vendor and embedding permission); and every signature certificate. It also counts, without showing them, the people that the properties, comments and tracked changes name and the account IDs of the presence information in `word/people.xml`. Names, addresses and numbers that could identify a person are masked (`Xxxx`), so the report can be shared; `--contexts` adds 60 characters around each marker, for the curator's own terminal only.
 
 Only for the public corpus: never run it on private (T2) documents. It uses only Python's standard library and treats every document as hostile: it limits the size it reads of every part, how deeply it opens embedded packages, and how long it follows the chains inside OLE files. It changes nothing and decides nothing; the curator records decisions in excluded.tsv.
 """
@@ -33,12 +33,13 @@ MARKERS = [
     ("license", r"Creative Commons|\bCC[- ]BY\b|\bNon-?[Cc]ommercial\b|\bGNU\b|\bGPL\b|\bShareAlike\b"),
     # News agencies, picture libraries and encyclopedias.
     ("news or pictures", r"\bReuters\b|\bAFP\b|_AFP_|Agence France|Associated Press|\bAP\)|\bBloomberg\b|\bXinhua\b|新华社|\bGetty\b|Shutterstock|iStock|\bCorbis\b|Alamy|Wikipedia|Wikimedia"),
-    # Standards bodies.
-    ("standard", r"ECMA-376|Ecma International|\bISO/IEC\b|\bITU-T\b|\bIEEE\b"),
+    # Standards bodies, and the wording of ECMA-376's own definitions, which a copied excerpt keeps.
+    ("standard", r"ECMA-376|Ecma International|\bISO/IEC\b|\bITU-T\b|\bIEEE\b|This (?:element|attribute) specifies|\[Example:|\bend example\]"),
     # Publishers and template makers.
     ("publisher or template", r"McGraw|Pearson|Elsevier|Springer|\bWiley\b|\bSCORE\b|Teacher [Rr]esume|[Rr]ésumé|[Rr]esume [Tt]emplate|Curriculum [Vv]itae"),
 ]
 # REUSE-IgnoreEnd
+MARKER_KINDS = {kind for kind, _ in MARKERS}
 PERSONAL_MAIL = {
     "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "hotmail.co.uk", "live.com", "msn.com", "yahoo.com",
     "yahoo.co.uk", "yahoo.fr", "aol.com", "icloud.com", "me.com", "mac.com", "gmx.de", "gmx.net", "web.de", "mail.ru",
@@ -132,6 +133,12 @@ def inspect_package(data, report, where, depth, contexts):
     for name, content in parts.items():
         if name.lower().startswith("_xmlsignatures/") and name.lower().endswith(".xml"):
             inspect_signature(content, report, where + name)
+        elif name.lower() == "word/people.xml":
+            for kind, count in sorted(presence(content).items()):
+                report.add("presence", f"{where}{name}: {count} people with {kind} (not shown)")
+    named = people(parts)
+    if named:
+        report.add("people", f"{where or 'the document'}: {len(named)} people named in the properties, comments or tracked changes (not shown)")
 
 
 # Text.
@@ -143,38 +150,102 @@ def xml_text(content):
     return html.unescape(text)
 
 
-def inspect_xml(name, content, report, label, contexts):
-    text = xml_text(content)
+# The elements of a paragraph's text runs (text, deleted text and field instructions), in WordprocessingML and DrawingML alike.
+RUN_TEXT = {"t", "delText", "instrText", "delInstrText"}
+
+
+def paragraph_texts(raw):
+    """Each paragraph's text with its runs joined; a paragraph inside another (in a text box) is a paragraph of its own.
+
+    Each tag is read from its `<` to the next `>` and never again, so the time it takes grows with the part's size, however the part is crafted (an unterminated tag ends the reading)."""
+    open_paragraphs, texts, run_start, position = [], [], None, 0
+    while True:
+        start = raw.find("<", position)
+        end = raw.find(">", start + 1) if start >= 0 else -1
+        if end < 0:
+            break
+        position = end + 1
+        tag = raw[start + 1:end]
+        closing = tag.startswith("/")
+        name = tag[1:] if closing else tag
+        name = name.split(None, 1)[0].rstrip("/").rpartition(":")[2] if name.strip() else ""
+        self_closing = tag.endswith("/")
+        if name == "p":
+            if closing:
+                if open_paragraphs:
+                    texts.append("".join(open_paragraphs.pop()))
+            elif not self_closing:
+                open_paragraphs.append([])
+        elif name in RUN_TEXT:
+            if closing:
+                if run_start is not None and open_paragraphs:
+                    open_paragraphs[-1].append(raw[run_start:start])
+                run_start = None
+            elif not self_closing:
+                run_start = position
+    texts.extend("".join(pieces) for pieces in open_paragraphs)
+    return [html.unescape(text) for text in texts if text]
+
+
+def text_findings(text):
+    """What a curator must judge in a text, as (flag, the matched text, what to report)."""
     for kind, pattern in MARKERS:
-        found = list(re.finditer(pattern, text))
-        if not found:
-            continue
-        sample = found[0]
-        detail = f"{label}: {kind} marker {printable(sample.group(0), 40)!r} ({len(found)}x)"
-        if contexts:
-            start, end = max(0, sample.start() - CONTEXT), sample.end() + CONTEXT
-            detail += " … " + printable(re.sub(r"<[^>]*>", " ", text[start:end]), 200)
-        report.add(kind, detail)
+        for match in re.finditer(pattern, text):
+            yield kind, match, f"{kind} marker {printable(match.group(0), 40)!r}"
     for match in EMAIL.finditer(text):
         address = match.group(0)
         domain = address.rsplit("@", 1)[1].lower().rstrip(".")
         if EXAMPLE_DOMAIN.search(domain) or address.split("@")[0].lower() in PLACEHOLDER_LOCAL:
             continue
         kind = "personal mail" if domain in PERSONAL_MAIL else "mail address"
-        shown = mask(address.split("@")[0]) + "@" + (domain if kind == "mail address" and "." in domain else mask(domain))
-        report.add(kind, f"{label}: {shown}")
+        yield kind, match, mask(address.split("@")[0]) + "@" + (domain if kind == "mail address" and "." in domain else mask(domain))
     for match in IBAN.finditer(text):
         if iban_valid(match.group(0)):
-            report.add("bank account", f"{label}: an IBAN {mask(match.group(0))}")
+            yield "bank account", match, f"an IBAN {mask(match.group(0))}"
     for match in CARD.finditer(text):
         digits = re.sub(r"\D", "", match.group(0))
         if 13 <= len(digits) <= 19 and luhn(digits) and len(set(digits)) > 3 and card_prefix(digits):
-            report.add("card number", f"{label}: a number that passes the card checksum, {mask(match.group(0))}")
+            yield "card number", match, f"a number that passes the card checksum, {mask(match.group(0))}"
     for match in USER_FOLDER.finditer(text):
         user = match.group(1)
         if user.lower() in {"public", "default", "all users", "shared", "administrator", "user", "username", "%username%"}:
             continue
-        report.add("user folder", f"{label}: a path with a user folder {mask(user)!r}")
+        yield "user folder", match, f"a path with a user folder {mask(user)!r}"
+
+
+def report_findings(findings, text, report, label, contexts):
+    """Reports each kind of marker once, with its first sample and its count, then every other finding on its own."""
+    markers = {}
+    for kind, match, detail in findings:
+        if kind in MARKER_KINDS:
+            markers.setdefault(kind, []).append((match, detail))
+    for kind, found in markers.items():
+        sample, detail = found[0]
+        line = f"{label}: {detail} ({len(found)}x)"
+        if contexts:
+            start, end = max(0, sample.start() - CONTEXT), sample.end() + CONTEXT
+            line += " … " + printable(re.sub(r"<[^>]*>", " ", text[start:end]), 200)
+        report.add(kind, line)
+    for kind, _, detail in findings:
+        if kind not in MARKER_KINDS:
+            report.add(kind, f"{label}: {detail}")
+
+
+def inspect_xml(name, content, report, label, contexts):
+    text = xml_text(content)
+    report_findings(list(text_findings(text)), text, report, label, contexts)
+    # Word splits a word across runs wherever its formatting, revision or proofing marks change ("Confidentia" and "l"), so no run need hold a marker whole. Each paragraph's text is searched with its runs joined too, and what the part's own text holds fewer times is reported.
+    joined = "\n".join(paragraph_texts(content.decode("utf-8", "replace")))
+    if joined:
+        found = list(text_findings(joined))
+        seen = {}
+        hidden = []
+        for kind, match, detail in found:
+            value = match.group(0)
+            seen[value] = seen.get(value, 0) + 1
+            if seen[value] > text.count(value):
+                hidden.append((kind, match, detail))
+        report_findings(hidden, joined, report, f"{label} (runs joined)", contexts)
     if name.lower() == "docprops/app.xml":
         for match in TEMPLATE_ID.finditer(text):
             report.add("publisher or template", f"{label}: an Office.com template identifier {match.group(1)}")
@@ -237,6 +308,8 @@ def inspect_binary(content, report, label, depth, contexts):
         report.add("mail message", f"{label}: an e-mail message")
     elif not executables:
         report.add("embedded", f"{label}: {len(content)} bytes of an unrecognized kind, starting {content[:8].hex()}")
+        # Its text is searched all the same: HTML, MHTML and plain text as they are, anything else by its strings.
+        inspect_xml("", binary_strings(content) if b"\x00" in content[:512] else content, report, label, contexts)
 
 
 def find_executables(content):
@@ -391,7 +464,10 @@ def inspect_ole(content, report, label, depth, contexts):
         executables = find_executables(data)
         if executables:
             report.add("program", f"{label}/{printable(name)}: contains {', '.join(executables)}")
-        if data[:4] == b"PK\x03\x04":
+        if data[:5] == b"%PDF-":
+            # Acrobat's OLE objects keep the PDF itself in a stream; its text is read with a PDF tool, by the curator.
+            report.add("embedded", f"{label}/{printable(name)}: a PDF document ({len(data)} bytes), not inspected inside")
+        elif data[:4] == b"PK\x03\x04":
             if depth >= MAX_DEPTH:
                 report.add("embedded", f"{label}/{printable(name)}: a ZIP package nested too deeply, not inspected")
             else:
@@ -451,6 +527,13 @@ def image_kind(content):
 
 def inspect_image(content, report, label, contexts):
     kind = image_kind(content)
+    if kind is None and (label.lower().endswith(".svg") or content.lstrip()[:4] == b"<svg"):
+        # An SVG picture is XML: its text and metadata are searched like a part's. Office's icon library names its icons in the root element.
+        inspect_xml("", content, report, label, contexts)
+        icon = re.search(rb'<svg\b[^>]{0,2000}?\bid="Icons_([A-Za-z0-9_]{1,60})"', content[:4096])
+        if icon:
+            report.add("office icon", f"{label}: the icon {icon.group(1).decode()!r} of Office's icon library")
+        return
     if "thumbnail" in label.lower():
         report.add("thumbnail", f"{label}: the document's thumbnail")
     if kind in ("WMF", "EMF"):
@@ -465,7 +548,7 @@ def inspect_image(content, report, label, contexts):
         inspect_png(content, report, label)
     elif kind == "TIFF":
         inspect_tiff(content, 0, report, label, "TIFF")
-    xmp = re.search(rb"<x:xmpmeta.*?</x:xmpmeta>", content, re.S)
+    xmp = re.search(rb"<x:xmpmeta.{0,1048576}?</x:xmpmeta>", content, re.S)
     if xmp:
         packet = xmp.group(0).decode("utf-8", "replace")
         fields = sorted(set(re.findall(r"(dc:rights|dc:creator|photoshop:Credit|photoshop:Source|xmpRights:\w+|Iptc4xmpCore:\w+|plus:\w+)", packet)))
@@ -571,15 +654,15 @@ def font_table(parts):
     if not table or not rels:
         return {}
     targets = {}
-    for match in re.finditer(r"<Relationship\b([^>]*)>", rels.decode("utf-8", "replace")):
+    for match in re.finditer(r"<Relationship\b([^>]{0,8192})>", rels.decode("utf-8", "replace")):
         attributes = dict(re.findall(r'(\w+)="([^"]*)"', match.group(1)))
         if "Id" in attributes and "Target" in attributes:
             target = attributes["Target"].lstrip("/")
             targets[attributes["Id"]] = target if target.startswith("word/") else "word/" + target
     found = {}
     text = table.decode("utf-8", "replace")
-    for font in re.finditer(r"<w:font\b[^>]*w:name=\"([^\"]*)\"(.*?)</w:font>", text, re.S):
-        for embed in re.finditer(r"<w:embed(Regular|Bold|Italic|BoldItalic)\b([^>]*)/?>", font.group(2)):
+    for font in re.finditer(r"<w:font\b[^>]{0,8192}?w:name=\"([^\"]{0,1024})\"(.{0,65536}?)</w:font>", text, re.S):
+        for embed in re.finditer(r"<w:embed(Regular|Bold|Italic|BoldItalic)\b([^>]{0,8192})>", font.group(2)):
             attributes = dict(re.findall(r'([\w:]+)="([^"]*)"', embed.group(2)))
             target = targets.get(attributes.get("r:id", ""))
             if target:
@@ -755,14 +838,32 @@ def inspect_signature(content, report, label):
         )
 
 
-# Metadata people, counted but not shown.
+# People in the metadata: counted, never shown.
 
-def people(parts_text):
+PRESENCE_PROVIDERS = {"Windows Live": "a Microsoft account ID", "AD": "a Windows domain account ID", "None": "no account ID (provider None, the user ID is the author's name)"}
+
+
+def people(parts):
+    """The distinct names of the people that the properties, comments, tracked changes and people part name."""
     names = set()
-    for text in parts_text:
-        names.update(re.findall(r"<dc:creator>([^<]+)<|<cp:lastModifiedBy>([^<]+)<", text))
-        names.update(re.findall(r'\bw:author="([^"]+)"', text))
-    return names
+    for name, content in parts.items():
+        lower = name.lower()
+        if lower == "docprops/core.xml" or (lower.startswith("word/") and lower.endswith(".xml")):
+            text = content.decode("utf-8", "replace")
+            names.update(re.findall(r"<(?:dc:creator|cp:lastModifiedBy)>([^<]+)<", text))
+            names.update(re.findall(r'\b(?:\w+:)?author="([^"]+)"', text))
+    return {html.unescape(name).strip() for name in names} - {""}
+
+
+def presence(content):
+    """How many people of word/people.xml carry presence information, by the kind of account it identifies ([MS-DOCX] w15:presenceInfo)."""
+    kinds = {}
+    for match in re.finditer(r"<(?:\w+:)?presenceInfo\b([^>]{0,8192})>", content.decode("utf-8", "replace")):
+        found = re.search(r'\b(?:\w+:)?providerId="([^"]*)"', match.group(1))
+        provider = html.unescape(found.group(1)) if found else ""
+        kind = PRESENCE_PROVIDERS.get(provider, f"an ID from the provider {printable(provider, 40)!r}")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return kinds
 
 
 def main():
@@ -790,8 +891,9 @@ def main():
         documents += 1
         for flag in report.flags:
             totals[flag] = totals.get(flag, 0) + 1
-        quiet = {"small picture", "embedded", "font subset", "thumbnail", "printer settings"}
-        if report.flags - quiet or (report.flags & {"font subset"}):
+        # Findings the review accepted as a kind (see the README) do not print a document by themselves; they are counted below. Every embedded object is listed.
+        quiet = {"small picture", "thumbnail", "printer settings", "people", "presence", "office icon"}
+        if report.flags - quiet:
             places = ", ".join(f"{p['source']}:{p.get('path') or '(no path)'}" for p in document["provenance"][:2])
             print(f"== {sha256[:12]} {printable(places, 300)}")
             for line in report.lines:
