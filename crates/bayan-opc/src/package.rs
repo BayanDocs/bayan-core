@@ -38,7 +38,7 @@ impl<'a> Package<'a> {
     ///
     /// # Errors
     ///
-    /// [`Error::Zip`] and [`Error::Limit`] for the reasons [`ZipArchive::new`] gives; [`PackageError::MissingContentTypes`], [`PackageError::InterleavedPart`] and [`PackageError::DerivablePartName`] for packages that break those rules; and the errors of [`ContentTypes::parse`] and [`Relationships::parse`] for the metadata parts, which also fail with [`RelationshipsError::InvalidSource`] or [`RelationshipsError::RelationshipsOfRelationshipsPart`] when a relationships part's name does not name a part that can have relationships.
+    /// [`Error::Zip`] and [`Error::Limit`] for the reasons [`ZipArchive::new`] gives; [`PackageError::MissingContentTypes`], [`PackageError::InterleavedPart`] and [`PackageError::DerivablePartName`] for packages that break those rules; and the errors of [`ContentTypes::parse`] and [`Relationships::parse`] for the metadata parts, which also fail with [`RelationshipsError::InvalidSource`] or [`RelationshipsError::RelationshipsOfRelationshipsPart`] when a relationships part's name does not name a part that can have relationships. The metadata parts share two budgets: [`LimitError::MetadataTotalTooLarge`] if together they uncompress to more than [`Limits::max_metadata_total_size`] bytes, and [`Error::Xml`] with [`XmlErrorKind::TooManyNodes`](crate::XmlErrorKind::TooManyNodes) if together they have more than [`Limits::max_xml_nodes`] nodes.
     pub fn open(data: &'a [u8], limits: &Limits) -> Result<Self, Error> {
         let zip = ZipArchive::new(data, limits)?;
         let mut content_types_entry = None;
@@ -69,10 +69,14 @@ impl<'a> Package<'a> {
         check_derivable(&parts, &index)?;
 
         let content_types_entry = content_types_entry.ok_or(PackageError::MissingContentTypes)?;
+        // The budgets that the content types stream and every relationships part share.
+        let mut metadata_size = 0;
+        let mut nodes = limits.max_xml_nodes;
         let content_types = ContentTypes::parse_entry(
-            &read_metadata(&zip, content_types_entry, limits)?,
+            &read_metadata(&zip, content_types_entry, limits, &mut metadata_size)?,
             limits,
             Some(content_types_entry),
+            &mut nodes,
         )?;
 
         let mut relationships = BTreeMap::new();
@@ -91,9 +95,10 @@ impl<'a> Package<'a> {
                 return Err(invalid(RelationshipsError::RelationshipsOfRelationshipsPart).into());
             }
             let parsed = Relationships::parse_entry(
-                &read_metadata(&zip, part.entry, limits)?,
+                &read_metadata(&zip, part.entry, limits, &mut metadata_size)?,
                 limits,
                 Some(part.entry),
+                &mut nodes,
             )?;
             relationships.insert(source, parsed);
         }
@@ -181,8 +186,10 @@ impl<'a> Package<'a> {
         let part = self
             .find(&name)
             .ok_or(invalid(CorePropertiesError::MissingPart))?;
-        let bytes = read_metadata(&self.zip, part.entry, &self.limits)?;
-        CoreProperties::parse_entry(&bytes, &self.limits, Some(part.entry)).map(Some)
+        // Read on demand, after opening, with budgets of its own.
+        let bytes = read_metadata(&self.zip, part.entry, &self.limits, &mut 0)?;
+        let mut nodes = self.limits.max_xml_nodes;
+        CoreProperties::parse_entry(&bytes, &self.limits, Some(part.entry), &mut nodes).map(Some)
     }
 
     /// The ZIP container, for access to individual entries.
@@ -196,8 +203,13 @@ impl<'a> Package<'a> {
     }
 }
 
-/// Reads the metadata part at `entry`, refusing it before decompression if it is larger than the limit for metadata.
-fn read_metadata(zip: &ZipArchive<'_>, entry: usize, limits: &Limits) -> Result<Vec<u8>, Error> {
+/// Reads the metadata part at `entry`, refusing it before decompression if it is larger than the limit for one metadata part, or if it would take `total`, the size of the metadata read so far, past the limit for all of them together.
+fn read_metadata(
+    zip: &ZipArchive<'_>,
+    entry: usize,
+    limits: &Limits,
+    total: &mut u64,
+) -> Result<Vec<u8>, Error> {
     let size = zip.entry(entry)?.uncompressed_size();
     if u64::try_from(limits.max_metadata_size).is_ok_and(|limit| size > limit) {
         return Err(LimitError::MetadataTooLarge {
@@ -206,6 +218,15 @@ fn read_metadata(zip: &ZipArchive<'_>, entry: usize, limits: &Limits) -> Result<
         }
         .into());
     }
+    let sum = total.saturating_add(size);
+    if u64::try_from(limits.max_metadata_total_size).is_ok_and(|limit| sum > limit) {
+        return Err(LimitError::MetadataTotalTooLarge {
+            entry,
+            limit: limits.max_metadata_total_size,
+        }
+        .into());
+    }
+    *total = sum;
     zip.read(entry)
 }
 

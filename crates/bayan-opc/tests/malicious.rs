@@ -765,7 +765,7 @@ fn opens_a_long_namespace_on_many_elements_cheaply() {
     assert!(relationships.is_empty());
 }
 
-// Many entries: every lookup and duplicate check in the metadata takes logarithmic time, so a stream with a hundred thousand entries opens in a moment instead of minutes (the review of pull request 17 measured 34 to 78 s, in release builds, for streams of 160 to 250 KB). The streams are stored uncompressed, to keep the tests quick.
+// Many entries: every lookup and duplicate check in the metadata takes logarithmic time, so a stream with tens of thousands of entries, as many as the node limit allows, opens in a moment instead of minutes (the review of pull request 17 measured 34 to 78 s, in release builds, for streams of 160 to 250 KB). The streams are stored uncompressed, to keep the tests quick.
 
 const CONTENT_TYPES_NAMESPACE: &str =
     "http://schemas.openxmlformats.org/package/2006/content-types";
@@ -775,7 +775,7 @@ fn opens_content_types_with_many_overrides_quickly() {
     let mut types = format!(
         "<Types xmlns=\"{CONTENT_TYPES_NAMESPACE}\"><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
     );
-    for index in 0..100_000 {
+    for index in 0..80_000 {
         types.push_str(&format!(
             "<Override PartName=\"/p{index}\" ContentType=\"a/b\"/>"
         ));
@@ -783,19 +783,19 @@ fn opens_content_types_with_many_overrides_quickly() {
     types.push_str("</Types>");
     let mut items = vec![Item::stored("[Content_Types].xml", types.as_bytes())];
     // Many parts too, each looked up in the overrides.
-    for index in (0..100_000).step_by(20) {
+    for index in (0..80_000).step_by(20) {
         items.push(Item::stored(&format!("p{index}"), b"x"));
     }
     let bytes = Archive::new(items).build();
     let package = Package::open(&bytes, &Limits::default()).unwrap();
-    assert_eq!(package.parts().count(), 5_000);
+    assert_eq!(package.parts().count(), 4_000);
     for part in package.parts() {
         assert_eq!(package.content_type(part), Some("a/b"));
     }
     // A duplicate at the very end is still found.
     let duplicate = types.replace(
         "</Types>",
-        "<Override PartName=\"/P99999\" ContentType=\"a/c\"/></Types>",
+        "<Override PartName=\"/P79999\" ContentType=\"a/c\"/></Types>",
     );
     let bytes = Archive::new(vec![Item::stored(
         "[Content_Types].xml",
@@ -866,6 +866,83 @@ fn finds_relationships_quickly_among_many() {
     assert!(relationships.get("rId60001").is_none());
 }
 
+// Metadata memory: the XML of the metadata parts is held as a tree while it is parsed, which costs a few hundred bytes per node however small the node is in the input, so the number of nodes, and the total size of the metadata that opening a package parses, are limited (the review of pull request 17 opened a 13.8 MB package that needed 2 GB).
+
+/// A relationships part holding `count` tiny elements from another namespace.
+fn rels_with_elements(count: usize) -> Vec<u8> {
+    let mut rels = String::from(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" xmlns:x=\"urn:x\">",
+    );
+    rels.push_str(&"<x:a/>".repeat(count));
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+#[test]
+fn refuses_metadata_with_too_many_xml_nodes() {
+    // 600,000 elements in 3.6 MB of XML, well under the size limit for one part: the node limit stops it. (Stored uncompressed, because the compression ratio limit would stop such regular XML first.)
+    let mut items = package_items();
+    items.push(Item::stored("_rels/.rels", &rels_with_elements(600_000)));
+    match package_error(&Archive::new(items).build()) {
+        Error::Xml {
+            entry: Some(2),
+            error,
+        } => assert_eq!(error.kind, XmlErrorKind::TooManyNodes),
+        other => panic!("{other:?}"),
+    }
+    // The limit is for all the metadata a package's opening parses together, the content types stream included.
+    // Here the content types stream has 5 nodes and each relationships part 43: 48 fit under a limit of 60, and the second relationships part does not.
+    let limits = Limits {
+        max_xml_nodes: 60,
+        ..Limits::default()
+    };
+    let mut items = package_items();
+    items.push(Item::deflated("_rels/.rels", &rels_with_elements(40)));
+    items.push(Item::deflated(
+        "word/_rels/document.xml.rels",
+        &rels_with_elements(40),
+    ));
+    let bytes = Archive::new(items).build();
+    match Package::open(&bytes, &limits) {
+        Err(Error::Xml {
+            entry: Some(3),
+            error,
+        }) => assert_eq!(error.kind, XmlErrorKind::TooManyNodes),
+        other => panic!("{other:?}"),
+    }
+    let generous = Limits {
+        max_xml_nodes: 91,
+        ..Limits::default()
+    };
+    assert!(Package::open(&bytes, &generous).is_ok());
+}
+
+#[test]
+fn refuses_more_metadata_in_total_than_the_limit() {
+    // Each relationships part is small enough on its own; together they are too much, and the one that passes the total is refused before it is decompressed.
+    let limits = Limits {
+        max_metadata_total_size: 4_000,
+        ..Limits::default()
+    };
+    let mut items = package_items();
+    for index in 0..3 {
+        items.push(Item::stored(&format!("p{index}.xml"), b"<p/>"));
+        items.push(Item::deflated(
+            &format!("_rels/p{index}.xml.rels"),
+            &rels_with_elements(200),
+        ));
+    }
+    let bytes = Archive::new(items).build();
+    assert_eq!(
+        Package::open(&bytes, &limits).unwrap_err(),
+        Error::Limit(LimitError::MetadataTotalTooLarge {
+            entry: 7,
+            limit: 4_000
+        })
+    );
+    assert!(Package::open(&bytes, &Limits::default()).is_ok());
+}
+
 #[test]
 fn refuses_oversized_metadata_before_decompressing_it() {
     let mut items = package_items();
@@ -881,7 +958,7 @@ fn refuses_oversized_metadata_before_decompressing_it() {
         Package::open(&Archive::new(items).build(), &limits).unwrap_err(),
         Error::Limit(LimitError::MetadataTooLarge {
             entry: Some(0),
-            limit: 32 << 20
+            limit: Limits::DEFAULT.max_metadata_size
         })
     );
 }

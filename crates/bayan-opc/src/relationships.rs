@@ -155,31 +155,38 @@ impl Relationships {
     ///
     /// # Errors
     ///
-    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML, and [`PackageError::Relationships`] if it breaks a rule of §6.5: an unexpected root, element or text, a missing `Id`, `Type` or `Target`, an invalid `TargetMode`, two relationships with one `Id`, or an `xml:base` attribute.
+    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML or has more than [`Limits::max_xml_nodes`] nodes, and [`PackageError::Relationships`] if it breaks a rule of §6.5: an unexpected root, element or text, a missing `Id`, `Type` or `Target`, an invalid `TargetMode`, two relationships with one `Id`, or an `xml:base` attribute.
     pub fn parse(bytes: &[u8], limits: &Limits) -> Result<Self, Error> {
-        Relationships::parse_entry(bytes, limits, None)
+        let mut nodes = limits.max_xml_nodes;
+        Relationships::parse_entry(bytes, limits, None, &mut nodes)
     }
 
+    /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
+        nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let document = xml::parse_part(bytes, limits, entry)?;
+        let xml::Document {
+            text,
+            encoding,
+            mut root,
+        } = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::Relationships { entry, error });
-        let root = &document.root;
         if !root.is(NAMESPACE, "Relationships") {
             return Err(invalid(RelationshipsError::UnexpectedRoot));
         }
-        if uses_xml_base(root) {
+        if uses_xml_base(&root) {
             return Err(invalid(RelationshipsError::XmlBase));
         }
         let mut items = Vec::with_capacity(root.children.len());
         let mut relationships = BTreeMap::new();
-        for node in &root.children {
+        // Each child is dropped as soon as it has been read, so the tree's memory goes down while the model's goes up.
+        for node in std::mem::take(&mut root.children) {
             match node {
                 Node::Element(element) if element.is(NAMESPACE, "Relationship") => {
-                    let relationship = read_relationship(element).map_err(invalid)?;
+                    let relationship = read_relationship(&element).map_err(invalid)?;
                     if relationships.contains_key(&relationship.id) {
                         return Err(invalid(RelationshipsError::DuplicateId));
                     }
@@ -211,9 +218,9 @@ impl Relationships {
                 root_start: root.start_tag.clone(),
                 root_end: root.end_tag.clone(),
                 root_span_end: root.span.end,
-                root_name: root.qualified_name.clone(),
-                encoding: document.encoding,
-                text: document.text,
+                root_name: root.qualified_name,
+                encoding,
+                text,
             }),
             items,
             relationships,

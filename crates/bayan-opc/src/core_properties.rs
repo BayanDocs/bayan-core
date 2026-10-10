@@ -126,17 +126,20 @@ impl CoreProperties {
     ///
     /// # Errors
     ///
-    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML, and [`PackageError::CoreProperties`] if the root is not `coreProperties` or a property appears twice (§8.3.4.1: core properties are not repeatable).
+    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML or has more than [`Limits::max_xml_nodes`] nodes, and [`PackageError::CoreProperties`] if the root is not `coreProperties` or a property appears twice (§8.3.4.1: core properties are not repeatable).
     pub fn parse(bytes: &[u8], limits: &Limits) -> Result<Self, Error> {
-        CoreProperties::parse_entry(bytes, limits, None)
+        let mut nodes = limits.max_xml_nodes;
+        CoreProperties::parse_entry(bytes, limits, None, &mut nodes)
     }
 
+    /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
+        nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let document = xml::parse_part(bytes, limits, entry)?;
+        let document = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::CoreProperties(error));
         if !document.root.is(NAMESPACE, "coreProperties") {
             return Err(invalid(CorePropertiesError::UnexpectedRoot));

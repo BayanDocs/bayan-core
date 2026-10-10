@@ -281,6 +281,13 @@ pub enum LimitError {
         /// The limit.
         limit: usize,
     },
+    /// The metadata parts that opening a package parses uncompress to more than [`Limits::max_metadata_total_size`](crate::Limits::max_metadata_total_size) bytes together.
+    MetadataTotalTooLarge {
+        /// The entry of the part that would have passed the limit; it is not decompressed.
+        entry: usize,
+        /// The limit.
+        limit: usize,
+    },
     /// A compound file has more entries than [`Limits::max_compound_file_entries`](crate::Limits::max_compound_file_entries).
     TooManyCompoundFileEntries {
         /// The limit.
@@ -319,6 +326,10 @@ impl fmt::Display for LimitError {
             LimitError::MetadataTooLarge { limit, .. } => {
                 write!(f, "a metadata part is larger than {limit} bytes")
             }
+            LimitError::MetadataTotalTooLarge { entry, limit } => write!(
+                f,
+                "with entry {entry}, the metadata parts uncompress to more than {limit} bytes in total"
+            ),
             LimitError::TooManyCompoundFileEntries { limit } => {
                 write!(f, "a compound file has more than {limit} entries")
             }
@@ -380,6 +391,8 @@ pub enum XmlErrorKind {
     TooManyAttributes,
     /// A name is longer than [`Limits::max_xml_name_length`](crate::Limits::max_xml_name_length) bytes.
     NameTooLong,
+    /// The document has more nodes than [`Limits::max_xml_nodes`](crate::Limits::max_xml_nodes) allows (or, while a package is opened, all its metadata parts together do).
+    TooManyNodes,
 }
 
 impl fmt::Display for XmlErrorKind {
@@ -401,6 +414,7 @@ impl fmt::Display for XmlErrorKind {
             XmlErrorKind::TooDeep => "elements nested too deeply",
             XmlErrorKind::TooManyAttributes => "too many attributes",
             XmlErrorKind::NameTooLong => "name too long",
+            XmlErrorKind::TooManyNodes => "too many nodes",
         })
     }
 }

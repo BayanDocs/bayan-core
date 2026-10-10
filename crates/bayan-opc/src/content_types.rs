@@ -120,19 +120,25 @@ impl ContentTypes {
     ///
     /// # Errors
     ///
-    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML, and [`PackageError::ContentTypes`] if it breaks a rule of §7.2.3: an unexpected element, attribute or text (the stream may not use extensions), a missing attribute, an invalid extension, media type or part name, or two entries for the same extension or part.
+    /// [`Error::Limit`] if it is larger than [`Limits::max_metadata_size`], [`Error::Xml`] if it is not acceptable XML or has more than [`Limits::max_xml_nodes`] nodes, and [`PackageError::ContentTypes`] if it breaks a rule of §7.2.3: an unexpected element, attribute or text (the stream may not use extensions), a missing attribute, an invalid extension, media type or part name, or two entries for the same extension or part.
     pub fn parse(bytes: &[u8], limits: &Limits) -> Result<Self, Error> {
-        ContentTypes::parse_entry(bytes, limits, None)
+        let mut nodes = limits.max_xml_nodes;
+        ContentTypes::parse_entry(bytes, limits, None, &mut nodes)
     }
 
+    /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
+        nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let document = xml::parse_part(bytes, limits, entry)?;
+        let xml::Document {
+            text,
+            encoding,
+            mut root,
+        } = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::ContentTypes(error));
-        let root = &document.root;
         if !root.is(NAMESPACE, "Types") {
             return Err(invalid(ContentTypesError::UnexpectedRoot));
         }
@@ -146,10 +152,11 @@ impl ContentTypes {
             overrides: BTreeMap::new(),
             modified: false,
         };
-        for node in &root.children {
+        // Each child is dropped as soon as it has been read, so the tree's memory goes down while the model's goes up.
+        for node in std::mem::take(&mut root.children) {
             match node {
                 Node::Element(element) => {
-                    let entry = read_entry(element).map_err(invalid)?;
+                    let entry = read_entry(&element).map_err(invalid)?;
                     content_types.push_read(entry).map_err(invalid)?;
                 }
                 Node::Text { span, value } if value.chars().all(xml::is_space) => {
@@ -165,9 +172,9 @@ impl ContentTypes {
             root_start: root.start_tag.clone(),
             root_end: root.end_tag.clone(),
             root_span_end: root.span.end,
-            root_name: root.qualified_name.clone(),
-            encoding: document.encoding,
-            text: document.text,
+            root_name: root.qualified_name,
+            encoding,
+            text,
         });
         Ok(content_types)
     }

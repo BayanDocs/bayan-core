@@ -2,7 +2,7 @@
 
 /// The limits bayan-opc enforces while reading a package or a compound file (ADR-0006 §5: every parser limits sizes, depths and counts).
 ///
-/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or nest XML deeply enough to exhaust memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed, and a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size. Memory therefore stays bounded by these numbers whatever the input claims.
+/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata that opening a package parses is limited in total size and in XML nodes. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, and opening a package at most about 90 MiB for its metadata, whatever the input claims (the crate's documentation says how that was measured).
 ///
 /// The defaults ([`Limits::DEFAULT`]) open ordinary documents comfortably and stop malicious ones; a host can raise a limit (for example after asking the user, for a document with very large embedded media) by changing one field:
 ///
@@ -27,9 +27,13 @@ pub struct Limits {
     pub max_compression_ratio: u64,
     /// Entries, and archives, that uncompress to at most this many bytes are exempt from [`Limits::max_compression_ratio`]: small data can compress very well and cannot exhaust anything. Default: 1 MiB.
     pub compression_ratio_grace: u64,
-    /// The largest metadata part (the content types stream, a relationships part or the core properties part) that is parsed, in bytes. Default: 32 MiB (a content types stream for 10,000 parts takes about 1.5 MB).
+    /// The largest metadata part (the content types stream, a relationships part or the core properties part) that is parsed, in bytes. Default: 8 MiB (a content types stream for 10,000 parts takes about 1.5 MB; a relationships part takes about 200 bytes per hyperlink, so 8 MiB holds about 40,000).
     pub max_metadata_size: usize,
-    /// The deepest nesting of elements in a metadata part. Default: 64 (these parts nest two or three levels deep).
+    /// The most bytes that the metadata parts which opening a package parses (the content types stream and every relationships part) may uncompress to together; a part that would pass it is refused before it is decompressed. Default: 16 MiB.
+    pub max_metadata_total_size: usize,
+    /// The most nodes (elements, attributes, namespace declarations included, runs of text, CDATA sections, comments and processing instructions) in the XML of the metadata parts that opening a package parses, all of them together; a metadata part parsed on its own gets the whole budget. While a part is parsed, each of its nodes takes up to about 400 bytes, however short it is in the input, so this is what bounds the memory parsing takes. Default: 250,000 (a relationship takes 4 or 5 nodes, so this allows about 50,000 hyperlinks).
+    pub max_xml_nodes: usize,
+    /// The deepest nesting of elements in a metadata part. Default: 64 (these parts nest two or three levels deep). Values above 256 count as 256, because dropping a deeper tree could take too much stack space.
     pub max_xml_depth: usize,
     /// The most attributes, namespace declarations included, of one element in a metadata part. Default: 64.
     pub max_xml_attributes: usize,
@@ -48,7 +52,9 @@ impl Limits {
         max_total_size: 2 << 30,
         max_compression_ratio: 100,
         compression_ratio_grace: 1 << 20,
-        max_metadata_size: 32 << 20,
+        max_metadata_size: 8 << 20,
+        max_metadata_total_size: 16 << 20,
+        max_xml_nodes: 250_000,
         max_xml_depth: 64,
         max_xml_attributes: 64,
         max_xml_name_length: 256,

@@ -7,7 +7,8 @@
 //! - Decodes UTF-8 (with or without a byte order mark) and UTF-16 with a byte order mark, the only encodings packages may use (ECMA-376 Part 2 §6.2.5), and checks that the XML declaration agrees.
 //! - Refuses document type declarations outright, so entity-expansion attacks cannot happen by construction; only the five predefined entities and character references are understood (§6.2.5 b).
 //! - Checks well-formedness and Namespaces in XML: matching tags, unique attributes, declared prefixes, characters XML allows.
-//! - Enforces the limits on depth, attributes per element and name length, and never recurses, so deep nesting cannot overflow the stack.
+//! - Enforces the limits on depth, attributes per element, name length and the number of nodes (every element, attribute, run of text, CDATA section, comment and processing instruction costs a few hundred bytes in the tree, however short it is in the input, so the node count is what bounds the tree's memory).
+//! - Never recurses while parsing, so deep nesting cannot overflow the stack then. Dropping a tree does recurse, once per level, so the depth is also capped at [`MAX_DEPTH`] whatever the limits say.
 //! - Records the byte range of every element, tag, attribute and text in the decoded text, so callers can write unchanged markup back exactly as it was.
 
 use std::collections::BTreeSet;
@@ -21,6 +22,9 @@ pub(crate) const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// The namespace of namespace declarations, which may not be bound to a prefix.
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+
+/// The deepest nesting the parser accepts, whatever [`Limits::max_xml_depth`] says: dropping (and cloning or printing) a tree takes stack space for every level, and 256 levels take a few dozen KiB, which every stack has.
+pub(crate) const MAX_DEPTH: usize = 256;
 
 /// The character encoding of a parsed document, kept so that a changed document can be written back in the same encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,11 +122,12 @@ pub(crate) enum Node {
     },
 }
 
-/// Parses a metadata part, the content of the ZIP entry at `entry` (if known), within `limits`: first its size against [`Limits::max_metadata_size`], then its XML.
+/// Parses a metadata part, the content of the ZIP entry at `entry` (if known), within `limits`: first its size against [`Limits::max_metadata_size`], then its XML, whose nodes are counted against `nodes` as [`parse_counted`] does.
 pub(crate) fn parse_part(
     bytes: &[u8],
     limits: &Limits,
     entry: Option<usize>,
+    nodes: &mut usize,
 ) -> Result<Document, Error> {
     if bytes.len() > limits.max_metadata_size {
         return Err(LimitError::MetadataTooLarge {
@@ -131,19 +136,31 @@ pub(crate) fn parse_part(
         }
         .into());
     }
-    parse(bytes, limits).map_err(|error| Error::Xml { entry, error })
+    parse_counted(bytes, limits, nodes).map_err(|error| Error::Xml { entry, error })
 }
 
-/// Parses `bytes` as an XML document, within `limits`.
+/// Parses `bytes` as an XML document, within `limits`, with at most [`Limits::max_xml_nodes`] nodes.
+#[cfg(test)]
 pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Document, XmlError> {
+    let mut nodes = limits.max_xml_nodes;
+    parse_counted(bytes, limits, &mut nodes)
+}
+
+/// Parses `bytes` as an XML document, within `limits`. `nodes` is how many more nodes may be made, a budget that several documents can share: it is reduced by the nodes of this one, and parsing fails with [`XmlErrorKind::TooManyNodes`] as soon as it would go below zero.
+pub(crate) fn parse_counted(
+    bytes: &[u8],
+    limits: &Limits,
+    nodes: &mut usize,
+) -> Result<Document, XmlError> {
     let (text, encoding) = decode(bytes)?;
     check_characters(&text)?;
-    let root = {
+    let (root, remaining) = {
         let mut parser = Parser {
             text: &text,
             position: 0,
             limits,
             xml_namespace: Arc::from(XML_NAMESPACE),
+            nodes: *nodes,
         };
         parser.declaration(encoding)?;
         parser.miscellaneous()?;
@@ -155,8 +172,9 @@ pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Document, XmlError>
         if parser.position != text.len() {
             return Err(parser.error(XmlErrorKind::ContentOutsideRoot));
         }
-        root
+        (root, parser.nodes)
     };
+    *nodes = remaining;
     Ok(Document {
         text,
         encoding,
@@ -251,6 +269,8 @@ struct Parser<'t> {
     limits: &'t Limits,
     /// The namespace of the `xml:` prefix, made once for the names that use it.
     xml_namespace: Arc<str>,
+    /// How many more nodes may be made.
+    nodes: usize,
 }
 
 impl<'t> Parser<'t> {
@@ -259,6 +279,15 @@ impl<'t> Parser<'t> {
             offset: self.position,
             kind,
         }
+    }
+
+    /// Counts one more node, the one that starts at `offset`, against the budget.
+    fn count_node(&mut self, offset: usize) -> Result<(), XmlError> {
+        self.nodes = self.nodes.checked_sub(1).ok_or(XmlError {
+            offset,
+            kind: XmlErrorKind::TooManyNodes,
+        })?;
+        Ok(())
     }
 
     fn rest(&self) -> &'t str {
@@ -453,7 +482,7 @@ impl<'t> Parser<'t> {
         let mut bindings: Vec<Binding> = Vec::new();
         loop {
             // Here a start tag begins.
-            if stack.len() >= self.limits.max_xml_depth {
+            if stack.len() >= self.limits.max_xml_depth.min(MAX_DEPTH) {
                 return Err(self.error(XmlErrorKind::TooDeep));
             }
             let bindings_before = bindings.len();
@@ -498,6 +527,8 @@ impl<'t> Parser<'t> {
                         }
                         element.span = element.span.start..span.end;
                         element.end_tag = Some(span);
+                        // The tree is kept until the whole document is read: without the spare room a growing list keeps, it takes up to half as much memory.
+                        element.children.shrink_to_fit();
                         bindings.truncate(open.bindings_before);
                         completed = Some(element);
                     }
@@ -523,10 +554,12 @@ impl<'t> Parser<'t> {
             });
         }
         if self.starts_with("<!--") {
+            self.count_node(start)?;
             let span = self.comment()?;
             return Ok(Content::Node(Node::Markup { span }));
         }
         if self.starts_with("<![CDATA[") {
+            self.count_node(start)?;
             self.position += "<![CDATA[".len();
             let content_start = self.position;
             let end = self
@@ -543,6 +576,7 @@ impl<'t> Parser<'t> {
             }));
         }
         if self.starts_with("<?") {
+            self.count_node(start)?;
             let span = self.processing_instruction()?;
             return Ok(Content::Node(Node::Markup { span }));
         }
@@ -555,6 +589,7 @@ impl<'t> Parser<'t> {
             }
             return Err(self.error(XmlErrorKind::Malformed));
         }
+        self.count_node(start)?;
         let rest = self.rest();
         let end = rest.find('<').unwrap_or(rest.len());
         let raw = rest.get(..end).unwrap_or_default();
@@ -573,6 +608,7 @@ impl<'t> Parser<'t> {
     /// Reads a start tag or empty-element tag, declares its namespaces in `bindings` and resolves its names. Returns the element (without content yet) and whether the tag was an empty-element tag.
     fn start_tag(&mut self, bindings: &mut Vec<Binding>) -> Result<(Element, bool), XmlError> {
         let start = self.position;
+        self.count_node(start)?;
         self.position += 1;
         let qualified_name = self.name()?.to_owned();
         let mut raw_attributes: Vec<(String, String, Range<usize>)> = Vec::new();
@@ -614,6 +650,7 @@ impl<'t> Parser<'t> {
             }
             let value = decode_references(raw, value_start, true)?;
             self.position += end + 1;
+            self.count_node(attribute_start)?;
             raw_attributes.push((name, value, attribute_start..self.position));
             if raw_attributes.len() > self.limits.max_xml_attributes {
                 return Err(XmlError {
@@ -681,6 +718,7 @@ impl<'t> Parser<'t> {
                 value,
             });
         }
+        attributes.shrink_to_fit();
         let local_name = local_name.to_owned();
         Ok((
             Element {
@@ -1135,6 +1173,50 @@ mod tests {
         assert_eq!(
             parse(deep.as_bytes(), &Limits::default()).unwrap_err().kind,
             XmlErrorKind::TooDeep
+        );
+        // A depth limit above the ceiling counts as the ceiling, because dropping a tree takes stack space for every level.
+        let unlimited = Limits {
+            max_xml_depth: usize::MAX,
+            ..Limits::default()
+        };
+        let nested = |depth: usize| format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
+        assert!(parse(nested(MAX_DEPTH).as_bytes(), &unlimited).is_ok());
+        assert_eq!(
+            parse(nested(MAX_DEPTH + 1).as_bytes(), &unlimited)
+                .unwrap_err()
+                .kind,
+            XmlErrorKind::TooDeep
+        );
+    }
+
+    #[test]
+    fn counts_every_node_against_the_limit() {
+        // An element, its attributes (namespace declarations included), runs of text, CDATA sections, comments and processing instructions each count as one node; end tags, and what comes before or after the root element, do not.
+        let text =
+            "<!-- before --><a xmlns:p='urn:p' x='1'>text<!--c--><?pi?><b/><![CDATA[d]]></a>\n";
+        let limits = |nodes| Limits {
+            max_xml_nodes: nodes,
+            ..Limits::default()
+        };
+        assert!(parse(text.as_bytes(), &limits(8)).is_ok());
+        assert_eq!(
+            parse(text.as_bytes(), &limits(7)).unwrap_err(),
+            XmlError {
+                offset: text.find("<![CDATA[").unwrap(),
+                kind: XmlErrorKind::TooManyNodes
+            }
+        );
+        // A budget shared between documents is reduced by the nodes of each.
+        let mut nodes = 20;
+        parse_counted(text.as_bytes(), &Limits::default(), &mut nodes).unwrap();
+        assert_eq!(nodes, 12);
+        parse_counted(text.as_bytes(), &Limits::default(), &mut nodes).unwrap();
+        assert_eq!(nodes, 4);
+        assert_eq!(
+            parse_counted(text.as_bytes(), &Limits::default(), &mut nodes)
+                .unwrap_err()
+                .kind,
+            XmlErrorKind::TooManyNodes
         );
     }
 

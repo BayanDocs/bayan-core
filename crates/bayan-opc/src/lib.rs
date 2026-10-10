@@ -52,11 +52,15 @@
 //! | [`Limits::max_entry_size`] | 512 MiB | for each entry, from its declared size, before anything is decompressed; also the largest compound file stream |
 //! | [`Limits::max_total_size`] | 2 GiB | for all entries together, before anything is decompressed |
 //! | [`Limits::max_compression_ratio`] | 100 to 1 | for each entry, and for the archive as a whole, that uncompresses to more than [`Limits::compression_ratio_grace`] (1 MiB) |
-//! | [`Limits::max_metadata_size`] | 32 MiB | for the content types stream, relationships parts and the core properties part, before they are decompressed |
-//! | [`Limits::max_xml_depth`], [`Limits::max_xml_attributes`], [`Limits::max_xml_name_length`] | 64, 64, 256 bytes | while metadata XML is parsed |
+//! | [`Limits::max_metadata_size`] | 8 MiB | for the content types stream, relationships parts and the core properties part, before they are decompressed |
+//! | [`Limits::max_metadata_total_size`] | 16 MiB | for the content types stream and every relationships part together, while a package is opened, before each is decompressed |
+//! | [`Limits::max_xml_nodes`] | 250,000 | while metadata XML is parsed, for all the metadata that opening a package parses together |
+//! | [`Limits::max_xml_depth`], [`Limits::max_xml_attributes`], [`Limits::max_xml_name_length`] | 64 (at most 256), 64, 256 bytes | while metadata XML is parsed |
 //! | [`Limits::max_compound_file_entries`] | 65,536 | while a compound file's entries are listed |
 //!
-//! Decompression never goes beyond a declared size: a part is read into memory set aside once, at exactly its declared size, which the limits have bounded, and decompression stops with an error as soon as the data would go beyond it. A part that is only checked, not kept (when the writer copies it unchanged), passes through a window of 128 KiB instead. So the memory a hostile package can make the reader use is bounded by these numbers, whatever its headers claim.
+//! Decompression never goes beyond a declared size: a part is read into memory set aside once, at exactly its declared size, which the limits have bounded, and decompression stops with an error as soon as the data would go beyond it. A part that is only checked, not kept (when the writer copies it unchanged), passes through a window of 128 KiB instead. Reading a part therefore takes at most [`Limits::max_entry_size`] bytes, plus that window, whatever its headers claim.
+//!
+//! The metadata parts are different: their XML is held as a tree while it is parsed, and every node of the tree (an element, an attribute, a run of text) takes a few hundred bytes however short it is in the input, so a small part can need a hundred times its size. What bounds the memory that opening a package takes is therefore [`Limits::max_xml_nodes`], together with [`Limits::max_metadata_total_size`] for the text that is kept. With the default limits, opening a package takes at most about 90 MiB on top of the package's own bytes, whatever it contains: packages built to use as much memory as the limits allow needed from 40 to 89 MiB in measurements (the most for a content types stream of 83,000 overrides with long part names, 66 MiB for relationships parts of a quarter of a million tiny elements, in UTF-8 or UTF-16). Opening a package reads no other part.
 //!
 //! ## What is refused
 //!
