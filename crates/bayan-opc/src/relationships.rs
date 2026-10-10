@@ -102,6 +102,10 @@ pub struct Relationships {
     items: Vec<Item>,
     /// The relationships, by identifier.
     relationships: BTreeMap<String, Entry>,
+    /// The highest number among the identifiers `rId` followed by decimal digits, 0 if there is none, so that [`Relationships::next_id`] takes constant time.
+    highest: u64,
+    /// A number below which every identifier `rId1`, `rId2`, … is taken, so that [`Relationships::next_id`] finds the first free one quickly when the highest number is `u64::MAX`.
+    free_from: u64,
     modified: bool,
 }
 
@@ -147,6 +151,8 @@ impl Relationships {
             original: None,
             items: Vec::new(),
             relationships: BTreeMap::new(),
+            highest: 0,
+            free_from: 1,
             modified: true,
         }
     }
@@ -182,6 +188,7 @@ impl Relationships {
         }
         let mut items = Vec::with_capacity(root.children.len());
         let mut relationships = BTreeMap::new();
+        let mut highest = 0;
         // Each child is dropped as soon as it has been read, so the tree's memory goes down while the model's goes up.
         for node in std::mem::take(&mut root.children) {
             match node {
@@ -191,6 +198,7 @@ impl Relationships {
                         return Err(invalid(RelationshipsError::DuplicateId));
                     }
                     items.push(Item::Relationship(relationship.id.clone()));
+                    highest = highest.max(id_number(&relationship.id).unwrap_or(0));
                     relationships.insert(
                         relationship.id.clone(),
                         Entry {
@@ -213,7 +221,7 @@ impl Relationships {
                 }
             }
         }
-        Ok(Relationships {
+        let mut relationships = Relationships {
             original: Some(Original {
                 root_start: root.start_tag.clone(),
                 root_end: root.end_tag.clone(),
@@ -224,8 +232,12 @@ impl Relationships {
             }),
             items,
             relationships,
+            highest,
+            free_from: 1,
             modified: false,
-        })
+        };
+        relationships.skip_taken_numbers();
+        Ok(relationships)
     }
 
     /// The relationships, in document order.
@@ -260,21 +272,18 @@ impl Relationships {
             .filter(move |relationship| relationship.relationship_type == relationship_type)
     }
 
-    /// An identifier that no relationship has yet: `rId` followed by one more than the highest number among identifiers of that form (`rId1` if there is none), so that the same relationships always get the same next identifier.
+    /// An identifier that no relationship has yet: `rId` followed by one more than the highest number among identifiers of that form (`rId1` if there is none), so that the same relationships always get the same next identifier. When the highest number is `u64::MAX`, which has no next one, it is the first free number counting up from 1. It takes constant time, so adding relationships one after another, each with the next identifier, takes time in proportion to their number.
     pub fn next_id(&self) -> String {
-        let highest = self
-            .relationships
-            .keys()
-            .filter_map(|id| id.strip_prefix("rId"))
-            .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
-            .filter_map(|digits| digits.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0);
-        // Only when the highest number is u64::MAX is there no next one; then count up from 1 to the first free one.
-        let mut number = highest.checked_add(1).unwrap_or(1);
-        while self.relationships.contains_key(&format!("rId{number}")) {
-            number = number.saturating_add(1);
-        }
+        let number = match self.highest.checked_add(1) {
+            Some(next) => next,
+            None => {
+                let mut number = self.free_from;
+                while self.relationships.contains_key(&format!("rId{number}")) {
+                    number = number.saturating_add(1);
+                }
+                number
+            }
+        };
         format!("rId{number}")
     }
 
@@ -306,6 +315,7 @@ impl Relationships {
         let indent = self.indent_before_relationships();
         self.items
             .insert(index, Item::Relationship(relationship.id.clone()));
+        self.highest = self.highest.max(id_number(&relationship.id).unwrap_or(0));
         self.relationships.insert(
             relationship.id.clone(),
             Entry {
@@ -314,6 +324,7 @@ impl Relationships {
                 indent,
             },
         );
+        self.skip_taken_numbers();
         self.modified = true;
         Ok(())
     }
@@ -326,6 +337,22 @@ impl Relationships {
             .position(|item| matches!(item, Item::Relationship(other) if other == id))?;
         let entry = self.relationships.remove(id)?;
         self.items.remove(index);
+        let number = id_number(id);
+        if number.is_some_and(|number| number == self.highest) {
+            // The highest identifier is gone: find the new highest, so that the next identifier depends only on the identifiers there are (removing takes linear time anyway).
+            self.highest = self
+                .relationships
+                .keys()
+                .filter_map(|id| id_number(id))
+                .max()
+                .unwrap_or(0);
+        }
+        if let Some(number) = number
+            && number < self.free_from
+            && id == format!("rId{number}")
+        {
+            self.free_from = number;
+        }
         if let Some(previous) = index.checked_sub(1)
             && let Some(Item::Trivia(span)) = self.items.get(previous)
             && self
@@ -346,6 +373,16 @@ impl Relationships {
     }
 
     /// The white space before the first original relationship, if the original is indented.
+    /// Moves `free_from` past the identifiers `rId1`, `rId2`, … that are taken.
+    fn skip_taken_numbers(&mut self) {
+        while self
+            .relationships
+            .contains_key(&format!("rId{}", self.free_from))
+        {
+            self.free_from = self.free_from.saturating_add(1);
+        }
+    }
+
     fn indent_before_relationships(&self) -> String {
         let Some(original) = &self.original else {
             return String::new();
@@ -456,6 +493,15 @@ impl Relationships {
 }
 
 /// Reads one `Relationship` element. Attributes it does not know, and its text content, stay in the original text.
+/// The number of an identifier `rId` followed by decimal digits (leading zeros included), if it has that form and the number fits in a `u64`.
+fn id_number(id: &str) -> Option<u64> {
+    let digits = id.strip_prefix("rId")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 fn read_relationship(element: &Element) -> Result<Relationship, RelationshipsError> {
     let nested = element.children.iter().any(|node| {
         matches!(node, Node::Element(child) if child.namespace.as_deref() == Some(NAMESPACE))
@@ -711,6 +757,39 @@ mod tests {
             .add(Relationship::new("rId1", "t", "x", TargetMode::Internal))
             .unwrap();
         assert_eq!(relationships.next_id(), "rId2");
+        // The first free number is found again after every addition and removal; `rId0012` does not take `rId12`.
+        let add = |relationships: &mut Relationships, id: &str| {
+            relationships
+                .add(Relationship::new(id, "t", "x", TargetMode::Internal))
+                .unwrap();
+        };
+        for id in ["rId2", "rId3", "rId4", "rId5", "rId6"] {
+            add(&mut relationships, id);
+        }
+        assert_eq!(relationships.next_id(), "rId8");
+        assert!(relationships.remove("rId3").is_some());
+        assert_eq!(relationships.next_id(), "rId3");
+        add(&mut relationships, "rId3");
+        for id in ["rId8", "rId9", "rId10", "rId11"] {
+            add(&mut relationships, id);
+        }
+        assert_eq!(relationships.next_id(), "rId12");
+        // Without the largest number, the next identifier follows the highest one there is (12, from `rId0012`), as if the relationships had been read so.
+        assert!(relationships.remove(&format!("rId{}", u64::MAX)).is_some());
+        assert_eq!(relationships.next_id(), "rId13");
+        assert!(relationships.remove("rId0012").is_some());
+        assert_eq!(relationships.next_id(), "rId12");
+        let read = Relationships::parse(&relationships.to_xml(), &Limits::default()).unwrap();
+        assert_eq!(read.next_id(), "rId12");
+        // Read relationships are counted the same way.
+        let text = format!(
+            "<Relationships xmlns='{NAMESPACE}'><Relationship Id='rId{}' Type='t' Target='x'/><Relationship Id='rId1' Type='t' Target='x'/><Relationship Id='rId2' Type='t' Target='x'/></Relationships>",
+            u64::MAX
+        );
+        let mut read = Relationships::parse(text.as_bytes(), &Limits::default()).unwrap();
+        assert_eq!(read.next_id(), "rId3");
+        add(&mut read, "rId3");
+        assert_eq!(read.next_id(), "rId4");
     }
 
     #[test]

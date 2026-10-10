@@ -1123,6 +1123,34 @@ fn finds_relationships_quickly_among_many() {
     assert!(relationships.get("rId60001").is_none());
 }
 
+#[test]
+fn adds_relationships_one_after_another_quickly() {
+    // `next_id` takes constant time, so adding relationships one after another, each with the next identifier, as an editor adds hyperlinks, takes time in proportion to their number; when `next_id` looked at every identifier, 40,000 hyperlinks took 38 s in a release build (the review of pull request 17).
+    let add_many = |relationships: &mut bayan_opc::Relationships, count: usize| {
+        for index in 0..count {
+            let id = relationships.next_id();
+            relationships
+                .add(bayan_opc::Relationship::new(
+                    id,
+                    "urn:test",
+                    format!("https://example.com/{index}"),
+                    bayan_opc::TargetMode::External,
+                ))
+                .unwrap();
+        }
+    };
+    let mut relationships = bayan_opc::Relationships::new();
+    add_many(&mut relationships, 40_000);
+    assert_eq!(relationships.len(), 40_000);
+    assert_eq!(relationships.next_id(), "rId40001");
+    // The same when the largest number is taken, and each next identifier is the first free one.
+    let text = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId18446744073709551615\" Type=\"t\" Target=\"a\"/></Relationships>";
+    let mut relationships =
+        bayan_opc::Relationships::parse(text.as_bytes(), &Limits::default()).unwrap();
+    add_many(&mut relationships, 40_000);
+    assert_eq!(relationships.next_id(), "rId40001");
+}
+
 // Metadata memory: the XML of the metadata parts is held as a tree while it is parsed, which costs a few hundred bytes per node however small the node is in the input, so the number of nodes, and the total size of the metadata that opening a package parses, are limited (the review of pull request 17 opened a 13.8 MB package that needed 2 GB).
 
 /// A relationships part holding `count` tiny elements from another namespace.
