@@ -406,9 +406,18 @@ mod tests {
         assert_eq!(unicode.as_str(), "/média/€.png");
         assert_eq!(unicode.zip_name(), "m%C3%A9dia/%E2%82%AC.png");
         assert_eq!(name("/a%20b").zip_name(), "a%20b");
-        assert!(PartName::from_zip_name("[Content_Types].xml").is_err());
-        assert!(PartName::from_zip_name("word/").is_err());
-        assert!(PartName::from_zip_name("a%2Fb").is_err());
+        assert_eq!(
+            PartName::from_zip_name("[Content_Types].xml"),
+            Err(PartNameError::InvalidCharacter)
+        );
+        assert_eq!(
+            PartName::from_zip_name("word/"),
+            Err(PartNameError::EmptySegment)
+        );
+        assert_eq!(
+            PartName::from_zip_name("a%2Fb"),
+            Err(PartNameError::ForbiddenPercentEncoding)
+        );
     }
 
     #[test]

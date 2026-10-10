@@ -67,3 +67,19 @@ impl Default for Limits {
         Limits::DEFAULT
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_defaults_the_memory_bounds_were_measured_with() {
+        // The documented bounds (about 90 MiB to open a package, about 110 MiB with its core properties) were measured with these values; a change to one of them must measure the bounds again and update the documentation.
+        let limits = Limits::default();
+        assert_eq!(limits.max_metadata_size, 8 << 20);
+        assert_eq!(limits.max_metadata_total_size, 16 << 20);
+        assert_eq!(limits.max_xml_nodes, 250_000);
+        assert_eq!(limits.max_name_length, 1_024);
+        assert_eq!(limits.max_xml_name_length, 256);
+    }
+}

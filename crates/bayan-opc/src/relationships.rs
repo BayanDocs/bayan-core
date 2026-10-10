@@ -664,15 +664,19 @@ mod tests {
             read.get("rId2").unwrap().target(),
             "https://example.com/a?b=c&d=\"e\""
         );
-        assert!(
-            relationships
-                .add(Relationship::new("rId1", "t", "x", TargetMode::Internal))
-                .is_err()
+        let invalid = |error| {
+            Err(Error::Package(PackageError::Relationships {
+                entry: None,
+                error,
+            }))
+        };
+        assert_eq!(
+            relationships.add(Relationship::new("rId1", "t", "x", TargetMode::Internal)),
+            invalid(RelationshipsError::DuplicateId)
         );
-        assert!(
-            relationships
-                .add(Relationship::new("", "t", "x", TargetMode::Internal))
-                .is_err()
+        assert_eq!(
+            relationships.add(Relationship::new("", "t", "x", TargetMode::Internal)),
+            invalid(RelationshipsError::MissingAttribute)
         );
     }
 

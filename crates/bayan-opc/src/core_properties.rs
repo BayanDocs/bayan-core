@@ -362,6 +362,11 @@ mod tests {
             subject: Some("a\u{1B}b".to_owned()),
             ..CoreProperties::default()
         };
-        assert!(escape.to_xml().is_err());
+        assert_eq!(
+            escape.to_xml(),
+            Err(Error::Package(PackageError::CoreProperties(
+                CorePropertiesError::InvalidCharacter
+            )))
+        );
     }
 }
