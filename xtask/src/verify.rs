@@ -23,11 +23,15 @@ const WASM_TEST_TARGET: &str = "wasm32-wasip1";
 pub const NODE_VERSION: &str = "24.21.0";
 
 /// Crates that run natively only and are therefore not built for WebAssembly, with the reason. Every other workspace member must build for WebAssembly, so a new crate is covered without anyone having to remember it.
-pub const NATIVE_ONLY: [(&str, &str); 3] = [
+pub const NATIVE_ONLY: [(&str, &str); 4] = [
     ("bayan-cli", "a command-line tool, run natively"),
     (
         "bayan-ffi",
         "the C interface for the desktop app; the web app uses bayan-wasm",
+    ),
+    (
+        "bayan-lab",
+        "the Fidelity Lab's command-line tool, run natively on corpus files and storage",
     ),
     ("xtask", "this build automation"),
 ];
@@ -603,8 +607,8 @@ mod tests {
             [
                 "clippy --workspace --all-targets --all-features --locked -- -D warnings",
                 "clippy --workspace --all-targets --all-features --locked --release -- -D warnings",
-                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --all-targets --all-features --locked --target wasm32-unknown-unknown -- -D warnings",
-                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude xtask --all-targets --all-features --locked --release --target wasm32-unknown-unknown -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --target wasm32-unknown-unknown -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --release --target wasm32-unknown-unknown -- -D warnings",
             ]
         );
         let described: Vec<String> = CLIPPY_RUNS.iter().map(describe).collect();
@@ -782,6 +786,8 @@ mod tests {
                 "bayan-cli",
                 "--exclude",
                 "bayan-ffi",
+                "--exclude",
+                "bayan-lab",
                 "--exclude",
                 "xtask",
                 "--locked",

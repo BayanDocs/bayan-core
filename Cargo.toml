@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
-members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge"]
+members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge", "lab/bayan-lab"]
 # fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
 exclude = ["fuzz"]
 
@@ -38,6 +38,10 @@ proptest = { version = "=1.11.0", default-features = false, features = ["alloc",
 num-bigint = { version = "=0.5.1", default-features = false }
 # Test-only. Checks Serialize and Deserialize implementations against the exact serde calls they make. Published 2024-08-05; MIT OR Apache-2.0.
 serde_test = "=1.0.177"
+# SHA-256, the identity of every Fidelity Lab corpus document (LAB-001). From RustCrypto, the family of ADR-0016's crypto provider; without default features (no allocation helpers or object identifiers). Already in Cargo.lock through automerge, so it adds no package. Published 2026-03-25; MIT OR Apache-2.0.
+sha2 = { version = "=0.11.0", default-features = false }
+# DEFLATE decompression for the Fidelity Lab's package scanner (LAB-001): pure Rust, `#![forbid(unsafe_code)]`, and the inflater the Rust standard library's own backtraces use. Published 2026-03-13; MIT OR Zlib OR Apache-2.0.
+miniz_oxide = "=0.9.1"
 # The CRDT library of ADR-0008 (MIT, published 2026-09-21). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
 loro = "=1.16.2"
 # The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.
