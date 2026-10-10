@@ -463,6 +463,11 @@ mod tests {
             writer.add("Word/Document.xml", b"y"),
             Err(ZipError::DuplicateNameWritten.into())
         );
+        writer.add("a\u{E000}.bin", b"x").unwrap();
+        assert_eq!(
+            writer.add("a%EE%80%80.bin", b"y"),
+            Err(ZipError::DuplicateNameWritten.into())
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The ZIP container under every package: a hardened reader and a deterministic writer, for the subset of ZIP that packages use (ECMA-376 Part 2 §7.3 and Annex B; the format itself is PKWARE's APPNOTE).
 //!
-//! **Reading** ([`ZipArchive`]) works on the whole archive in memory, as the engine receives it from the host. Before anything is decompressed, the reader checks the archive's structure and the [`Limits`](crate::Limits): it finds exactly one end-of-central-directory record, follows the ZIP64 records when they are present, reads every central directory header, and compares it with the entry's local header and data descriptor, so that every tool sees the same names, sizes and checksums (Annex B.2). It refuses what packages must not contain (encryption, compression methods other than stored and DEFLATE, split archives, symbolic links and other special files), names that are unsafe or ambiguous (absolute paths, drive letters, backslashes, `.` and `..` segments, characters beyond ASCII without the flag that marks a name as UTF-8, duplicates, including names that differ only in the case of ASCII letters), and data that overlaps other data, a trick that lets one compressed stream appear under thousands of names. Decompression is pure Rust ([`miniz_oxide`]) into a buffer of exactly the declared size, followed by a CRC-32 check.
+//! **Reading** ([`ZipArchive`]) works on the whole archive in memory, as the engine receives it from the host. Before anything is decompressed, the reader checks the archive's structure and the [`Limits`](crate::Limits): it finds exactly one end-of-central-directory record, follows the ZIP64 records when they are present, reads every central directory header, and compares it with the entry's local header and data descriptor, so that every tool sees the same names, sizes and checksums (Annex B.2). It refuses what packages must not contain (encryption, compression methods other than stored and DEFLATE, split archives, symbolic links and other special files), names that are unsafe or ambiguous (absolute paths, drive letters, backslashes, `.` and `..` segments, characters beyond ASCII without the flag that marks a name as UTF-8, duplicates, including names that differ only in the case of ASCII letters or in whether a character beyond ASCII is percent-encoded), and data that overlaps other data, a trick that lets one compressed stream appear under thousands of names. Decompression is pure Rust ([`miniz_oxide`]) into a buffer of exactly the declared size, followed by a CRC-32 check.
 //!
 //! **Writing** ([`ZipWriter`]) is deterministic: the same entries in the same order always give the same bytes, on every platform. Every entry gets the same timestamp (1980-01-01 00:00, the earliest a ZIP file can record, as Word writes it), no extra fields, comments or file attributes, and DEFLATE at the fixed level 6; ZIP64 records are written only when sizes or offsets need them. An entry can also be copied as it is ([`ZipWriter::add_raw`]): its compressed bytes are taken over unchanged from the original archive, which keeps untouched parts byte-identical (ADR-0018, rule 3).
 
@@ -115,9 +115,9 @@ pub(crate) fn check_name(name: &str) -> Option<bool> {
     Some(folder)
 }
 
-/// The key under which two entry names are the same: the characters that part names hold as themselves percent-decoded, as [`PartName::from_zip_name`](crate::PartName::from_zip_name) decodes them (§7.3.5), then ASCII letters in lower case (the equivalence of part names, §6.2.2.3).
+/// The key under which two entry names are the same: every character beyond ASCII percent-encoded in UTF-8, as a tool that turns names into URIs writes it, then ASCII letters, hexadecimal digits included, in lower case (the equivalence of part names, §6.2.2.3). So `é`, `%C3%A9` and `%c3%a9` are one name, and so are a character that part names may hold only percent-encoded, such as U+E000, and its encoding: [`PartName::from_zip_name`](crate::PartName::from_zip_name) reads the encoded form as a part and the raw one as no part at all, but other tools see one name twice. For part names, two keys are equal exactly when the part names are equivalent.
 pub(crate) fn equivalence_key(name: &str) -> String {
-    let mut key = percent::decode_ucschar(name).into_owned();
+    let mut key = percent::encode_non_ascii(name).into_owned();
     key.make_ascii_lowercase();
     key
 }
@@ -191,5 +191,10 @@ mod tests {
         assert_eq!(equivalence_key("M%C3%A9dia/x"), equivalence_key("Média/X"));
         assert_ne!(equivalence_key("%C3%A9"), equivalence_key("%C3%89"));
         assert_ne!(equivalence_key("a%41"), equivalence_key("aa"));
+        // Characters that part names hold only percent-encoded are the same raw and encoded too.
+        assert_eq!(equivalence_key("a\u{E000}"), equivalence_key("A%ee%80%80"));
+        assert_eq!(equivalence_key("\u{FFFE}"), equivalence_key("%EF%BF%BE"));
+        assert_eq!(equivalence_key("\u{10FFFF}"), "%f4%8f%bf%bf");
+        assert_ne!(equivalence_key("%EE%80%80"), equivalence_key("%EE%80%81"));
     }
 }

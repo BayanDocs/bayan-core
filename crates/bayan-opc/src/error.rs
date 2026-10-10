@@ -135,7 +135,7 @@ pub enum ZipError {
         /// The entry.
         entry: usize,
     },
-    /// Two entries have the same name, or names that are equivalent under the package's rules (ASCII letters compared without case, non-ASCII characters compared after percent-decoding).
+    /// Two entries have the same name, or names that are equivalent under the package's rules (ASCII letters compared without case, and every character beyond ASCII equal to its percent-encoding in UTF-8).
     DuplicateName {
         /// The later of the two entries.
         entry: usize,

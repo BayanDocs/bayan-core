@@ -386,6 +386,9 @@ fn refuses_duplicate_and_equivalent_names() {
         ("m%C3%A9dia/a.png", "média/a.png"),
         ("M%C3%A9dia/a.png", "m%c3%a9dia/A.png"),
         ("word/", "WORD/"),
+        // A character that part names may not hold as itself (here one for private use, and the noncharacter U+FFFE) is still the same name raw and percent-encoded: a tool that turns names into URIs, as package tools do, sees one name twice (the review of pull request 17).
+        ("a%EE%80%80.bin", "a\u{E000}.bin"),
+        ("b\u{FFFE}.bin", "b%ef%bf%be.bin"),
     ] {
         let items = vec![Item::stored(first, b""), Item::stored(second, b"")];
         assert_eq!(
