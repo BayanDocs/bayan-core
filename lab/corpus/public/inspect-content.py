@@ -233,17 +233,20 @@ def report_findings(findings, text, report, label, contexts):
 
 def inspect_xml(name, content, report, label, contexts):
     text = xml_text(content)
-    report_findings(list(text_findings(text)), text, report, label, contexts)
-    # Word splits a word across runs wherever its formatting, revision or proofing marks change ("Confidentia" and "l"), so no run need hold a marker whole. Each paragraph's text is searched with its runs joined too, and what the part's own text holds fewer times is reported.
+    stored_findings = list(text_findings(text))
+    report_findings(stored_findings, text, report, label, contexts)
+    # Word splits a word across runs wherever its formatting, revision or proofing marks change ("Confidentia" and "l"), so no run need hold a marker whole. Each paragraph's text is searched with its runs joined too, and a finding that the joined text has more often than the part's own text is reported. Both texts' findings are counted once, so the comparison takes time in proportion to the part.
     joined = "\n".join(paragraph_texts(content.decode("utf-8", "replace")))
     if joined:
-        found = list(text_findings(joined))
+        stored = {}
+        for _, match, _ in stored_findings:
+            stored[match.group(0)] = stored.get(match.group(0), 0) + 1
         seen = {}
         hidden = []
-        for kind, match, detail in found:
+        for kind, match, detail in text_findings(joined):
             value = match.group(0)
             seen[value] = seen.get(value, 0) + 1
-            if seen[value] > text.count(value):
+            if seen[value] > stored.get(value, 0):
                 hidden.append((kind, match, detail))
         report_findings(hidden, joined, report, f"{label} (runs joined)", contexts)
     if name.lower() == "docprops/app.xml":
