@@ -192,6 +192,7 @@ fn regenerated_metadata_parts_keep_their_exact_content() {
             .set_default("bayan", "application/x-bayan-test")
             .unwrap();
         assert!(types.remove_default("bayan"));
+        assert!(types.is_modified());
         for source in sources(&package) {
             let relationships = writer.relationships_mut(&source).unwrap();
             let id = relationships.next_id();

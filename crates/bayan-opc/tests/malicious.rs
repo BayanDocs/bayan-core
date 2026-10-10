@@ -1,6 +1,6 @@
-//! Crafted malicious and malformed archives: each one is refused with its own error, within the limits, before any large amount of memory is set aside (work package CORE-005, acceptance criterion 2).
+//! Crafted malicious and malformed archives: each one is refused with its own error, within the limits, before any large amount of memory is set aside (work package CORE-005, acceptance criterion 2). A few tests check the opposite, that unusual but valid archives are read.
 //!
-//! The archives are built byte by byte with the small builder in [`craft`], independent of the crate's own writer, so that a mistake in the writer cannot hide a mistake in the reader. Many of them declare sizes of terabytes: if the reader tried to allocate memory for what an archive claims before checking it, the test process would abort instead of passing.
+//! The archives are built byte by byte with the small builder in [`craft`], independent of the crate's ZIP writer, so that a mistake in the writer cannot hide a mistake in the reader. Their compressed data comes from miniz_oxide, the DEFLATE library the crate uses too, except where a test writes DEFLATE by hand with [`craft::fixed_huffman`]. Many of them declare sizes of terabytes: if the reader tried to allocate memory for what an archive claims before checking it, the test process would abort instead of passing.
 
 #![cfg(test)]
 
@@ -42,6 +42,65 @@ fn limit_error(bytes: &[u8], limits: &Limits) -> LimitError {
 
 fn package_error(bytes: &[u8]) -> Error {
     Package::open(bytes, &Limits::default()).unwrap_err()
+}
+
+/// Writes `value` at `at`, little-endian, as ZIP fields are.
+fn put16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put64(bytes: &mut [u8], at: usize, value: u64) {
+    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// The size of the end-of-central-directory record, the ZIP64 end record and the ZIP64 locator, as the builder writes them (no comment, no extensible data).
+const END: usize = 22;
+const ZIP64_END: usize = 56;
+const LOCATOR: usize = 20;
+
+/// The minimal package as a ZIP64 archive: every entry with a ZIP64 extra field, and both ZIP64 end records.
+fn zip64_package() -> Vec<u8> {
+    let mut archive = Archive::new(package_items());
+    archive.zip64_end = true;
+    for item in &mut archive.items {
+        item.zip64 = true;
+    }
+    archive.build()
+}
+
+/// Where the first central directory header of `bytes` starts.
+fn first_central_header(bytes: &[u8]) -> usize {
+    bytes
+        .windows(4)
+        .position(|window| window == [0x50, 0x4B, 0x01, 0x02])
+        .unwrap()
+}
+
+/// `bytes`, a one-entry archive without extra fields, with `extra` inserted as the extra field of its central directory header, and the sizes that depend on it adjusted.
+fn with_central_extra(bytes: &[u8], extra: &[u8]) -> Vec<u8> {
+    let central = first_central_header(bytes);
+    let name_length = usize::from(u16::from_le_bytes([
+        bytes[central + 28],
+        bytes[central + 29],
+    ]));
+    assert_eq!(&bytes[central + 30..central + 32], [0, 0]);
+    let at = central + 46 + name_length;
+    let mut out = bytes[..at].to_vec();
+    out.extend_from_slice(extra);
+    out.extend_from_slice(&bytes[at..]);
+    put16(&mut out, central + 30, u16::try_from(extra.len()).unwrap());
+    let end = out.len() - END;
+    let size = u32::from_le_bytes(out[end + 12..end + 16].try_into().unwrap());
+    put32(
+        &mut out,
+        end + 12,
+        size + u32::try_from(extra.len()).unwrap(),
+    );
+    out
 }
 
 #[test]
@@ -690,12 +749,7 @@ fn refuses_a_truncated_or_shifted_central_directory() {
     // Junk before the archive shifts every offset; offsets are never guessed.
     let mut shifted = b"MZ junk".to_vec();
     shifted.extend_from_slice(&bytes);
-    assert!(matches!(
-        open_zip(&shifted),
-        Err(Error::Zip(
-            ZipError::MalformedDirectory | ZipError::MalformedEntry { .. }
-        ))
-    ));
+    assert_eq!(zip_error(&shifted), ZipError::MalformedDirectory);
     // An archive cut in the middle of its central directory.
     let central = bytes
         .windows(4)
@@ -703,7 +757,195 @@ fn refuses_a_truncated_or_shifted_central_directory() {
         .unwrap();
     let mut cut = bytes[..central + 20].to_vec();
     cut.extend_from_slice(&bytes[bytes.len() - 22..]);
-    assert!(matches!(open_zip(&cut), Err(Error::Zip(_))));
+    assert_eq!(zip_error(&cut), ZipError::MalformedDirectory);
+}
+
+// Every consistency check of the reader has a test that fails without it (ADR-0025): mutation testing in the review of pull request 17 removed each check in turn and found these 18 that no other test noticed. Each test asserts the exact error.
+
+#[test]
+fn refuses_local_headers_whose_flags_or_sizes_disagree() {
+    // A local header that says "encrypted" where the central directory does not.
+    let mut item = Item::stored("a.xml", b"x");
+    item.local_flags = Some(1);
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::HeaderMismatch { entry: 0 }
+    );
+    // A local uncompressed size one larger than the central directory's.
+    let mut bytes = Archive::new(vec![Item::deflated("a.xml", b"<a>content</a>")]).build();
+    let size = u32::from_le_bytes(bytes[22..26].try_into().unwrap());
+    put32(&mut bytes, 22, size + 1);
+    assert_eq!(zip_error(&bytes), ZipError::HeaderMismatch { entry: 0 });
+    // With a data descriptor, the local header's checksum may be zero or the real one, nothing else.
+    let mut item = Item::deflated("a.xml", b"<a/>");
+    item.descriptor = Some(Descriptor {
+        signature: true,
+        wide: false,
+    });
+    let mut bytes = Archive::new(vec![item]).build();
+    put32(&mut bytes, 14, 0x1234_5678);
+    assert_eq!(zip_error(&bytes), ZipError::HeaderMismatch { entry: 0 });
+}
+
+#[test]
+fn refuses_a_local_header_without_its_signature() {
+    let mut bytes = Archive::new(vec![Item::stored("a.xml", b"x")]).build();
+    bytes[..4].copy_from_slice(&[0, 0, 0, 0]);
+    assert_eq!(zip_error(&bytes), ZipError::MalformedEntry { entry: 0 });
+}
+
+#[test]
+fn refuses_data_that_runs_into_the_central_directory() {
+    let mut item = Item::deflated("a.xml", b"<a/>");
+    item.compressed_size = Some(u64::try_from(item.stored.len()).unwrap() + 10);
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::Overlap { entry: 0 }
+    );
+}
+
+#[test]
+fn refuses_junk_around_the_central_directory() {
+    let bytes = Archive::new(package_items()).build();
+    let end = bytes.len() - END;
+    // Bytes between the central directory and the end record, which the end record's size does not count.
+    let mut junk = bytes[..end].to_vec();
+    junk.extend_from_slice(b"JUNK");
+    junk.extend_from_slice(&bytes[end..]);
+    assert_eq!(zip_error(&junk), ZipError::MalformedDirectory);
+    // The same bytes counted in the size: after the last header there may be only a digital signature record.
+    let size = u32::from_le_bytes(junk[end + 4 + 12..end + 4 + 16].try_into().unwrap());
+    put32(&mut junk, end + 4 + 12, size + 4);
+    assert_eq!(zip_error(&junk), ZipError::MalformedDirectory);
+}
+
+#[test]
+fn refuses_an_entry_count_that_cannot_fit_in_the_central_directory() {
+    // Every central directory header takes at least 46 bytes, so 2^40 entries cannot fit; the count is refused before anything is set aside for it, even when the entry limit would allow it.
+    let mut bytes = zip64_package();
+    let record = bytes.len() - END - LOCATOR - ZIP64_END;
+    put64(&mut bytes, record + 24, 1 << 40);
+    put64(&mut bytes, record + 32, 1 << 40);
+    let limits = Limits {
+        max_entries: usize::MAX,
+        ..Limits::default()
+    };
+    assert_eq!(
+        ZipArchive::new(&bytes, &limits).map(|_| ()),
+        Err(Error::Zip(ZipError::MalformedDirectory))
+    );
+}
+
+#[test]
+fn refuses_inconsistent_zip64_end_records() {
+    let bytes = zip64_package();
+    assert!(open_zip(&bytes).is_ok());
+    let record = bytes.len() - END - LOCATOR - ZIP64_END;
+    let locator = bytes.len() - END - LOCATOR;
+    let end = bytes.len() - END;
+    // The locator puts the ZIP64 end record on another disk.
+    let mut changed = bytes.clone();
+    put32(&mut changed, locator + 4, 1);
+    assert_eq!(zip_error(&changed), ZipError::MultipleDisks);
+    // The ZIP64 end record claims a size shorter than its fixed fields.
+    let mut changed = bytes.clone();
+    put64(&mut changed, record + 4, 40);
+    assert_eq!(zip_error(&changed), ZipError::MalformedDirectory);
+    // Version 6.2 of the record belongs to central directory encryption.
+    let mut changed = bytes.clone();
+    put16(&mut changed, record + 14, 62);
+    assert_eq!(zip_error(&changed), ZipError::UnsupportedDirectory);
+    // The end record's entry counts are neither the "see ZIP64" marker nor the ZIP64 record's counts.
+    let mut changed = bytes.clone();
+    put16(&mut changed, end + 8, 1);
+    put16(&mut changed, end + 10, 1);
+    assert_eq!(zip_error(&changed), ZipError::MalformedDirectory);
+    // Bytes between the central directory and the ZIP64 end record, with the locator pointing to the moved record.
+    let mut junk = bytes[..record].to_vec();
+    junk.extend_from_slice(b"JUNK");
+    junk.extend_from_slice(&bytes[record..]);
+    let locator = junk.len() - END - LOCATOR;
+    let offset = u64::from_le_bytes(junk[locator + 8..locator + 16].try_into().unwrap());
+    put64(&mut junk, locator + 8, offset + 4);
+    assert_eq!(zip_error(&junk), ZipError::MalformedDirectory);
+}
+
+#[test]
+fn refuses_entries_on_other_disks() {
+    let mut bytes = Archive::new(vec![Item::stored("a.xml", b"x")]).build();
+    let central = first_central_header(&bytes);
+    put16(&mut bytes, central + 34, 1);
+    assert_eq!(zip_error(&bytes), ZipError::MultipleDisks);
+}
+
+#[test]
+fn refuses_malformed_extra_fields() {
+    let bytes = Archive::new(vec![Item::stored("a.xml", b"x")]).build();
+    // A few zero bytes of padding, too few to form a field, are accepted, which shows that the insertion is sound.
+    assert!(open_zip(&with_central_extra(&bytes, &[0, 0])).is_ok());
+    // Other bytes left over after the last field.
+    assert_eq!(
+        zip_error(&with_central_extra(&bytes, &[1, 2, 3])),
+        ZipError::MalformedEntry { entry: 0 }
+    );
+    // Two ZIP64 extra fields.
+    assert_eq!(
+        zip_error(&with_central_extra(&bytes, &[1, 0, 0, 0, 1, 0, 0, 0])),
+        ZipError::MalformedEntry { entry: 0 }
+    );
+    // A "see ZIP64" marker without a ZIP64 extra field.
+    let mut item = Item::stored("a.bin", b"x");
+    item.size = 0xFFFF_FFFF;
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::MalformedEntry { entry: 0 }
+    );
+}
+
+#[test]
+fn refuses_zip64_sizes_with_the_high_bit_set() {
+    // Annex B: 64-bit sizes and offsets keep the high bit clear.
+    let mut item = Item::stored("a.bin", b"x");
+    item.zip64 = true;
+    item.size = 1 << 63;
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::MalformedEntry { entry: 0 }
+    );
+}
+
+#[test]
+fn copies_entries_with_data_descriptors_and_zip64_unchanged() {
+    // Entries with data descriptors (with and without their signature) and ZIP64 fields are read, and the package writer copies their stored bytes unchanged.
+    let mut archive = Archive::new(package_items());
+    archive.zip64_end = true;
+    for (index, item) in archive.items.iter_mut().enumerate() {
+        item.zip64 = true;
+        item.descriptor = Some(Descriptor {
+            signature: index == 0,
+            wide: true,
+        });
+    }
+    let bytes = archive.build();
+    let package = Package::open(&bytes, &Limits::default()).unwrap();
+    let written = bayan_opc::PackageWriter::from_package(&package)
+        .finish()
+        .unwrap();
+    let reopened = Package::open(&written, &Limits::default()).unwrap();
+    assert_eq!(package.parts().count(), 1);
+    for part in package.parts() {
+        assert_eq!(
+            package
+                .zip()
+                .raw_data(package.entry_of(part).unwrap())
+                .unwrap(),
+            reopened
+                .zip()
+                .raw_data(reopened.entry_of(part).unwrap())
+                .unwrap()
+        );
+        assert_eq!(reopened.read_part(part).unwrap(), b"<document/>");
+    }
 }
 
 // Package rules.
