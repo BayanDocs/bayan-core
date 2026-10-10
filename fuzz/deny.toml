@@ -1,0 +1,53 @@
+# cargo-deny configuration of the fuzz workspace (ADR-0017), checked by `cargo xtask verify` together with the main workspace's deny.toml, on every pull request and every night.
+# It is the main policy with one addition: the NCSA license of libFuzzer, which the owner accepted for fuzzing dependencies that never ship (ADR-0017, amendment of 2026-10-08). The exception lives here and only here, never in the main workspace's deny.toml, and only for the one crate that needs it.
+
+[graph]
+# Check the dependencies of every feature, so nothing escapes the check by hiding behind an optional feature.
+all-features = true
+
+[advisories]
+# Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version, as in the main workspace. The fuzz workspace has no exceptions.
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+# The license allowlist of ADR-0017 §8, the same as the main workspace's.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+# libfuzzer-sys bundles LLVM's libFuzzer, licensed `(MIT OR Apache-2.0) AND NCSA`. NCSA (the University of Illinois/NCSA Open Source License) is permissive; ADR-0017's amendment of 2026-10-08 accepts it for this workspace's fuzzing dependencies only.
+exceptions = [
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates (bayan-fuzz and bayan-opc) are unpublished and licensed under the repository license.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Dependencies come only from crates.io, as in the main workspace.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+required-git-spec = "tag"
