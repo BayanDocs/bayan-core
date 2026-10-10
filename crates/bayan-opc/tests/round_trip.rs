@@ -335,7 +335,7 @@ fn writes_new_core_properties() {
         .add_part(
             &core,
             bayan_opc::core_properties::CONTENT_TYPE,
-            properties.to_xml(),
+            properties.to_xml().unwrap(),
         )
         .unwrap();
     writer

@@ -168,7 +168,21 @@ impl CoreProperties {
     }
 
     /// The core properties part as XML, laid out as Word writes it: the properties that are set, in Word's order, with `xsi:type="dcterms:W3CDTF"` on the two dates as §8.3.4.3 requires.
-    pub fn to_xml(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`PackageError::CoreProperties`] with [`CorePropertiesError::InvalidCharacter`] if a property has a character that XML cannot hold, not even as a character reference: a control character other than tab, line feed and carriage return, U+FFFE or U+FFFF. Text from legacy documents can contain such characters; the caller decides what to replace them with.
+    pub fn to_xml(&self) -> Result<Vec<u8>, Error> {
+        if self
+            .fields()
+            .into_iter()
+            .flatten()
+            .any(|value| !value.chars().all(xml::is_xml_character))
+        {
+            return Err(Error::Package(PackageError::CoreProperties(
+                CorePropertiesError::InvalidCharacter,
+            )));
+        }
         let mut text = String::from(DECLARATION);
         text.push_str("<cp:coreProperties xmlns:cp=\"");
         text.push_str(NAMESPACE);
@@ -206,7 +220,7 @@ impl CoreProperties {
             text.push('>');
         }
         text.push_str("</cp:coreProperties>");
-        text.into_bytes()
+        Ok(text.into_bytes())
     }
 }
 
@@ -241,7 +255,7 @@ mod tests {
         assert_eq!(properties.modified.as_deref(), Some("2026-10-02T10:30:00Z"));
         assert_eq!(properties.category, None);
         // Written the way Word writes it, the part comes out byte for byte the same.
-        assert_eq!(properties.to_xml(), WORD.as_bytes());
+        assert_eq!(properties.to_xml().unwrap(), WORD.as_bytes());
     }
 
     #[test]
@@ -293,11 +307,61 @@ mod tests {
             version: Some("1.0".to_owned()),
             identifier: Some("urn:x".to_owned()),
         };
-        let read = CoreProperties::parse(&properties.to_xml(), &Limits::default()).unwrap();
+        let read =
+            CoreProperties::parse(&properties.to_xml().unwrap(), &Limits::default()).unwrap();
         assert_eq!(read, properties);
         assert_eq!(
-            CoreProperties::parse(&CoreProperties::default().to_xml(), &Limits::default()).unwrap(),
+            CoreProperties::parse(
+                &CoreProperties::default().to_xml().unwrap(),
+                &Limits::default()
+            )
+            .unwrap(),
             CoreProperties::default()
         );
+    }
+
+    #[test]
+    fn writes_only_what_it_reads_back() {
+        // Every character either reads back as it was written, or is refused before anything is written: XML cannot hold most control characters, nor U+FFFE and U+FFFF, not even as references (legacy Word text does contain such characters).
+        let characters = (0..=0x2FF_u32)
+            .chain(0xD7F0..=0xD7FF)
+            .chain(0xE000..=0xE00F)
+            .chain(0xFFF0..=0xFFFF)
+            .chain(0x1_0000..=0x1_000F)
+            .chain(0x10_FFF0..=0x10_FFFF)
+            .filter_map(char::from_u32);
+        for character in characters {
+            let properties = CoreProperties {
+                title: Some(format!("a{character}b")),
+                ..CoreProperties::default()
+            };
+            match properties.to_xml() {
+                Ok(bytes) => assert_eq!(
+                    CoreProperties::parse(&bytes, &Limits::default()).unwrap(),
+                    properties,
+                    "{:X}",
+                    u32::from(character)
+                ),
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        Error::Package(PackageError::CoreProperties(
+                            CorePropertiesError::InvalidCharacter
+                        ))
+                    );
+                    assert!(
+                        !xml::is_xml_character(character),
+                        "{:X}",
+                        u32::from(character)
+                    );
+                }
+            }
+        }
+        // The legacy escape character of the review's example.
+        let escape = CoreProperties {
+            subject: Some("a\u{1B}b".to_owned()),
+            ..CoreProperties::default()
+        };
+        assert!(escape.to_xml().is_err());
     }
 }

@@ -282,11 +282,18 @@ impl Relationships {
     ///
     /// # Errors
     ///
-    /// [`PackageError::Relationships`] with [`RelationshipsError::MissingAttribute`] if its identifier or type is empty, or with [`RelationshipsError::DuplicateId`] if a relationship with its identifier exists.
+    /// [`PackageError::Relationships`] with [`RelationshipsError::MissingAttribute`] if its identifier or type is empty, with [`RelationshipsError::InvalidId`] if its identifier is not an XML identifier (a name without a colon, as `xsd:ID` requires), with [`RelationshipsError::InvalidCharacter`] if its type or target has a character that XML cannot hold (a control character other than tab, line feed and carriage return, U+FFFE or U+FFFF), so that it could not be written, or with [`RelationshipsError::DuplicateId`] if a relationship with its identifier exists. Relationships that are read are not held to the first two rules, so that documents which break them still open.
     pub fn add(&mut self, relationship: Relationship) -> Result<(), Error> {
         let invalid = |error| Error::Package(PackageError::Relationships { entry: None, error });
         if relationship.id.is_empty() || relationship.relationship_type.is_empty() {
             return Err(invalid(RelationshipsError::MissingAttribute));
+        }
+        if !xml::is_ncname(&relationship.id) {
+            return Err(invalid(RelationshipsError::InvalidId));
+        }
+        let writable = |text: &str| text.chars().all(xml::is_xml_character);
+        if !writable(&relationship.relationship_type) || !writable(&relationship.target) {
+            return Err(invalid(RelationshipsError::InvalidCharacter));
         }
         if self.relationships.contains_key(&relationship.id) {
             return Err(invalid(RelationshipsError::DuplicateId));
@@ -704,5 +711,66 @@ mod tests {
             .add(Relationship::new("rId1", "t", "x", TargetMode::Internal))
             .unwrap();
         assert_eq!(relationships.next_id(), "rId2");
+    }
+
+    #[test]
+    fn writes_only_what_it_reads_back() {
+        // A relationship's type and target either read back as they were added, or are refused when it is added, because XML cannot hold the character.
+        let invalid = |error| Error::Package(PackageError::Relationships { entry: None, error });
+        let characters = (0..=0x2FF_u32)
+            .chain(0xFFF0..=0xFFFF)
+            .chain(0x1_0000..=0x1_000F)
+            .filter_map(char::from_u32);
+        for character in characters {
+            let cases = [
+                (format!("urn:{character}"), "t".to_owned()),
+                ("urn:t".to_owned(), format!("a{character}b")),
+            ];
+            for (relationship_type, target) in cases {
+                let mut relationships = Relationships::new();
+                let added = relationships.add(Relationship::new(
+                    "rId1",
+                    relationship_type.as_str(),
+                    target.as_str(),
+                    TargetMode::External,
+                ));
+                match added {
+                    Ok(()) => {
+                        let read =
+                            Relationships::parse(&relationships.to_xml(), &Limits::default())
+                                .unwrap();
+                        let relationship = read.get("rId1").unwrap();
+                        assert_eq!(relationship.relationship_type(), relationship_type);
+                        assert_eq!(relationship.target(), target);
+                    }
+                    Err(error) => {
+                        assert_eq!(error, invalid(RelationshipsError::InvalidCharacter));
+                        assert!(
+                            !xml::is_xml_character(character),
+                            "{:X}",
+                            u32::from(character)
+                        );
+                    }
+                }
+            }
+        }
+        // An identifier must be an XML identifier, a name without a colon (`xsd:ID`, ECMA-376 Part 2 M1.26).
+        for id in ["rId1", "_a", "a-b.c7", "é"] {
+            assert!(
+                Relationships::new()
+                    .add(Relationship::new(id, "t", "x", TargetMode::Internal))
+                    .is_ok(),
+                "{id}"
+            );
+        }
+        for id in ["1a", "a b", "a:b", "-a", "a\u{1}", ".a"] {
+            assert_eq!(
+                Relationships::new()
+                    .add(Relationship::new(id, "t", "x", TargetMode::Internal))
+                    .unwrap_err(),
+                invalid(RelationshipsError::InvalidId),
+                "{id}"
+            );
+        }
     }
 }

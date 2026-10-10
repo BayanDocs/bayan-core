@@ -235,8 +235,8 @@ fn check_characters(text: &str) -> Result<(), XmlError> {
     }
 }
 
-/// Whether XML 1.0 allows `character` (§2.2, `Char`).
-fn is_xml_character(character: char) -> bool {
+/// Whether XML 1.0 allows `character` (§2.2, `Char`), as itself or as a character reference: no control characters other than tab, line feed and carriage return, and neither U+FFFE nor U+FFFF.
+pub(crate) fn is_xml_character(character: char) -> bool {
     matches!(character, '\t' | '\n' | '\r' | ' '..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
@@ -870,6 +870,15 @@ fn is_name_start(character: char) -> bool {
         | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
         | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
         | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// Whether `text` is an `NCName` of Namespaces in XML (a name without a colon), the form of `xsd:ID` values such as relationship identifiers.
+pub(crate) fn is_ncname(text: &str) -> bool {
+    let mut characters = text.chars();
+    characters
+        .next()
+        .is_some_and(|first| first != ':' && is_name_start(first))
+        && characters.all(|character| character != ':' && is_name_character(character))
 }
 
 /// `NameChar` of XML 1.0 (fifth edition) §2.3.

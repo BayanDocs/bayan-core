@@ -600,6 +600,10 @@ pub enum RelationshipsError {
     RelationshipsOfRelationshipsPart,
     /// The relationships part's name does not name a valid source part.
     InvalidSource,
+    /// A relationship being added has a type or target with a character that XML cannot hold (most control characters, U+FFFE and U+FFFF), so it could not be written.
+    InvalidCharacter,
+    /// A relationship being added has an identifier that is not an XML identifier: a name without a colon (`xsd:ID`).
+    InvalidId,
 }
 
 impl fmt::Display for RelationshipsError {
@@ -616,6 +620,8 @@ impl fmt::Display for RelationshipsError {
                 "relationships parts cannot have relationships"
             }
             RelationshipsError::InvalidSource => "the name does not name a source part",
+            RelationshipsError::InvalidCharacter => "a character that XML cannot hold",
+            RelationshipsError::InvalidId => "the identifier is not an XML identifier",
         })
     }
 }
@@ -632,6 +638,8 @@ pub enum CorePropertiesError {
     MultipleCoreProperties,
     /// The core properties relationship does not point to a part of the package.
     MissingPart,
+    /// A property to be written has a character that XML cannot hold (most control characters, U+FFFE and U+FFFF).
+    InvalidCharacter,
 }
 
 impl fmt::Display for CorePropertiesError {
@@ -643,6 +651,9 @@ impl fmt::Display for CorePropertiesError {
                 "more than one core properties relationship"
             }
             CorePropertiesError::MissingPart => "the core properties part is missing",
+            CorePropertiesError::InvalidCharacter => {
+                "a property has a character that XML cannot hold"
+            }
         })
     }
 }
