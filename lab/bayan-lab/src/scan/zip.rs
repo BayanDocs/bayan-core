@@ -4,7 +4,7 @@
 //!
 //! Every archive is hostile until proven otherwise, so the reader is strict where a lenient reader could be tricked:
 //!
-//! - the end-of-central-directory record must end the file exactly, so a second, fake record hidden in a comment or appended data cannot change what the archive contains;
+//! - the end-of-central-directory record must end the file exactly, and only one may: a second record hidden in the comment of the first, or appended data, cannot change what the archive contains;
 //! - every entry's local header must repeat its central-directory name and compression method, and no two entries may overlap each other or the central directory (the "overlapping files" zip bomb);
 //! - names must be relative, without `..`, `.`, empty segments, backslashes or control characters, and unique when compared as OPC compares part names (ASCII case-insensitively);
 //! - encrypted entries, symbolic links, archives spanning several disks and compression methods other than stored and DEFLATE are refused;
@@ -286,22 +286,28 @@ fn to_usize(value: u64) -> Result<usize, ZipError> {
     usize::try_from(value).map_err(|_| ZipError::Corrupt("a size or offset does not fit in memory"))
 }
 
-/// The offset of the end-of-central-directory record, which must end the file exactly (its comment included).
+/// The offset of the end-of-central-directory record, which must end the file exactly (its comment included). A file in which two records both end the file is ambiguous (one hides in the other's comment, and readers disagree on which counts), so it is refused.
 fn find_end_record(data: &[u8]) -> Result<usize, ZipError> {
     let last = data
         .len()
         .checked_sub(END_RECORD_SIZE)
         .ok_or(ZipError::NotZip)?;
     let first = last.saturating_sub(MAX_COMMENT);
+    let mut found = None;
     for at in (first..=last).rev() {
         if u32_at(data, at)? == END_OF_CENTRAL_DIRECTORY {
             let comment = usize::from(u16_at(data, at + 20)?);
             if at + END_RECORD_SIZE + comment == data.len() {
-                return Ok(at);
+                if found.is_some() {
+                    return Err(ZipError::Corrupt(
+                        "two end-of-central-directory records end the file",
+                    ));
+                }
+                found = Some(at);
             }
         }
     }
-    Err(ZipError::NotZip)
+    found.ok_or(ZipError::NotZip)
 }
 
 fn read_directory_location(

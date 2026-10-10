@@ -4,10 +4,12 @@
 //!
 //! **Address:** `https://HOST[:PORT][/PATH]`, without a query, a fragment or a user name. Plain `http://` is accepted only to this machine (`127.0.0.1`, `localhost`, `[::1]`), for tests and local servers. Requests go through the `curl` program ([`super::curl`]); redirects are never followed.
 
-use super::curl::{self, Method, Request, TempFile};
+use std::path::Path;
+
+use super::curl::{self, Method, Request, Response};
 use super::{Key, MAX_OBJECT_SIZE, Store, StoreError};
 
-/// The largest response to a HEAD request accepted, in bytes (it has no body).
+/// The largest response to a HEAD request accepted, in bytes: only its headers.
 const MAX_HEAD_RESPONSE: u64 = 64 * 1024;
 
 /// A read-only store at an HTTPS address.
@@ -54,18 +56,11 @@ impl HttpsStore {
         format!("{}/{}", self.base, key.path())
     }
 
-    fn request(
-        &self,
-        method: Method,
-        url: &str,
-        output: &TempFile,
-        max_size: u64,
-    ) -> Result<u16, StoreError> {
+    fn request(&self, method: Method, url: &str, max_size: u64) -> Result<Response, StoreError> {
         curl::run(&Request {
             method,
             url,
             shown: url,
-            output,
             upload: None,
             max_size,
             local_http: self.local_http,
@@ -80,16 +75,16 @@ impl Store for HttpsStore {
     }
 
     fn get(&self, key: &Key) -> Result<Option<Vec<u8>>, StoreError> {
-        let output = TempFile::new("get");
         let url = self.url(key);
-        match self.request(Method::Get, &url, &output, MAX_OBJECT_SIZE)? {
-            200 => output.read(MAX_OBJECT_SIZE).map(Some),
+        let response = self.request(Method::Get, &url, MAX_OBJECT_SIZE)?;
+        match response.status {
+            200 => Ok(Some(response.body)),
             404 => Ok(None),
             code => Err(StoreError(format!("GET {url}: HTTP status {code}"))),
         }
     }
 
-    fn put(&self, _: &Key, _: &[u8]) -> Result<(), StoreError> {
+    fn put(&self, _: &Key, _: &[u8], _: &Path) -> Result<(), StoreError> {
         Err(StoreError(format!(
             "{} is read-only; write to the bucket through its s3:// address",
             self.base
@@ -97,9 +92,8 @@ impl Store for HttpsStore {
     }
 
     fn contains(&self, key: &Key) -> Result<bool, StoreError> {
-        let output = TempFile::new("head");
         let url = self.url(key);
-        match self.request(Method::Head, &url, &output, MAX_HEAD_RESPONSE)? {
+        match self.request(Method::Head, &url, MAX_HEAD_RESPONSE)?.status {
             200 => Ok(true),
             404 => Ok(false),
             code => Err(StoreError(format!("HEAD {url}: HTTP status {code}"))),
@@ -143,7 +137,7 @@ mod tests {
         assert!(
             HttpsStore::from_address("https://corpus.example.org")
                 .unwrap()
-                .put(&Key::document(Sha256::of(b"x")), b"x")
+                .put(&Key::document(Sha256::of(b"x")), b"x", Path::new("x"))
                 .is_err()
         );
     }

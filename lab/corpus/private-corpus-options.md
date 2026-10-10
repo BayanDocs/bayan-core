@@ -52,7 +52,7 @@ The private corpus's manifest uses the same format as the public one ([manifest-
 
 ## 5. What leaves the private environment
 
-Only aggregate numbers: how many documents use each feature, script or compatibility mode, and the distributions of the fidelity metrics. Never a document, a SHA-256, a URL, a file name, a title or any content (the tools record none of these in the first place). A rare font, program or language name could point to a single document, so reports show a name only when at least **10 documents** share it, and fold the rest into "other". The `bayan-lab corpus stats` report does not do that folding yet; adding it is a follow-up for LAB-101, before the first private report.
+Only aggregate numbers: how many documents use each feature, script or compatibility mode, and the distributions of the fidelity metrics. Never a document, a SHA-256, a URL, a file name, a title or any content: the tools record no URL, file name, title or text of a private document in the first place, and the SHA-256s they do record stay in the private manifest. A rare font, program or language name could point to a single document, so reports show a name only when at least **10 documents** share it, and fold the rest into "other". The `bayan-lab corpus stats` report does not do that folding yet; adding it is a follow-up for LAB-101, before the first private report.
 
 ## 6. Legal and privacy considerations
 

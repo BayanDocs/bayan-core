@@ -15,7 +15,7 @@ use crate::manifest::{
     self, Document, GroundTruth, LicenseText, Manifest, NO_ASSERTION, PUBLIC_LICENSES, Provenance,
     Scan, Source, Tier,
 };
-use crate::scan::{self, Limits, TAGGER_VERSION};
+use crate::scan::{self, Limits, TAGGER_VERSION, printable};
 use crate::schema;
 use crate::stats::Stats;
 use crate::store::{self, Key, MAX_OBJECT_SIZE, Store};
@@ -145,6 +145,16 @@ impl Arguments {
     fn required(&self, name: &str) -> Result<&str, String> {
         self.one(name)?
             .ok_or_else(|| format!("--{name} is required"))
+    }
+
+    /// The curator's notes from `--notes`, refused when empty, before a command stores anything.
+    fn notes(&self) -> Result<Option<String>, String> {
+        match self.one("notes")? {
+            Some(notes) if notes.trim().is_empty() => {
+                Err("--notes cannot be empty; leave it out instead".to_owned())
+            }
+            notes => Ok(notes.map(str::to_owned)),
+        }
     }
 
     fn all(&self, name: &str) -> &[String] {
@@ -293,6 +303,30 @@ fn save(path: &Path, manifest: &Manifest) -> Result<(), String> {
     fs::rename(&temporary, path).map_err(|error| format!("cannot write the manifest: {error}"))
 }
 
+/// The problems a manifest has, so that a command can refuse to add new ones.
+fn problems_of(manifest: &Manifest) -> BTreeSet<String> {
+    manifest
+        .check()
+        .err()
+        .map(|problems| problems.0.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Writes the manifest unless the command made it inconsistent: problems it had before (`before`) are left for `corpus verify` to report, but no command may add one.
+fn save_checked(path: &Path, manifest: &Manifest, before: &BTreeSet<String>) -> Result<(), String> {
+    let new: Vec<String> = problems_of(manifest)
+        .into_iter()
+        .filter(|problem| !before.contains(problem))
+        .collect();
+    if !new.is_empty() {
+        return Err(format!(
+            "the manifest was not changed, because the change would make it inconsistent:\n- {}",
+            new.join("\n- ")
+        ));
+    }
+    save(path, manifest)
+}
+
 /// Reads a local file of at most `limit` bytes.
 fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
@@ -341,12 +375,14 @@ fn file_inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Stores an object unless the store already has it.
-fn store_once(store: &dyn Store, key: &Key, bytes: &[u8]) -> Result<(), String> {
+/// Stores an object, read from the file `source`, unless the store already has it.
+fn store_once(store: &dyn Store, key: &Key, bytes: &[u8], source: &Path) -> Result<(), String> {
     if store.contains(key).map_err(|error| error.to_string())? {
         return Ok(());
     }
-    store.put(key, bytes).map_err(|error| error.to_string())
+    store
+        .put(key, bytes, source)
+        .map_err(|error| error.to_string())
 }
 
 fn source_add(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> {
@@ -363,37 +399,54 @@ fn source_add(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, Str
             PUBLIC_LICENSES.join(", ")
         ));
     }
-    let mut license_texts = Vec::new();
+    // Every license file is read and checked before anything is stored, so a refused source leaves nothing behind in the store.
+    let mut texts = Vec::new();
     for pair in arguments.all("license-file") {
         let (path, local) = pair
             .split_once('=')
             .ok_or_else(|| format!("--license-file takes PATH=FILE, not `{pair}`"))?;
         if !manifest::is_relative_path(path) {
             return Err(format!(
-                "license file path `{path}` is not a relative path in the source"
+                "license file path `{}` is not a relative path in the source",
+                printable(path, 300)
             ));
         }
         let bytes = read_limited(Path::new(local), MAX_LICENSE_TEXT)
             .map_err(|error| format!("cannot read the license file for {path}: {error}"))?;
-        let sha256 = Sha256::of(&bytes);
-        store_once(store.as_ref(), &Key::license_text(sha256), &bytes)?;
-        license_texts.push(LicenseText {
-            path: path.to_owned(),
-            sha256,
-        });
+        texts.push((path.to_owned(), PathBuf::from(local), bytes));
     }
+    let mut license_texts: Vec<LicenseText> = texts
+        .iter()
+        .map(|(path, _, bytes)| LicenseText {
+            path: path.clone(),
+            sha256: Sha256::of(bytes),
+        })
+        .collect();
     license_texts.sort();
     license_texts.dedup();
+    let store_texts = || -> Result<(), String> {
+        for (_, local, bytes) in &texts {
+            store_once(
+                store.as_ref(),
+                &Key::license_text(Sha256::of(bytes)),
+                bytes,
+                local,
+            )?;
+        }
+        Ok(())
+    };
     let source = Source {
         url: arguments.required("url")?.to_owned(),
         revision: arguments.required("revision")?.to_owned(),
         license: license.to_owned(),
         copyright: arguments.required("copyright")?.to_owned(),
         license_texts,
-        notes: arguments.one("notes")?.map(str::to_owned),
+        notes: arguments.notes()?,
     };
     match manifest.sources.get(name) {
         Some(existing) if *existing == source => {
+            // The store may be a new one: give it the texts it lacks.
+            store_texts()?;
             let _ = writeln!(out, "source {name}: unchanged");
             return Ok(Outcome::Success);
         }
@@ -404,18 +457,16 @@ fn source_add(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, Str
         }
         None => {}
     }
+    let before = problems_of(&manifest);
     manifest.sources.insert(name.clone(), source);
-    if let Err(problems) = manifest.check() {
-        let mine: Vec<&String> = problems
-            .0
-            .iter()
-            .filter(|problem| problem.starts_with(&format!("source `{name}`")))
-            .collect();
-        if !mine.is_empty() {
-            let list: Vec<&str> = mine.iter().map(|problem| problem.as_str()).collect();
-            return Err(list.join("; "));
-        }
+    let new: Vec<String> = problems_of(&manifest)
+        .into_iter()
+        .filter(|problem| !before.contains(problem))
+        .collect();
+    if !new.is_empty() {
+        return Err(new.join("; "));
     }
+    store_texts()?;
     save(&manifest_path, &manifest)?;
     let _ = writeln!(out, "source {name}: added");
     Ok(Outcome::Success)
@@ -449,11 +500,12 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
                 .to_owned(),
         );
     }
-    let notes = arguments.one("notes")?.map(str::to_owned);
+    let notes = arguments.notes()?;
     let exclusions = exclusions_of(arguments)?.unwrap_or_default();
     if arguments.operands.is_empty() {
         return Err("give at least one FILE".to_owned());
     }
+    let before = problems_of(&manifest);
     let (mut added, mut known, mut excluded, mut refused) = (0_u64, 0_u64, 0_u64, 0_u64);
     for (index, operand) in arguments.operands.iter().enumerate() {
         let (file, path) = match &root {
@@ -470,7 +522,7 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
                 match file_inside(root, operand) {
                     Ok(file) => (file, Some(operand.clone())),
                     Err(error) => {
-                        let _ = writeln!(err, "refused {operand}: {error}");
+                        let _ = writeln!(err, "refused {}: {error}", printable(operand, 300));
                         refused += 1;
                         continue;
                     }
@@ -478,9 +530,10 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
             }
             None => (PathBuf::from(operand), None),
         };
-        let label = path
-            .clone()
-            .unwrap_or_else(|| format!("input {}", index + 1));
+        let label = path.as_deref().map_or_else(
+            || format!("input {}", index + 1),
+            |path| printable(path, 300),
+        );
         let bytes = match read_limited(&file, MAX_OBJECT_SIZE) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -526,12 +579,23 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
             .iter_mut()
             .find(|document| document.sha256 == sha256)
         {
+            // The same bytes cannot be public and private at once, nor be in two tiers.
+            if existing.tier != tier {
+                let _ = writeln!(
+                    err,
+                    "refused {label} ({}): already in the corpus as a {} document; a document has one tier",
+                    sha256.short(),
+                    existing.tier
+                );
+                refused += 1;
+                continue;
+            }
             if !existing.provenance.contains(&provenance) {
                 existing.provenance.push(provenance);
             }
             // A document already in the manifest goes into the store too if the store lacks it, so that adding the same files to a new store fills it.
-            if let Err(error) = store_once(store.as_ref(), &key, &bytes) {
-                save(&manifest_path, &manifest)?;
+            if let Err(error) = store_once(store.as_ref(), &key, &bytes, &file) {
+                save_checked(&manifest_path, &manifest, &before)?;
                 return Err(format!("cannot store {label}: {error}"));
             }
             known += 1;
@@ -541,14 +605,19 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
         let findings = match scan::scan(&bytes, &Limits::DEFAULT) {
             Ok(findings) => findings,
             Err(error) => {
-                let _ = writeln!(err, "refused {label} ({}): {error}", sha256.short());
+                let _ = writeln!(
+                    err,
+                    "refused {label} ({}): {}",
+                    sha256.short(),
+                    error.message(path.is_some())
+                );
                 refused += 1;
                 continue;
             }
         };
-        if let Err(error) = store_once(store.as_ref(), &key, &bytes) {
+        if let Err(error) = store_once(store.as_ref(), &key, &bytes, &file) {
             // Save what was added so far, then stop: the store is not usable.
-            save(&manifest_path, &manifest)?;
+            save_checked(&manifest_path, &manifest, &before)?;
             return Err(format!("cannot store {label}: {error}"));
         }
         let document = Document {
@@ -569,7 +638,7 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
         added += 1;
         let _ = writeln!(out, "added   {} {label}", sha256.short());
     }
-    save(&manifest_path, &manifest)?;
+    save_checked(&manifest_path, &manifest, &before)?;
     let _ = writeln!(
         out,
         "corpus add: {added} added, {known} already in the corpus, {excluded} excluded, {refused} refused"
@@ -585,6 +654,7 @@ fn tag(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
     let manifest_path = manifest_path(arguments)?;
     let store = required_store(arguments)?;
     let mut manifest = load(&manifest_path, false)?;
+    let before = problems_of(&manifest);
     let everything = arguments.flags.contains("all");
     let (mut tagged, mut failed) = (0_u64, 0_u64);
     for document in &mut manifest.documents {
@@ -616,12 +686,16 @@ fn tag(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
                 tagged += 1;
             }
             Err(error) => {
-                let _ = writeln!(err, "{id}: cannot be tagged: {error}");
+                let _ = writeln!(
+                    err,
+                    "{id}: cannot be tagged: {}",
+                    error.message(document.tier != Tier::T2)
+                );
                 failed += 1;
             }
         }
     }
-    save(&manifest_path, &manifest)?;
+    save_checked(&manifest_path, &manifest, &before)?;
     let _ = writeln!(
         out,
         "corpus tag: {tagged} tagged with tagger version {TAGGER_VERSION}, {failed} failed"
@@ -744,7 +818,11 @@ fn verify(
                 .filter(|path| !expected.contains(path.as_str()))
                 .collect();
             for path in &unexpected {
-                let _ = writeln!(err, "unexpected object in the store: {path}");
+                let _ = writeln!(
+                    err,
+                    "unexpected object in the store: {}",
+                    printable(path, 300)
+                );
             }
             failures += unexpected.len();
             format!("{} unexpected objects", unexpected.len())
@@ -846,4 +924,43 @@ fn stats(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> 
     out.write_all(text.as_bytes())
         .map_err(|error| error.to_string())?;
     Ok(Outcome::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_never_writes_a_manifest_it_made_inconsistent() {
+        let folder =
+            std::env::temp_dir().join(format!("bayan-lab-save-checked-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("manifest.json");
+        let mut manifest = Manifest::default();
+        // A document whose source is not defined, and which is not tagged: problems no command may add.
+        let document = Document {
+            sha256: Sha256::of(b"one"),
+            size: 3,
+            tier: Tier::T1,
+            license: "MIT".to_owned(),
+            provenance: vec![Provenance {
+                source: "missing".to_owned(),
+                path: None,
+            }],
+            scan: None,
+            page_count: None,
+            ground_truth: GroundTruth::default(),
+            notes: None,
+        };
+        manifest.insert(document).unwrap();
+        let problems = problems_of(&manifest);
+        assert!(!problems.is_empty());
+        let error = save_checked(&path, &manifest, &BTreeSet::new()).unwrap_err();
+        assert!(error.contains("would make it inconsistent"), "{error}");
+        assert!(!path.exists());
+        // Problems the manifest had before the command are left for `corpus verify` to report.
+        save_checked(&path, &manifest, &problems).unwrap();
+        assert!(path.exists());
+        fs::remove_dir_all(&folder).unwrap();
+    }
 }

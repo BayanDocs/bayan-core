@@ -15,6 +15,7 @@ pub mod https;
 pub mod s3;
 
 use std::fmt;
+use std::path::Path;
 
 use crate::hash::Sha256;
 
@@ -111,12 +112,12 @@ pub trait Store {
     /// When the store cannot be read, or the object is larger than [`MAX_OBJECT_SIZE`].
     fn get(&self, key: &Key) -> Result<Option<Vec<u8>>, StoreError>;
 
-    /// Stores an object. The caller has computed `key` from `bytes`; storing the same object twice is harmless.
+    /// Stores an object. The caller has computed `key` from `bytes`, which it read from the file `source`; storing the same object twice is harmless. The S3 store sends `source` itself, so that no copy of a document is ever written to a temporary file.
     ///
     /// # Errors
     ///
-    /// When the store cannot be written.
-    fn put(&self, key: &Key, bytes: &[u8]) -> Result<(), StoreError>;
+    /// When the store cannot be written, or `source` no longer holds `bytes`.
+    fn put(&self, key: &Key, bytes: &[u8], source: &Path) -> Result<(), StoreError>;
 
     /// Whether the store has an object.
     ///
@@ -137,14 +138,27 @@ pub trait Store {
 ///
 /// # Errors
 ///
-/// When an S3 or HTTPS address is malformed.
+/// When an S3 or HTTPS address is malformed, or the address starts with any other scheme (`S3://`, `ftp://`, `s3:/…`): a mistyped address must not quietly become a local folder of that name.
 pub fn open(address: &str) -> Result<Box<dyn Store>, StoreError> {
-    if address.starts_with("s3://") {
-        Ok(Box::new(s3::S3Store::from_address(address)?))
-    } else if address.starts_with("https://") || address.starts_with("http://") {
-        Ok(Box::new(https::HttpsStore::from_address(address)?))
-    } else {
-        Ok(Box::new(dir::DirStore::new(address)))
+    // A one-letter "scheme" is a Windows drive letter, as in `C:/corpus`.
+    let scheme = address.split_once(':').filter(|(scheme, _)| {
+        scheme.len() >= 2
+            && scheme.starts_with(|first: char| first.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-'))
+    });
+    match scheme {
+        None => Ok(Box::new(dir::DirStore::new(address))),
+        Some(("s3", rest)) if rest.starts_with("//") => {
+            Ok(Box::new(s3::S3Store::from_address(address)?))
+        }
+        Some(("https" | "http", rest)) if rest.starts_with("//") => {
+            Ok(Box::new(https::HttpsStore::from_address(address)?))
+        }
+        Some((scheme, _)) => Err(StoreError(format!(
+            "`{scheme}:` does not start a store address; use s3://…, https://… or a folder (write ./{scheme}:… for a folder of that name)"
+        ))),
     }
 }
 
@@ -167,6 +181,28 @@ mod tests {
             "licenses/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.txt"
         );
         assert_eq!(Key::from_path(&text.path()), Some(text));
+    }
+
+    #[test]
+    fn unknown_schemes_are_not_folders() {
+        for address in [
+            "S3://bucket/private?endpoint=https://h",
+            "s3:/bucket",
+            "HTTPS://example.org/corpus",
+            "ftp://example.org/corpus",
+            "file:///home/me/store",
+        ] {
+            assert!(open(address).is_err(), "{address} was accepted");
+        }
+        for folder in [
+            "store",
+            "./S3:/x",
+            "C:/corpus/store",
+            "C:\\corpus\\store",
+            "/tmp/a:b",
+        ] {
+            assert!(open(folder).is_ok(), "{folder} was refused");
+        }
         for bad in [
             "objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.docx",
             "objects/b/a7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.docx",

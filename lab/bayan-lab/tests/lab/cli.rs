@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use bayan_lab::cli::{Outcome, run};
 use bayan_lab::hash::Sha256;
-use bayan_lab::manifest::{Manifest, Tier};
+use bayan_lab::manifest::{Document, GroundTruth, Manifest, Provenance, Tier};
 use bayan_lab::store::Key;
 
 use crate::support::{Docx, temporary_folder};
@@ -523,4 +523,285 @@ fn arguments_that_cannot_work() {
         Outcome::Error
     );
     assert_eq!(Outcome::Error.code(), 2);
+}
+
+#[test]
+fn a_document_has_one_tier() {
+    let corpus = Corpus::new("tiers");
+    corpus.add_source();
+    let private = corpus.run(&[
+        "source",
+        "add",
+        "private",
+        "--url",
+        "https://example.invalid/private",
+        "--revision",
+        "1",
+        "--license",
+        "NOASSERTION",
+        "--copyright",
+        "",
+    ]);
+    assert_eq!(private.outcome, Outcome::Success, "{}", private.err);
+    let first = corpus.write("first.docx", &text_document("First"));
+    let second = corpus.write("second.docx", &text_document("Second"));
+    let root = text(&corpus.source).to_owned();
+    // Private first, then the same bytes from a public source: refused, so the private document records no path.
+    let file = text(&corpus.source.join("first.docx")).to_owned();
+    assert_eq!(
+        corpus
+            .run(&["add", "--source", "private", "--tier", "T2", &file])
+            .outcome,
+        Outcome::Success
+    );
+    let public = corpus.run(&["add", "--source", "example", "--root", &root, "first.docx"]);
+    assert_eq!(public.outcome, Outcome::Failed);
+    assert!(
+        public
+            .err
+            .contains("already in the corpus as a T2 document"),
+        "{}",
+        public.err
+    );
+    // Public first, then private: refused, so the public document does not gain a private source.
+    assert_eq!(
+        corpus
+            .run(&["add", "--source", "example", "--root", &root, "second.docx"])
+            .outcome,
+        Outcome::Success
+    );
+    let file = text(&corpus.source.join("second.docx")).to_owned();
+    let private = corpus.run(&["add", "--source", "private", "--tier", "T2", &file]);
+    assert_eq!(private.outcome, Outcome::Failed);
+    assert!(
+        private
+            .err
+            .contains("already in the corpus as a T1 document"),
+        "{}",
+        private.err
+    );
+    let manifest = corpus.manifest();
+    manifest.check().unwrap();
+    assert_eq!(manifest.document(&first).unwrap().provenance.len(), 1);
+    assert_eq!(manifest.document(&second).unwrap().provenance.len(), 1);
+}
+
+#[test]
+fn a_mistyped_store_address_is_not_a_folder() {
+    let corpus = Corpus::new("scheme");
+    corpus.add_source();
+    corpus.write("one.docx", &text_document("One"));
+    let root = text(&corpus.source).to_owned();
+    let manifest = text(&corpus.manifest).to_owned();
+    for store in [
+        "S3://bucket/private?endpoint=https://example.invalid",
+        "s3:/bucket",
+        "file:///tmp/store",
+    ] {
+        let ran = lab(&[
+            "corpus",
+            "add",
+            "--manifest",
+            &manifest,
+            "--store",
+            store,
+            "--source",
+            "example",
+            "--root",
+            &root,
+            "one.docx",
+        ]);
+        assert_eq!(ran.outcome, Outcome::Error, "{store}");
+        assert!(
+            ran.err.contains("does not start a store address"),
+            "{store}: {}",
+            ran.err
+        );
+    }
+    assert!(!std::path::Path::new("S3:").exists() && !std::path::Path::new("s3:").exists());
+}
+
+#[test]
+fn a_refused_source_leaves_nothing_in_the_store() {
+    let corpus = Corpus::new("orphan");
+    let license = format!("LICENSE={}", text(&corpus.source.join("LICENSE")));
+    let refused = corpus.run(&[
+        "source",
+        "add",
+        "Bad_Name",
+        "--url",
+        "http://example.invalid/",
+        "--revision",
+        "1",
+        "--license",
+        "MIT",
+        "--copyright",
+        "Copyright (c) Example",
+        "--license-file",
+        &license,
+    ]);
+    assert_eq!(refused.outcome, Outcome::Error);
+    assert!(
+        refused.err.contains("names use lower-case letters"),
+        "{}",
+        refused.err
+    );
+    assert!(!corpus.store.join("licenses").exists());
+    assert!(!corpus.manifest.exists());
+}
+
+#[test]
+fn empty_notes_are_refused_before_anything_is_stored() {
+    let corpus = Corpus::new("empty-notes");
+    let license = format!("LICENSE={}", text(&corpus.source.join("LICENSE")));
+    let source = corpus.run(&[
+        "source",
+        "add",
+        "example",
+        "--url",
+        "https://example.invalid/repository",
+        "--revision",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--license",
+        "MIT",
+        "--copyright",
+        "Copyright (c) Example",
+        "--license-file",
+        &license,
+        "--notes",
+        "",
+    ]);
+    assert_eq!(source.outcome, Outcome::Error);
+    assert!(
+        source.err.contains("--notes cannot be empty"),
+        "{}",
+        source.err
+    );
+    assert!(!corpus.store.exists());
+    assert!(!corpus.manifest.exists());
+
+    corpus.add_source();
+    let sha256 = corpus.write("one.docx", &text_document("One"));
+    let before = fs::read(&corpus.manifest).unwrap();
+    let root = text(&corpus.source).to_owned();
+    let added = corpus.run(&[
+        "add", "--source", "example", "--root", &root, "--notes", " ", "one.docx",
+    ]);
+    assert_eq!(added.outcome, Outcome::Error);
+    assert!(
+        added.err.contains("--notes cannot be empty"),
+        "{}",
+        added.err
+    );
+    assert!(!corpus.object(sha256).exists());
+    assert_eq!(fs::read(&corpus.manifest).unwrap(), before);
+}
+
+#[test]
+fn names_from_outside_are_printed_harmlessly() {
+    let corpus = Corpus::new("names");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    corpus.write("one.docx", &text_document("One"));
+    assert_eq!(
+        corpus
+            .run(&["add", "--source", "example", "--root", &root, "one.docx"])
+            .outcome,
+        Outcome::Success
+    );
+    // A store file whose name holds terminal escape sequences (some systems refuse such names; then there is nothing to check).
+    let hostile = corpus
+        .store
+        .join("objects")
+        .join("x\u{1b}]0;pwned\u{7}\u{202E}y");
+    if fs::write(&hostile, b"x").is_ok() {
+        let verified = corpus.run(&["verify"]);
+        assert!(
+            verified
+                .err
+                .contains("unexpected object in the store: objects/x?]0;pwned??y"),
+            "{:?}",
+            verified.err
+        );
+        assert!(!verified.err.contains('\u{1b}') && !verified.err.contains('\u{202E}'));
+    }
+}
+
+#[test]
+fn messages_about_private_documents_name_no_part() {
+    let corpus = Corpus::new("parts");
+    corpus.run(&[
+        "source",
+        "add",
+        "private",
+        "--url",
+        "https://example.invalid/private",
+        "--revision",
+        "1",
+        "--license",
+        "NOASSERTION",
+        "--copyright",
+        "",
+    ]);
+    // A part whose name says something about its author, and which is not well-formed.
+    let package = Docx::new("<w:p/>")
+        .part("word/Jane-Doe-diagnosis.xml", "styles", "<w:styles")
+        .bytes();
+    let file = corpus.folder.join("private.docx");
+    fs::write(&file, &package).unwrap();
+    let added = corpus.run(&["add", "--source", "private", "--tier", "T2", text(&file)]);
+    assert_eq!(added.outcome, Outcome::Failed);
+    assert!(
+        added.err.contains("a part: not well-formed XML"),
+        "{}",
+        added.err
+    );
+    assert!(!added.err.to_lowercase().contains("jane"), "{}", added.err);
+    // For a public source, where paths are recorded anyway, the part is named.
+    corpus.add_source();
+    fs::write(corpus.source.join("public.docx"), &package).unwrap();
+    let root = text(&corpus.source).to_owned();
+    let public = corpus.run(&["add", "--source", "example", "--root", &root, "public.docx"]);
+    assert!(
+        public.err.contains("part /word/jane-doe-diagnosis.xml"),
+        "{}",
+        public.err
+    );
+    // `corpus tag` keeps the rule too, for a private document the tagger cannot read: here one in the manifest untagged, as documents are after the tagging rules change.
+    let mut manifest = corpus.manifest();
+    let sha256 = Sha256::of(&package);
+    manifest
+        .insert(Document {
+            sha256,
+            size: u64::try_from(package.len()).unwrap(),
+            tier: Tier::T2,
+            license: "NOASSERTION".to_owned(),
+            provenance: vec![Provenance {
+                source: "private".to_owned(),
+                path: None,
+            }],
+            scan: None,
+            page_count: None,
+            ground_truth: GroundTruth::default(),
+            notes: None,
+        })
+        .unwrap();
+    fs::write(&corpus.manifest, manifest.to_json().unwrap()).unwrap();
+    let object = corpus.object(sha256);
+    fs::create_dir_all(object.parent().unwrap()).unwrap();
+    fs::write(&object, &package).unwrap();
+    let tagged = corpus.run(&["tag"]);
+    assert_eq!(tagged.outcome, Outcome::Failed);
+    assert!(
+        tagged
+            .err
+            .contains("cannot be tagged: a part: not well-formed XML"),
+        "{}",
+        tagged.err
+    );
+    assert!(
+        !tagged.err.to_lowercase().contains("jane"),
+        "{}",
+        tagged.err
+    );
 }

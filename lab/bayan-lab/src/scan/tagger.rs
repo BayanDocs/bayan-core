@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::features::Feature;
+use super::is_hidden_character;
 use super::scripts::{Script, script_of};
 use super::vocabulary::{Ns, namespace};
 use super::xml::{Handler, Name, Start, Text, Value};
@@ -26,6 +27,75 @@ const MAX_INSTRUCTION: usize = 512;
 const MAX_PROPERTY_TEXT: usize = 128;
 /// The most prefixes an `mc:Choice` may require to be chosen; real documents require one or two.
 const MAX_REQUIRED_PREFIXES: usize = 16;
+
+/// The legacy compatibility options, the children of `w:compat` that ECMA-376 Part 1 §17.15.3 defines (besides `w:compatSetting`), sorted. Only these names are recorded, so a document cannot write names of its own choosing into the manifest.
+const COMPATIBILITY_OPTIONS: [&str; 65] = [
+    "adjustLineHeightInTable",
+    "alignTablesRowByRow",
+    "allowSpaceOfSameStyleInTable",
+    "applyBreakingRules",
+    "autoSpaceLikeWord95",
+    "autofitToFirstFixedWidthCell",
+    "balanceSingleByteDoubleByteWidth",
+    "cachedColBalance",
+    "convMailMergeEsc",
+    "displayHangulFixedWidth",
+    "doNotAutofitConstrainedTables",
+    "doNotBreakConstrainedForcedTable",
+    "doNotBreakWrappedTables",
+    "doNotExpandShiftReturn",
+    "doNotLeaveBackslashAlone",
+    "doNotSnapToGridInCell",
+    "doNotSuppressIndentation",
+    "doNotSuppressParagraphBorders",
+    "doNotUseEastAsianBreakRules",
+    "doNotUseHTMLParagraphAutoSpacing",
+    "doNotUseIndentAsNumberingTabStop",
+    "doNotVertAlignCellWithSp",
+    "doNotVertAlignInTxbx",
+    "doNotWrapTextWithPunct",
+    "footnoteLayoutLikeWW8",
+    "forgetLastTabAlignment",
+    "growAutofit",
+    "layoutRawTableWidth",
+    "layoutTableRowsApart",
+    "lineWrapLikeWord6",
+    "mwSmallCaps",
+    "noColumnBalance",
+    "noExtraLineSpacing",
+    "noLeading",
+    "noSpaceRaiseLower",
+    "noTabHangInd",
+    "printBodyTextBeforeHeader",
+    "printColBlack",
+    "selectFldWithFirstOrLastChar",
+    "shapeLayoutLikeWW8",
+    "showBreaksInFrames",
+    "spaceForUL",
+    "spacingInWholePoints",
+    "splitPgBreakAndParaMark",
+    "subFontBySize",
+    "suppressBottomSpacing",
+    "suppressSpBfAfterPgBrk",
+    "suppressSpacingAtTopOfPage",
+    "suppressTopSpacing",
+    "suppressTopSpacingWP",
+    "swapBordersFacingPages",
+    "truncateFontHeightsLikeWP6",
+    "ulTrailSpace",
+    "underlineTabInNumList",
+    "useAltKinsokuLineBreakRules",
+    "useAnsiKerningPairs",
+    "useFELayout",
+    "useNormalStyleForList",
+    "usePrinterMetrics",
+    "useSingleBorderforContiguousCells",
+    "useWord2002TableStyleRules",
+    "useWord97LineBreakRules",
+    "wpJustification",
+    "wpSpaceWidth",
+    "wrapTrailSpaces",
+];
 
 /// The kind of part being scanned, which decides what its elements mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -165,7 +235,12 @@ impl Collected {
 
     fn add_font(&mut self, name: &str) {
         let name = name.trim();
-        if name.is_empty() || name.chars().any(char::is_control) {
+        if name.is_empty() {
+            return;
+        }
+        if name.chars().any(is_hidden_character) {
+            self.notes
+                .insert("a font name with control or invisible characters was not recorded");
             return;
         }
         if name.chars().count() > MAX_FONT_NAME {
@@ -815,10 +890,18 @@ impl<'c> PartTagger<'c> {
             self.tag(Feature::ToggleProperties);
         }
         if parent == Context::Compat && local != "compatSetting" {
-            if is_on(attribute(start, Ns::W, "val")) {
-                self.collected
-                    .compatibility_options
-                    .insert(local.to_owned());
+            match COMPATIBILITY_OPTIONS.binary_search(&local) {
+                Ok(_) if is_on(attribute(start, Ns::W, "val")) => {
+                    self.collected
+                        .compatibility_options
+                        .insert(local.to_owned());
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    self.collected.notes.insert(
+                        "a compatibility option that ECMA-376 does not define was not recorded",
+                    );
+                }
             }
             return Context::Other;
         }
@@ -938,7 +1021,8 @@ impl<'c> PartTagger<'c> {
                     Context::CellProperties => self.table_tag(Feature::CellTextDirection),
                     _ => self.tag(Feature::TextAlignmentAndDirection),
                 }
-                if val(start).is_some_and(|value| !matches!(value.trim(), "lrTb" | "lr")) {
+                // Horizontal text is `lrTb` in Transitional and `tb` in Strict, where `lr` is vertical text read from the bottom up.
+                if val(start).is_some_and(|value| !matches!(value.trim(), "lrTb" | "tb")) {
                     self.tag(Feature::VerticalText);
                 }
             }
@@ -1330,7 +1414,7 @@ impl<'c> PartTagger<'c> {
         let text = text.trim();
         match self.text {
             TextKind::Application => {
-                if text.len() <= MAX_PROPERTY_TEXT && !text.chars().any(char::is_control) {
+                if text.len() <= MAX_PROPERTY_TEXT && !text.chars().any(is_hidden_character) {
                     self.collected.application = application_name(text);
                 }
             }
@@ -1551,6 +1635,15 @@ mod tests {
         ] {
             assert_eq!(application_name(text).as_deref(), name, "{text}");
         }
+    }
+
+    #[test]
+    fn the_compatibility_options_are_sorted_and_unique() {
+        assert!(
+            COMPATIBILITY_OPTIONS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
     }
 
     #[test]

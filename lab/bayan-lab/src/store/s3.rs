@@ -4,7 +4,9 @@
 //!
 //! **Address:** `s3://BUCKET/PREFIX?endpoint=https://HOST&region=REGION`. The prefix is optional; the region defaults to `us-east-1` (Cloudflare R2 uses `auto`). Only HTTPS is accepted, except plain HTTP to the local machine (`127.0.0.1`, `localhost`, `[::1]`) for tests and local servers. Redirects are never followed.
 
-use super::curl::{self, Credentials, Method, Request, TempFile};
+use std::path::Path;
+
+use super::curl::{self, Credentials, Method, Request, Response};
 use super::{Key, MAX_OBJECT_SIZE, Store, StoreError};
 use crate::scan::xml::{self, Handler, Name, Start, Text, XmlLimits};
 
@@ -12,6 +14,14 @@ use crate::scan::xml::{self, Handler, Name, Start, Text, XmlLimits};
 const MAX_LIST_PAGES: usize = 10_000;
 /// The largest listing page accepted, in bytes.
 const MAX_LIST_PAGE: u64 = 16 * 1024 * 1024;
+/// The most objects a listing may report: far more than any corpus, but a bound on memory.
+const MAX_LISTED_OBJECTS: usize = 1_000_000;
+/// The largest response to a PUT or HEAD request accepted, in bytes (neither has a meaningful body).
+const MAX_SMALL_RESPONSE: u64 = 64 * 1024;
+/// The longest key a listing may report, in bytes (S3 allows 1,024).
+const MAX_KEY: usize = 1_024;
+/// The most text kept of one element of a listing, in bytes: room for a key or a continuation token.
+const MAX_TEXT: usize = 4_096;
 
 /// The content type of a stored document.
 const DOCX_CONTENT_TYPE: &str =
@@ -116,22 +126,20 @@ impl S3Store {
         )
     }
 
-    /// Runs one request, signed when the environment holds credentials, and returns the HTTP status. `output` receives the response body; `upload` is sent as the request body of a PUT.
+    /// Runs one request, signed when the environment holds credentials. `upload` is the file sent as the request body of a PUT.
     fn request(
         &self,
         method: Method,
         url: &str,
-        output: &TempFile,
-        upload: Option<(&TempFile, &str)>,
+        upload: Option<(&Path, &str)>,
         max_size: u64,
-    ) -> Result<u16, StoreError> {
+    ) -> Result<Response, StoreError> {
         let credentials: Option<Credentials> = curl::credentials()?;
         let shown = self.redact(url);
         curl::run(&Request {
             method,
             url,
             shown: &shown,
-            output,
             upload,
             max_size,
             local_http: self.local_http,
@@ -159,10 +167,10 @@ impl Store for S3Store {
     }
 
     fn get(&self, key: &Key) -> Result<Option<Vec<u8>>, StoreError> {
-        let output = TempFile::new("get");
         let url = self.object_url(&key.path());
-        match self.request(Method::Get, &url, &output, None, MAX_OBJECT_SIZE)? {
-            200 => output.read(MAX_OBJECT_SIZE).map(Some),
+        let response = self.request(Method::Get, &url, None, MAX_OBJECT_SIZE)?;
+        match response.status {
+            200 => Ok(Some(response.body)),
             404 => Ok(None),
             code => Err(StoreError(format!(
                 "GET {}: HTTP status {code}",
@@ -171,22 +179,29 @@ impl Store for S3Store {
         }
     }
 
-    fn put(&self, key: &Key, bytes: &[u8]) -> Result<(), StoreError> {
-        let upload = TempFile::new("put");
-        upload.write(bytes)?;
-        let output = TempFile::new("put-response");
+    fn put(&self, key: &Key, bytes: &[u8], source: &Path) -> Result<(), StoreError> {
         let url = self.object_url(&key.path());
+        // curl sends the file the bytes were read from, so no copy of the document is written anywhere; a file that changed since is refused.
+        let unchanged = std::fs::metadata(source).is_ok_and(|metadata| {
+            u64::try_from(bytes.len()).is_ok_and(|len| len == metadata.len())
+        });
+        if !unchanged {
+            return Err(StoreError(format!(
+                "PUT {}: the file to send changed since it was read",
+                self.redact(&url)
+            )));
+        }
         let content_type = match key.kind {
             super::Kind::Document => DOCX_CONTENT_TYPE,
             super::Kind::LicenseText => "text/plain; charset=utf-8",
         };
-        match self.request(
+        let response = self.request(
             Method::Put,
             &url,
-            &output,
-            Some((&upload, content_type)),
-            MAX_LIST_PAGE,
-        )? {
+            Some((source, content_type)),
+            MAX_SMALL_RESPONSE,
+        )?;
+        match response.status {
             200 | 201 | 204 => Ok(()),
             code => Err(StoreError(format!(
                 "PUT {}: HTTP status {code}",
@@ -196,9 +211,11 @@ impl Store for S3Store {
     }
 
     fn contains(&self, key: &Key) -> Result<bool, StoreError> {
-        let output = TempFile::new("head");
         let url = self.object_url(&key.path());
-        match self.request(Method::Head, &url, &output, None, MAX_LIST_PAGE)? {
+        match self
+            .request(Method::Head, &url, None, MAX_SMALL_RESPONSE)?
+            .status
+        {
             200 => Ok(true),
             404 => Ok(false),
             code => Err(StoreError(format!(
@@ -229,14 +246,19 @@ impl Store for S3Store {
                     url.push_str("&continuation-token=");
                     url.push_str(&percent_encode(token));
                 }
-                let output = TempFile::new("list");
-                let code = self.request(Method::Get, &url, &output, None, MAX_LIST_PAGE)?;
-                if code != 200 {
+                let response = self.request(Method::Get, &url, None, MAX_LIST_PAGE)?;
+                if response.status != 200 {
                     return Err(StoreError(format!(
-                        "listing the bucket: HTTP status {code}"
+                        "listing the bucket: HTTP status {}",
+                        response.status
                     )));
                 }
-                let listing = parse_listing(&output.read(MAX_LIST_PAGE)?)?;
+                let listing = parse_listing(&response.body)?;
+                if found.len().saturating_add(listing.keys.len()) > MAX_LISTED_OBJECTS {
+                    return Err(StoreError(format!(
+                        "the bucket lists more than {MAX_LISTED_OBJECTS} objects, the limit"
+                    )));
+                }
                 for key in listing.keys {
                     let path = if self.prefix.is_empty() {
                         Some(key.as_str())
@@ -293,6 +315,7 @@ fn parse_listing(bytes: &[u8]) -> Result<Listing, StoreError> {
         listing: Listing,
         path: Vec<String>,
         text: String,
+        too_long: bool,
     }
     impl Handler for Reader {
         fn start(&mut self, start: &Start<'_, '_>) {
@@ -307,6 +330,7 @@ fn parse_listing(bytes: &[u8]) -> Result<Listing, StoreError> {
                 .and_then(|index| self.path.get(index))
                 .map(String::as_str);
             match (parent, name.local) {
+                (Some("Contents"), "Key") if self.text.len() > MAX_KEY => self.too_long = true,
                 (Some("Contents"), "Key") => self.listing.keys.push(std::mem::take(&mut self.text)),
                 (Some("ListBucketResult"), "IsTruncated") => {
                     self.listing.truncated = self.text.trim() == "true"
@@ -320,8 +344,12 @@ fn parse_listing(bytes: &[u8]) -> Result<Listing, StoreError> {
             self.text.clear();
         }
         fn text(&mut self, text: Text<'_>) {
-            if self.text.len() < 4096 {
-                self.text.push_str(&text.decoded());
+            // Keeps a little more than any key or token needs, so an overlong key is recognized as such without holding all of it.
+            for character in text.decoded().chars() {
+                if self.text.len() > MAX_TEXT {
+                    break;
+                }
+                self.text.push(character);
             }
         }
     }
@@ -334,6 +362,11 @@ fn parse_listing(bytes: &[u8]) -> Result<Listing, StoreError> {
     let mut reader = Reader::default();
     xml::scan(bytes, &limits, &mut reader)
         .map_err(|error| StoreError(format!("the bucket listing is not valid: {error}")))?;
+    if reader.too_long {
+        return Err(StoreError(format!(
+            "the bucket listing has a key longer than {MAX_KEY} bytes"
+        )));
+    }
     Ok(reader.listing)
 }
 
@@ -393,6 +426,11 @@ mod tests {
             }
         );
         assert!(parse_listing(b"<!DOCTYPE x><x/>").is_err());
+        let long = format!(
+            "<ListBucketResult><Contents><Key>{}</Key></Contents></ListBucketResult>",
+            "k".repeat(MAX_KEY + 1)
+        );
+        assert!(parse_listing(long.as_bytes()).is_err());
         assert_eq!(percent_encode("a+b/c= d~"), "a%2Bb%2Fc%3D%20d~");
     }
 }

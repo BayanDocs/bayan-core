@@ -50,7 +50,7 @@ impl Store for DirStore {
         Ok(Some(bytes))
     }
 
-    fn put(&self, key: &Key, bytes: &[u8]) -> Result<(), StoreError> {
+    fn put(&self, key: &Key, bytes: &[u8], _: &Path) -> Result<(), StoreError> {
         let path = self.file(key);
         let folder = path
             .parent()

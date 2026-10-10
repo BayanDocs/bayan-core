@@ -669,3 +669,69 @@ proptest! {
         let _ = scan(&with_document(&xml), &Limits::DEFAULT);
     }
 }
+
+#[test]
+fn an_end_record_hidden_in_the_comment_of_another() {
+    // Record B, a copy of the real end record, hides in the comment of record A; both end the file exactly. Readers disagree on which one counts, so the archive is refused.
+    let entries = valid().entries();
+    let real = zip(&entries);
+    let record = real.get(real.len() - 22..).unwrap().to_vec();
+    let disguised = zip_with(
+        &entries,
+        &ZipLayout {
+            comment: record,
+            ..ZipLayout::default()
+        },
+    );
+    assert_eq!(
+        zip_refusal(&disguised),
+        ZipError::Corrupt("two end-of-central-directory records end the file")
+    );
+}
+
+#[test]
+fn compatibility_options_of_a_documents_own_choosing_are_not_recorded() {
+    // Every child of w:compat used to become a recorded option: a million invented names made a 24 MB manifest entry.
+    let mut options = String::from("<w:useFELayout/><w:doNotExpandShiftReturn w:val=\"0\"/>");
+    for number in 0..10_000 {
+        options.push_str(&format!("<w:invented{number}/>"));
+    }
+    let settings = format!(
+        r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>{options}</w:compat></w:settings>"#
+    );
+    let found = scan(
+        &valid()
+            .part("word/settings.xml", "settings", &settings)
+            .bytes(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(
+        found.compatibility_options.into_iter().collect::<Vec<_>>(),
+        ["useFELayout"]
+    );
+    assert!(
+        found
+            .notes
+            .contains("a compatibility option that ECMA-376 does not define was not recorded")
+    );
+}
+
+#[test]
+fn hidden_characters_in_names_are_not_recorded() {
+    // A font name with a right-to-left override could make a reviewer read a report wrongly ("Trojan Source").
+    let table = "<w:fonts xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:font w:name=\"Ari\u{202E}la\"/><w:font w:name=\"Calibri\"/></w:fonts>";
+    let found = scan(
+        &valid()
+            .part("word/fontTable.xml", "fontTable", table)
+            .bytes(),
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(found.fonts.into_iter().collect::<Vec<_>>(), ["Calibri"]);
+    assert!(
+        found
+            .notes
+            .contains("a font name with control or invisible characters was not recorded")
+    );
+}

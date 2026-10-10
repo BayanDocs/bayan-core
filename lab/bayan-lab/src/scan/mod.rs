@@ -99,7 +99,7 @@ impl fmt::Display for ScanError {
             Self::Zip(error) => error.fmt(formatter),
             Self::MissingPart(part) => write!(formatter, "the package has no {part}"),
             Self::NotADocument(what) => write!(formatter, "the main part is {what}, not a .docx document"),
-            Self::Part { part, error } => write!(formatter, "part {}: {error}", printable(part)),
+            Self::Part { part, error } => write!(formatter, "part {}: {error}", printable(part, 100)),
             Self::TooManyParts => formatter.write_str("more parts to read than the limit"),
         }
     }
@@ -113,12 +113,34 @@ impl From<ZipError> for ScanError {
     }
 }
 
-/// A part name for a message: at most 100 characters, with control characters replaced.
-fn printable(name: &str) -> String {
-    name.chars()
-        .take(100)
+impl ScanError {
+    /// The error as a message, with the name of the part at fault only if `name_parts`: a package's part names are chosen by whoever made it, so messages about private documents leave them out.
+    #[must_use]
+    pub fn message(&self, name_parts: bool) -> String {
+        match self {
+            Self::Part { error, .. } if !name_parts => format!("a part: {error}"),
+            _ => self.to_string(),
+        }
+    }
+}
+
+/// Whether a character must not reach a message, a report or the manifest from a document: a control character, or an invisible character that can reorder or hide text (a bidirectional control or a zero-width character), as in "Trojan Source" attacks on reviewers.
+#[must_use]
+pub fn is_hidden_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+        )
+}
+
+/// Text from outside (a part name, a path, a file name) made safe for a message: at most `max_chars` characters, with every [hidden character](is_hidden_character) replaced by `?`.
+#[must_use]
+pub fn printable(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .take(max_chars)
         .map(|character| {
-            if character.is_control() {
+            if is_hidden_character(character) {
                 '?'
             } else {
                 character

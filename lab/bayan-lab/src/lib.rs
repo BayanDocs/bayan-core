@@ -16,7 +16,7 @@
 //! ## Rules this crate keeps
 //!
 //! - **Hostile input:** every document is treated as hostile. The scanner enforces limits on sizes, counts, depth and names, refuses document type declarations, never follows external references, and never runs anything a document contains ([`scan::Limits`]).
-//! - **Privacy:** the tool never prints or records document content. Messages name documents by their SHA-256 and by the provenance path the operator chose to record; reports contain only aggregate numbers (LAB-001, T2 corpus rules).
+//! - **Privacy:** the tool never prints or records a document's text. It records only what it derives: feature names, font and program names, compatibility options from the standard's list, language tags and character counts per script, with control and invisible characters refused. Messages name documents by their SHA-256 and by the provenance path the operator chose to record (never for private documents, whose part names are left out too); reports contain only aggregate numbers (LAB-001, T2 corpus rules).
 //! - **Determinism:** the same documents always give the same manifest, byte for byte, on every platform: ordered maps only, integer arithmetic only, no clock, no locale.
 //!
 //! ## Layer

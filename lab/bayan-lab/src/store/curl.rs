@@ -1,19 +1,25 @@
 //! HTTP requests through the `curl` program, shared by the S3 and HTTPS stores.
 //!
-//! Every supported platform has curl (Windows 10 and later include it), so the lab needs no HTTP or TLS library of its own, as xtask's crates.io requests do. Each request runs one curl process that reads no personal configuration file (`--disable`), allows only HTTPS (or plain HTTP to this machine, for tests and local servers), never follows a redirect, caps the response size and the time, and writes the response body to a temporary file that is deleted afterwards.
+//! Every supported platform has curl (Windows 10 and later include it), so the lab needs no HTTP or TLS library of its own, as xtask's crates.io requests do. Each request runs one curl process that reads no personal configuration file (`--disable`), allows only HTTPS (or plain HTTP to this machine, for tests and local servers), never follows a redirect, expands no URL patterns (`--globoff`), and has a time limit. The response body comes back through a pipe, and this module stops reading, and stops curl, as soon as the body exceeds the request's limit, whatever curl's version; no document is ever written to a temporary file. An upload is read by curl from the file the document was read from. Transient failures (no connection, a timeout, a broken transfer, or HTTP status 408, 429 or 5xx) are retried up to three times, each time from the start, so a failed response can never mix with a later one.
 //!
 //! **Credentials** come only from the environment variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN`, and only the S3 store uses them. curl signs requests with AWS Signature Version 4 itself (`--aws-sigv4`, curl 7.75 or later): the tool implements no cryptography. The credentials are handed to curl on its standard input (`--config -`), never on its command line, where other users of the machine could see them, and they never appear in messages.
 
-use std::fs;
-use std::io::Write as _;
-use std::path::PathBuf;
+use std::io::{Read, Write as _};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use super::StoreError;
 
 /// How long one request may take, in seconds.
 const MAX_SECONDS: &str = "600";
+/// How often a request that failed transiently is tried again.
+const RETRIES: u32 = 3;
+/// The most of curl's standard error kept for messages, in bytes.
+const MAX_ERROR_OUTPUT: u64 = 64 * 1024;
+/// Starts the line on curl's standard error that carries the HTTP status (`--write-out`).
+const STATUS_MARKER: &str = "bayan-lab-http-status:";
 
 /// An HTTP method the stores use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +95,7 @@ fn quote(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Checks an endpoint such as `https://s3.example.com` or `http://127.0.0.1:9000`: a scheme and a host with an optional port, nothing else. Returns it without a trailing `/`, and whether it is plain HTTP to this machine.
+/// Checks an endpoint such as `https://s3.example.com`, `https://[2001:db8::1]:8443` or `http://127.0.0.1:9000`: a scheme and a host (a name, or an IPv6 address in brackets) with an optional port, nothing else. Returns it without a trailing `/`, and whether it is plain HTTP to this machine.
 ///
 /// # Errors
 ///
@@ -99,17 +105,39 @@ pub fn endpoint(text: &str) -> Result<(String, bool), &'static str> {
     let (scheme, host) = text
         .split_once("://")
         .ok_or("the address must start with https://")?;
-    let host_ok = !host.is_empty()
-        && host.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
-        });
-    if !host_ok {
-        return Err("the host must be a host name with an optional port, without user names");
+    let (hostname, port) = match host.strip_prefix('[') {
+        Some(rest) => {
+            let (address, after) = rest
+                .split_once(']')
+                .ok_or("an IPv6 address must end with `]`")?;
+            if address.is_empty()
+                || !address
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.'))
+            {
+                return Err("the brackets must hold an IPv6 address");
+            }
+            (&host[..address.len() + 2], after.strip_prefix(':'))
+        }
+        None => match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        },
+    };
+    let name_ok = hostname.starts_with('[')
+        || (!hostname.is_empty()
+            && hostname
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')));
+    let port_ok = port.is_none_or(|port| {
+        !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let rest_ok = host.len() == hostname.len() + port.map_or(0, |port| port.len() + 1);
+    if !name_ok || !port_ok || !rest_ok {
+        return Err(
+            "the host must be a host name with an optional port, without user names or paths",
+        );
     }
-    let hostname = host
-        .rsplit_once(':')
-        .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
-        .map_or(host, |(name, _)| name);
     let local = matches!(hostname, "127.0.0.1" | "localhost" | "[::1]");
     match scheme {
         "https" => Ok((text.to_owned(), false)),
@@ -131,55 +159,6 @@ pub fn is_simple_path(path: &str) -> bool {
         })
 }
 
-/// A file in the temporary directory, deleted when dropped.
-pub struct TempFile {
-    path: PathBuf,
-}
-
-impl TempFile {
-    /// A new, unused name for a temporary file; the file is created by whoever writes it.
-    pub fn new(purpose: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let number = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "bayan-lab-{}-{number}-{purpose}",
-            std::process::id()
-        ));
-        Self { path }
-    }
-
-    /// Writes the file.
-    ///
-    /// # Errors
-    ///
-    /// When it cannot be written.
-    pub fn write(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        fs::write(&self.path, bytes)
-            .map_err(|error| StoreError(format!("cannot stage the upload: {error}")))
-    }
-
-    /// Reads the file, which may hold at most `limit` bytes.
-    ///
-    /// # Errors
-    ///
-    /// When it cannot be read or is larger than `limit`.
-    pub fn read(&self, limit: u64) -> Result<Vec<u8>, StoreError> {
-        let bytes = fs::read(&self.path)
-            .map_err(|error| StoreError(format!("cannot read curl's output: {error}")))?;
-        if !u64::try_from(bytes.len()).is_ok_and(|len| len <= limit) {
-            return Err(StoreError("a response is larger than the limit".to_owned()));
-        }
-        Ok(bytes)
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        // Nothing to do if it was never written.
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 /// One request.
 pub struct Request<'a> {
     /// The method.
@@ -188,10 +167,8 @@ pub struct Request<'a> {
     pub url: &'a str,
     /// The URL as messages show it, without parts that need not be shown.
     pub shown: &'a str,
-    /// Receives the response body.
-    pub output: &'a TempFile,
-    /// The request body of a PUT and its content type.
-    pub upload: Option<(&'a TempFile, &'a str)>,
+    /// For a PUT: the file to send, and its content type.
+    pub upload: Option<(&'a Path, &'a str)>,
     /// The largest response body accepted, in bytes.
     pub max_size: u64,
     /// Plain HTTP to this machine instead of HTTPS.
@@ -200,31 +177,65 @@ pub struct Request<'a> {
     pub signing: Option<(&'a Credentials, &'a str)>,
 }
 
-/// Runs curl for one request and returns the HTTP status.
+/// A response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    /// The HTTP status.
+    pub status: u16,
+    /// The body (for a HEAD request, the headers).
+    pub body: Vec<u8>,
+}
+
+/// How one attempt ended.
+enum Attempt {
+    /// A response arrived.
+    Done(Response),
+    /// The request failed in a way that may pass, such as a refused connection or a busy server.
+    Transient(StoreError),
+}
+
+/// Runs a request, trying again after transient failures, and returns the response.
 ///
 /// # Errors
 ///
-/// When curl cannot run or the request fails before an HTTP status arrives.
-pub fn run(request: &Request<'_>) -> Result<u16, StoreError> {
+/// When curl cannot run, the response is larger than the request's limit, or the request still fails after the retries.
+pub fn run(request: &Request<'_>) -> Result<Response, StoreError> {
+    let mut delay = Duration::from_secs(1);
+    for attempt in 0..=RETRIES {
+        match run_once(request)? {
+            Attempt::Done(response) => return Ok(response),
+            Attempt::Transient(error) if attempt == RETRIES => return Err(error),
+            Attempt::Transient(_) => {
+                thread::sleep(delay);
+                delay = delay.saturating_mul(2);
+            }
+        }
+    }
+    Err(StoreError(format!(
+        "{} {}: the request failed",
+        request.method.name(),
+        request.shown
+    )))
+}
+
+/// Runs curl once.
+fn run_once(request: &Request<'_>) -> Result<Attempt, StoreError> {
+    let shown = format!("{} {}", request.method.name(), request.shown);
     let mut command = Command::new("curl");
     // `--disable` must come first: it stops curl from reading a personal configuration file (.curlrc) that could change what it does.
     command.args([
         "--disable",
         "--silent",
         "--show-error",
+        "--globoff",
         "--max-time",
         MAX_SECONDS,
-        "--retry",
-        "3",
     ]);
     if request.local_http {
         command.args(["--proto", "=http", "--noproxy", "*"]);
     } else {
         command.args(["--proto", "=https", "--tlsv1.2"]);
     }
-    command
-        .arg("--max-filesize")
-        .arg(request.max_size.to_string());
     match request.method {
         Method::Get => {}
         Method::Head => {
@@ -234,14 +245,26 @@ pub fn run(request: &Request<'_>) -> Result<u16, StoreError> {
             command.args(["--request", "PUT"]);
         }
     }
+    // Lets curl stop early when a server announces a larger body; the limit below holds anyway. Not for HEAD: its response has no body, and curl would compare the announced size of the object itself.
+    if request.method != Method::Head {
+        command
+            .arg("--max-filesize")
+            .arg(request.max_size.to_string());
+    }
     if let Some((file, content_type)) = request.upload {
-        command.arg("--upload-file").arg(&file.path);
+        // An absolute path is never `-`, which curl would read as its standard input.
+        let file = std::path::absolute(file).map_err(|error| {
+            StoreError(format!("{shown}: cannot find the file to send: {error}"))
+        })?;
+        command.arg("--upload-file").arg(file);
         command
             .arg("--header")
             .arg(format!("Content-Type: {content_type}"));
     }
-    command.arg("--output").arg(&request.output.path);
-    command.args(["--write-out", "%{http_code}"]);
+    command.args(["--output", "-"]);
+    command
+        .arg("--write-out")
+        .arg(format!("%{{stderr}}\n{STATUS_MARKER}%{{http_code}}\n"));
     if let Some((_, region)) = request.signing {
         command
             .arg("--aws-sigv4")
@@ -272,31 +295,113 @@ pub fn run(request: &Request<'_>) -> Result<u16, StoreError> {
                 quote(token)
             ));
         }
-        stdin
-            .write_all(config.as_bytes())
-            .map_err(|error| StoreError(format!("cannot pass the credentials to curl: {error}")))?;
+        // Dropping `stdin` at the end of this block closes it, so curl reads the configuration to its end.
+        if let Err(error) = stdin.write_all(config.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(StoreError(format!(
+                "cannot pass the credentials to curl: {error}"
+            )));
+        }
     }
-    let result = child
-        .wait_with_output()
-        .map_err(|error| StoreError(format!("curl failed: {error}")))?;
-    let status = String::from_utf8_lossy(&result.stdout);
-    let code = status.trim().parse::<u16>().unwrap_or(0);
-    if !result.status.success() || code == 0 {
-        let message = String::from_utf8_lossy(&result.stderr);
-        return Err(StoreError(format!(
-            "{} {}: curl failed ({}): {}",
-            request.method.name(),
-            request.shown,
-            result.status,
-            message.trim()
-        )));
+    // Standard error is read on its own thread, so neither pipe can fill up and stop curl.
+    let stderr = child.stderr.take();
+    let errors = thread::spawn(move || {
+        let mut text = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = (&mut stderr).take(MAX_ERROR_OUTPUT).read_to_end(&mut text);
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        }
+        text
+    });
+    let read = match child.stdout.take() {
+        Some(stdout) => read_body(stdout, request.max_size),
+        None => Ok(Some(Vec::new())),
+    };
+    if !matches!(read, Ok(Some(_))) {
+        let _ = child.kill();
     }
-    Ok(code)
+    let status = child
+        .wait()
+        .map_err(|error| StoreError(format!("{shown}: curl failed: {error}")))?;
+    let errors = errors.join().unwrap_or_default();
+    let body = match read {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return Err(StoreError(format!(
+                "{shown}: the response is larger than the limit of {} bytes",
+                request.max_size
+            )));
+        }
+        Err(error) => {
+            return Err(StoreError(format!(
+                "{shown}: cannot read curl's output: {error}"
+            )));
+        }
+    };
+    let errors = String::from_utf8_lossy(&errors);
+    let mut code = 0_u16;
+    let mut message = Vec::new();
+    for line in errors.lines() {
+        match line.strip_prefix(STATUS_MARKER) {
+            Some(value) => code = value.trim().parse().unwrap_or(0),
+            None if !line.trim().is_empty() => message.push(line.trim()),
+            None => {}
+        }
+    }
+    match status.code() {
+        Some(0) if code != 0 => {}
+        // curl stopped because the server announced a body larger than `--max-filesize`.
+        Some(63) => {
+            return Err(StoreError(format!(
+                "{shown}: the response is larger than the limit of {} bytes",
+                request.max_size
+            )));
+        }
+        exit => {
+            let error = StoreError(format!(
+                "{shown}: curl failed ({status}): {}",
+                message.join(" ")
+            ));
+            // Failures to resolve, connect, send or receive, and timeouts, may pass; anything else (a refused certificate, a malformed address, an unreadable upload) will not.
+            return if matches!(exit, Some(5 | 6 | 7 | 28 | 35 | 52 | 55 | 56)) {
+                Ok(Attempt::Transient(error))
+            } else {
+                Err(error)
+            };
+        }
+    }
+    if matches!(code, 408 | 429) || (500..600).contains(&code) {
+        return Ok(Attempt::Transient(StoreError(format!(
+            "{shown}: HTTP status {code}"
+        ))));
+    }
+    Ok(Attempt::Done(Response { status: code, body }))
+}
+
+/// Reads a response body of at most `max_size` bytes; `None` if it is larger, after reading no more than one byte too many.
+fn read_body(reader: impl Read, max_size: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut body = Vec::new();
+    reader
+        .take(max_size.saturating_add(1))
+        .read_to_end(&mut body)?;
+    Ok(u64::try_from(body.len())
+        .is_ok_and(|len| len <= max_size)
+        .then_some(body))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bodies_stop_at_their_limit() {
+        assert_eq!(read_body(&b"abc"[..], 3).unwrap(), Some(b"abc".to_vec()));
+        assert_eq!(read_body(&b"abcd"[..], 3).unwrap(), None);
+        // An endless body is read only to one byte past the limit.
+        assert_eq!(read_body(std::io::repeat(7), 1_000).unwrap(), None);
+        assert_eq!(read_body(&b""[..], 0).unwrap(), Some(Vec::new()));
+    }
 
     #[test]
     fn endpoints_are_https_or_local() {
@@ -308,6 +413,14 @@ mod tests {
             endpoint("http://127.0.0.1:9000"),
             Ok(("http://127.0.0.1:9000".to_owned(), true))
         );
+        assert_eq!(
+            endpoint("http://[::1]:9000"),
+            Ok(("http://[::1]:9000".to_owned(), true))
+        );
+        assert_eq!(
+            endpoint("https://[2001:db8::1]:8443"),
+            Ok(("https://[2001:db8::1]:8443".to_owned(), false))
+        );
         for bad in [
             "s3.example.com",
             "http://example.com",
@@ -315,6 +428,13 @@ mod tests {
             "https://user@example.com",
             "https://example.com/path",
             "https://",
+            "https://h[1-3].example.com",
+            "https://s3-{a,b}.example.com",
+            "https://[1-3]",
+            "https://[::1]x",
+            "https://example.com:",
+            "https://example.com:443:1",
+            "https://example.com:http",
         ] {
             assert!(endpoint(bad).is_err(), "{bad} was accepted");
         }
@@ -324,7 +444,7 @@ mod tests {
     fn paths_and_configuration_values() {
         assert!(is_simple_path(""));
         assert!(is_simple_path("public/v1_2-x.y"));
-        for bad in ["/a", "a/", "a//b", "a/../b", ".", "a b", "a%2Fb"] {
+        for bad in ["/a", "a/", "a//b", "a/../b", ".", "a b", "a%2Fb", "a[1]"] {
             assert!(!is_simple_path(bad), "{bad} was accepted");
         }
         assert_eq!(quote(r#"a"b\c"#), r#"a\"b\\c"#);

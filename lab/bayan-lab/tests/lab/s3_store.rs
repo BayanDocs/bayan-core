@@ -8,10 +8,13 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bayan_lab::hash::Sha256;
+use bayan_lab::store::curl::{self, Method};
+use bayan_lab::store::{self, Key};
 
 use crate::support::{Docx, temporary_folder};
 
@@ -46,6 +49,8 @@ struct FakeS3 {
     port: u16,
     objects: Objects,
     requests: Requests,
+    /// How many of the next requests fail with HTTP status 503, as a busy server's do.
+    failures: Arc<AtomicU32>,
 }
 
 impl FakeS3 {
@@ -54,17 +59,23 @@ impl FakeS3 {
         let port = listener.local_addr().unwrap().port();
         let objects = Objects::default();
         let requests = Requests::default();
-        let (shared_objects, shared_requests) = (Arc::clone(&objects), Arc::clone(&requests));
+        let failures = Arc::new(AtomicU32::new(0));
+        let (shared_objects, shared_requests, shared_failures) = (
+            Arc::clone(&objects),
+            Arc::clone(&requests),
+            Arc::clone(&failures),
+        );
         // The thread serves until the test program ends.
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let _ = serve(stream, &shared_objects, &shared_requests);
+                let _ = serve(stream, &shared_objects, &shared_requests, &shared_failures);
             }
         });
         Self {
             port,
             objects,
             requests,
+            failures,
         }
     }
 
@@ -120,7 +131,12 @@ fn respond(
     stream.flush()
 }
 
-fn serve(mut stream: TcpStream, objects: &Objects, requests: &Requests) -> std::io::Result<()> {
+fn serve(
+    mut stream: TcpStream,
+    objects: &Objects,
+    requests: &Requests,
+    failures: &AtomicU32,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -159,6 +175,19 @@ fn serve(mut stream: TcpStream, objects: &Objects, requests: &Requests) -> std::
     reader.read_exact(&mut body)?;
     let request = Request { body, ..request };
     requests.lock().unwrap().push(request.clone());
+    if failures
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return respond(
+            &mut stream,
+            "503 Service Unavailable",
+            b"busy, try again",
+            true,
+        );
+    }
 
     let (path, query) = request
         .target
@@ -206,6 +235,18 @@ fn serve(mut stream: TcpStream, objects: &Objects, requests: &Requests) -> std::
         return respond(&mut stream, "400 Bad Request", b"", true);
     };
     let key = percent_decode(key);
+    // An object whose response headers alone (80 KiB) exceed the limit of a HEAD request (64 KiB), and announce no size that curl could check.
+    if key == "padded-headers" {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n"
+        )?;
+        for line in 0..10 {
+            write!(stream, "X-Padding-{line}: {}\r\n", "a".repeat(8 * 1024))?;
+        }
+        write!(stream, "\r\n")?;
+        return stream.flush();
+    }
     match request.method.as_str() {
         "PUT" => {
             objects.lock().unwrap().insert(key, request.body);
@@ -446,4 +487,83 @@ fn a_corpus_kept_in_an_s3_bucket() {
         "{}",
         stderr(&written)
     );
+}
+
+/// One request through the shared curl layer, unsigned, as the stores make it.
+fn request(
+    server: &FakeS3,
+    method: Method,
+    key: &str,
+    max_size: u64,
+) -> Result<curl::Response, bayan_lab::store::StoreError> {
+    let url = format!("http://127.0.0.1:{}/{BUCKET}/{key}", server.port);
+    curl::run(&curl::Request {
+        method,
+        url: &url,
+        shown: &url,
+        upload: None,
+        max_size,
+        local_http: true,
+        signing: None,
+    })
+}
+
+#[test]
+fn responses_are_limited_and_a_retry_starts_afresh() {
+    let server = FakeS3::start();
+    let object = b"the bytes of an object, more than ten of them".to_vec();
+    server
+        .objects
+        .lock()
+        .unwrap()
+        .insert("object".to_owned(), object.clone());
+    // A response larger than its limit is refused: here curl stops it, because the server announces its size (`--max-filesize`).
+    let error = request(&server, Method::Get, "object", 10).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("larger than the limit of 10 bytes"),
+        "{error}"
+    );
+    // A response that announces no size is cut off by the tool itself, which stops reading and stops curl one byte past the limit, whatever curl's version.
+    let error = request(&server, Method::Head, "padded-headers", 64 * 1024).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("larger than the limit of 65536 bytes"),
+        "{error}"
+    );
+    // A busy server's answer is not mixed into the retried one (curl's own --retry would append both bodies to its output).
+    server.take_requests();
+    server.failures.store(1, Ordering::SeqCst);
+    let response = request(&server, Method::Get, "object", 1024).unwrap();
+    assert_eq!((response.status, response.body), (200, object));
+    assert_eq!(server.take_requests().len(), 2);
+}
+
+#[test]
+fn large_objects_are_found_without_reading_them() {
+    // A HEAD request has no body, so no size limit applies to the object it asks about (18 MiB here, above the 16 MiB listing limit and the 64 KiB response limit).
+    let server = FakeS3::start();
+    let bytes = vec![0_u8; 18 * 1024 * 1024];
+    let key = Key::document(Sha256::of(&bytes));
+    server
+        .objects
+        .lock()
+        .unwrap()
+        .insert(format!("public/v1/{}", key.path()), bytes);
+    let s3 = store::open(&server.address()).unwrap();
+    assert!(s3.contains(&key).unwrap());
+    let https = store::open(&format!(
+        "http://127.0.0.1:{}/{BUCKET}/public/v1",
+        server.port
+    ))
+    .unwrap();
+    assert!(https.contains(&key).unwrap());
+    assert!(
+        !https
+            .contains(&Key::document(Sha256::of(b"absent")))
+            .unwrap()
+    );
+    assert_eq!(https.list().unwrap(), None);
 }

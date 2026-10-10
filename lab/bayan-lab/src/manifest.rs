@@ -513,6 +513,13 @@ fn check_source(name: &str, source: &Source, problems: &mut Vec<String>) {
     if source.license_texts.is_empty() && source.license != NO_ASSERTION {
         problems.push(format!("source `{name}`: no license text"));
     }
+    if let Some(notes) = &source.notes
+        && notes.trim().is_empty()
+    {
+        problems.push(format!(
+            "source `{name}`: notes are empty; leave them out instead"
+        ));
+    }
     if !source
         .license_texts
         .windows(2)
@@ -566,14 +573,14 @@ fn check_scan(id: &str, scan: &Scan, problems: &mut Vec<String>) {
     }
 }
 
-/// Whether `path` is a relative path that stays inside its root: `/`-separated, without empty, `.` or `..` segments, backslashes or control characters.
+/// Whether `path` is a relative path that stays inside its root on every platform: `/`-separated, without empty, `.` or `..` segments, backslashes, colons (`C:` would name a Windows drive, `a.docx:stream` an alternate data stream) or control characters.
 #[must_use]
 pub fn is_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path
             .chars()
-            .any(|character| character == '\\' || character.is_control())
+            .any(|character| matches!(character, '\\' | ':') || character.is_control())
         && path
             .split('/')
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
@@ -678,7 +685,11 @@ mod tests {
         manifest.documents.push(document);
         let mut private = self::document(b"four", "secret.docx");
         private.tier = Tier::T2;
+        private.notes = Some(" ".into());
         manifest.documents.push(private);
+        if let Some(source) = manifest.sources.get_mut("example") {
+            source.notes = Some(String::new());
+        }
         let problems = manifest.check().unwrap_err().to_string();
         for expected in [
             "not sorted",
@@ -691,12 +702,18 @@ mod tests {
             "cannot be detected by scanning",
             "private (T2) document's license must be NOASSERTION",
             "private (T2) document must not record paths",
+            "source `example`: notes are empty",
         ] {
             assert!(
                 problems.contains(expected),
                 "missing {expected:?} in:\n{problems}"
             );
         }
+        let empty_notes = format!("{}: notes are empty", Sha256::of(b"four").short());
+        assert!(
+            problems.contains(&empty_notes),
+            "missing {empty_notes:?} in:\n{problems}"
+        );
     }
 
     #[test]
@@ -725,7 +742,18 @@ mod tests {
         for good in ["a", "a/b.docx", "test-data/document/Bug 1.docx"] {
             assert!(is_relative_path(good), "{good}");
         }
-        for bad in ["", "/a", "a/../b", "./a", "a//b", "a\\b", "a/\u{0}"] {
+        for bad in [
+            "",
+            "/a",
+            "a/../b",
+            "./a",
+            "a//b",
+            "a\\b",
+            "a/\u{0}",
+            "C:/Users/me/secret.docx",
+            "a/C:",
+            "a.docx:stream",
+        ] {
             assert!(!is_relative_path(bad), "{bad:?}");
         }
     }

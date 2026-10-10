@@ -25,8 +25,9 @@ The scanner treats every package as hostile ([Fidelity Lab specification §3](ht
 | Items in `[Content_Types].xml` or one relationships part | 10,000 | |
 | Fonts, languages recorded | 200, 100 | the lists say so in a note when cut |
 | Nested fields followed | 64 | |
+| Compatibility options recorded | the 65 that ECMA-376 defines | no names of a document's own choosing |
 
-A package is refused, with an error that names the problem, when it is an OLE compound file (an encrypted document or a binary `.doc`), when its ZIP structure is ambiguous or damaged (the end-of-central-directory record must end the file; local headers must agree with the central directory; entries must not overlap; CRC-32 and sizes must match; names must be relative paths inside the archive, unique even when compared case-insensitively and after percent-decoding; no encryption, no symbolic links, no spanning several disks, only stored and DEFLATE entries), when an XML part is not well-formed or has a document type declaration (so no entity can be declared or expanded), or when a limit is exceeded. The tests in `lab/bayan-lab/tests/lab/hostile_packages.rs` build a crafted file for each case.
+A package is refused, with an error that names the problem, when it is an OLE compound file (an encrypted document or a binary `.doc`), when its ZIP structure is ambiguous or damaged (the end-of-central-directory record must end the file, and only one may; local headers must agree with the central directory; entries must not overlap; CRC-32 and sizes must match; names must be relative paths inside the archive, unique even when compared case-insensitively and after percent-decoding; no encryption, no symbolic links, no spanning several disks, only stored and DEFLATE entries), when an XML part is not well-formed or has a document type declaration (so no entity can be declared or expanded), or when a limit is exceeded. The tests in `lab/bayan-lab/tests/lab/hostile_packages.rs` build a crafted file for each case.
 
 ## What is read
 
@@ -257,7 +258,7 @@ An `EQ` field tags "Combine characters, two lines in one, enclosed characters", 
 | Kinsoku (line-breaking rules) incl. custom lists | `w:kinsoku`, `w:noLineBreaksBefore`, `w:noLineBreaksAfter` |
 | Auto-spacing between Asian and Latin text and numbers | `w:autoSpaceDE`, `w:autoSpaceDN` |
 | Character grid | `w:docGrid` of type `linesAndChars` or `snapToChars` |
-| Vertical text | a text direction other than left to right, top to bottom |
+| Vertical text | a text direction other than left to right, top to bottom (`lrTb`, which Strict spells `tb`; Strict's `lr` is vertical text read from the bottom up) |
 | Combine characters, two lines in one, enclosed characters | `w:eastAsianLayout` with `combine` or `vert`, or an `EQ` field |
 | Indic and Southeast Asian shaping and breaking | the text has characters of an Indic or Southeast Asian script (Devanagari to Malayalam, Sinhala, Thai, Lao, Tibetan, Myanmar, Khmer) |
 
@@ -267,10 +268,10 @@ An `EQ` field tags "Combine characters, two lines in one, enclosed characters", 
 |---|---|
 | Compatibility mode 15 (Word 2013+) | `compatibilityMode` 15 or higher |
 | Compatibility modes 14, 12, 11 | `compatibilityMode` 14, 12 or 11 |
-| Individual legacy compatibility options (dozens) | any child of `w:compat` other than `w:compatSetting`, switched on; the options themselves are listed in `compatibility.options` |
+| Individual legacy compatibility options (dozens) | one of the 65 options that ECMA-376 Part 1 §17.15.3 defines as children of `w:compat`, switched on; the options themselves are listed in `compatibility.options`. Other names are not recorded (a note says so), so a document cannot write words of its own into the manifest. |
 
 ## Fonts, languages and scripts
 
-- **Fonts:** the names in the font table (`w:font w:name`), in `w:rFonts` (`ascii`, `hAnsi`, `eastAsia`, `cs`), and in DrawingML text and charts (`a:latin`, `a:ea`, `a:cs`, `a:sym`; references to the theme such as `+mn-lt` are not names), plus the theme's fonts for the slots that `w:rFonts` refers to (`minorHAnsi` and so on). Names are trimmed; empty names and names with control characters are ignored.
+- **Fonts:** the names in the font table (`w:font w:name`), in `w:rFonts` (`ascii`, `hAnsi`, `eastAsia`, `cs`), and in DrawingML text and charts (`a:latin`, `a:ea`, `a:cs`, `a:sym`; references to the theme such as `+mn-lt` are not names), plus the theme's fonts for the slots that `w:rFonts` refers to (`minorHAnsi` and so on). Names are trimmed; empty names are ignored, and names with control characters or invisible characters that could reorder or hide text (bidirectional controls, zero-width characters) are left out with a note.
 - **Languages:** `w:val` of `w:lang` and `w:themeFontLang`, put in canonical case. Their `w:eastAsia` and `w:bidi` tags count only if the text holds East Asian or complex-script characters respectively, because Word declares them in nearly every document whatever its text. A tag that is not well-formed is left out with a note.
 - **Scripts:** each character of the stories' text is assigned a script by its Unicode block (`scan/scripts.rs`, 35 scripts); characters that all scripts share, such as digits, punctuation, spaces and symbols, are not counted.

@@ -134,6 +134,29 @@ fn strict_documents_are_recognized() {
     let found = scan(&zip(&entries), &Limits::DEFAULT).unwrap();
     assert!(has(&found, Feature::StrictNamespaces));
     assert_eq!(script(&found, Script::Latin), 6);
+    // Strict spells text directions differently: `tb` is horizontal, `lr` vertical, read from the bottom up.
+    for (direction, vertical) in [
+        ("tb", false),
+        ("lr", true),
+        ("rl", true),
+        ("lrTb", false),
+        ("tbRl", true),
+    ] {
+        let mut entries = entries.clone();
+        let paragraph = format!(
+            r#"<w:p><w:pPr><w:textDirection w:val="{direction}"/></w:pPr><w:r><w:t>Strict</w:t></w:r></w:p>"#
+        );
+        if let Some(entry) = entries.last_mut() {
+            *entry = ZipEntry::stored(
+                "word/document.xml",
+                document
+                    .replace("<w:p><w:r><w:t>Strict</w:t></w:r></w:p>", &paragraph)
+                    .as_bytes(),
+            );
+        }
+        let found = scan(&zip(&entries), &Limits::DEFAULT).unwrap();
+        assert_eq!(has(&found, Feature::VerticalText), vertical, "{direction}");
+    }
 }
 
 /// A complex field whose instruction is split over several runs, as Word often writes it.
