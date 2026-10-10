@@ -1384,9 +1384,11 @@ impl<'c> PartTagger<'c> {
             // Fields.
             "fldSimple" => {
                 self.tag(Feature::Fields);
-                let instruction = attribute(start, Ns::W, "instr")
-                    .map(|value| value.decoded().into_owned())
-                    .unwrap_or_default();
+                // Only the start of the instruction counts, as for a field written with w:instrText, so that both forms are tagged alike.
+                let mut instruction = String::new();
+                if let Some(value) = attribute(start, Ns::W, "instr") {
+                    push_limited(&mut instruction, &value.decoded(), MAX_INSTRUCTION);
+                }
                 let in_table = self.cell_depth > 0;
                 self.classify_field(&instruction, in_table);
             }

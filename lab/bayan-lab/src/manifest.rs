@@ -100,7 +100,7 @@ pub enum Tier {
     T1,
     /// Private: real-world documents that are never redistributed.
     T2,
-    /// Torture: known-hard documents, public or private as their licenses allow.
+    /// Torture: known-hard documents. The tools treat the tier as public, like T0 and T1; a hard document that cannot be redistributed belongs in T2.
     T3,
 }
 
@@ -114,6 +114,12 @@ impl Tier {
             Self::T2 => "T2",
             Self::T3 => "T3",
         }
+    }
+
+    /// Whether the tier is private (T2): its documents are never redistributed, record no paths, carry no license, and no message names their parts.
+    #[must_use]
+    pub const fn is_private(self) -> bool {
+        matches!(self, Self::T2)
     }
 }
 
@@ -714,6 +720,90 @@ mod tests {
             problems.contains(&empty_notes),
             "missing {empty_notes:?} in:\n{problems}"
         );
+    }
+
+    #[test]
+    fn every_rule_names_its_problem() {
+        // A valid manifest with one fault at a time, so that each rule is seen to fire on its own.
+        type Fault = Box<dyn Fn(&mut Manifest)>;
+        let id = manifest().documents[0].sha256.short();
+        let cases: Vec<(&str, Fault)> = vec![
+            ("size is 0", Box::new(|m| m.documents[0].size = 0)),
+            (
+                "differs from the license `MIT` of its first source `example`",
+                Box::new(|m| m.documents[0].license = "Apache-2.0".into()),
+            ),
+            (
+                "the same provenance is recorded twice",
+                Box::new(|m| {
+                    let again = m.documents[0].provenance[0].clone();
+                    m.documents[0].provenance.push(again);
+                }),
+            ),
+            (
+                "no provenance",
+                Box::new(|m| m.documents[0].provenance.clear()),
+            ),
+            (
+                "ground truth is produced but its Word build is not recorded",
+                Box::new(|m| m.documents[0].ground_truth.status = GroundTruthStatus::Produced),
+            ),
+            (
+                "its address must start with https://",
+                Box::new(|m| {
+                    if let Some(source) = m.sources.get_mut("example") {
+                        source.url = "http://example.invalid/repo".into();
+                    }
+                }),
+            ),
+            (
+                "license texts are not sorted or appear twice",
+                Box::new(|m| {
+                    if let Some(source) = m.sources.get_mut("example") {
+                        let text = source.license_texts[0].clone();
+                        source.license_texts.push(text);
+                    }
+                }),
+            ),
+            (
+                "fonts are not sorted or appear twice",
+                Box::new(|m| {
+                    if let Some(scan) = &mut m.documents[0].scan {
+                        scan.fonts = vec!["Calibri".into(), "Arial".into()];
+                    }
+                }),
+            ),
+            (
+                "notes are not sorted or appear twice",
+                Box::new(|m| {
+                    if let Some(scan) = &mut m.documents[0].scan {
+                        scan.notes = vec!["b".into(), "a".into()];
+                    }
+                }),
+            ),
+            (
+                "a script is listed with no characters",
+                Box::new(|m| {
+                    if let Some(scan) = &mut m.documents[0].scan {
+                        scan.scripts.insert(Script::Greek, 0);
+                    }
+                }),
+            ),
+            ("not tagged", Box::new(|m| m.documents[0].scan = None)),
+        ];
+        for (expected, fault) in cases {
+            let mut manifest = manifest();
+            manifest.check().unwrap();
+            fault(&mut manifest);
+            let problems = manifest.check().unwrap_err().to_string();
+            assert!(
+                problems.contains(expected),
+                "missing {expected:?} in:\n{problems}"
+            );
+            if !expected.starts_with("its address") && !expected.starts_with("license texts") {
+                assert!(problems.contains(&id), "{problems}");
+            }
+        }
     }
 
     #[test]

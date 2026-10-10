@@ -87,6 +87,8 @@ struct Arguments {
     options: BTreeMap<String, Vec<String>>,
     flags: BTreeSet<String>,
     operands: Vec<String>,
+    /// Where `--manifest` and `--store` come from when they are not given.
+    environment: Environment,
 }
 
 impl Arguments {
@@ -160,12 +162,57 @@ impl Arguments {
     fn all(&self, name: &str) -> &[String] {
         self.options.get(name).map_or(&[], Vec::as_slice)
     }
+
+    /// The arguments of a command that takes no operands, which refuses any: `corpus verify --manifest m.json store` would otherwise verify without the store it was meant to check.
+    fn without_operands(self, command: &str) -> Result<Self, String> {
+        match self.operands.first() {
+            None => Ok(self),
+            Some(operand) => Err(format!(
+                "`corpus {command}` takes no operand, but was given `{}`; options are written --name VALUE",
+                printable(operand, 100)
+            )),
+        }
+    }
 }
 
-/// Runs `bayan-lab` with `args` (without the program name).
+/// The environment variables the commands read, passed in so that they never depend on the environment of whoever runs them by accident, such as a test.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Environment {
+    /// `BAYAN_LAB_MANIFEST`: the manifest when `--manifest` is not given.
+    pub manifest: Option<PathBuf>,
+    /// `BAYAN_LAB_STORE`: the store when `--store` is not given.
+    pub store: Option<String>,
+}
+
+impl Environment {
+    /// The variables of this process's environment; an empty one counts as not set.
+    #[must_use]
+    pub fn of_process() -> Self {
+        Self {
+            manifest: std::env::var_os("BAYAN_LAB_MANIFEST")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            store: std::env::var("BAYAN_LAB_STORE")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        }
+    }
+}
+
+/// Runs `bayan-lab` with `args` (without the program name), in this process's environment.
 pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Outcome {
+    run_in(&Environment::of_process(), args, out, err)
+}
+
+/// Runs `bayan-lab` with `args` (without the program name), reading `BAYAN_LAB_MANIFEST` and `BAYAN_LAB_STORE` from `environment` only.
+pub fn run_in(
+    environment: &Environment,
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Outcome {
     let result = match args.split_first() {
-        Some((group, rest)) if group == "corpus" => corpus(rest, out, err),
+        Some((group, rest)) if group == "corpus" => corpus(environment, rest, out, err),
         Some((help, _)) if matches!(help.as_str(), "help" | "--help" | "-h") => {
             let _ = writeln!(out, "{USAGE}");
             Ok(Outcome::Success)
@@ -184,14 +231,25 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Outcome
 /// The options every command accepts.
 const COMMON: [&str; 2] = ["manifest", "store"];
 
-fn corpus(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<Outcome, String> {
+fn corpus(
+    environment: &Environment,
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Outcome, String> {
     let Some((command, rest)) = args.split_first() else {
         return Err(format!("expected a corpus command\n\n{USAGE}"));
+    };
+    let parse = |valued: &[&str], flags: &[&str]| {
+        Arguments::parse(rest, valued, flags).map(|mut arguments| {
+            arguments.environment = environment.clone();
+            arguments
+        })
     };
     match command.as_str() {
         "source" => match rest.split_first() {
             Some((sub, rest)) if sub == "add" => {
-                let arguments = Arguments::parse(
+                let mut arguments = Arguments::parse(
                     rest,
                     &with_common(&[
                         "url",
@@ -203,39 +261,41 @@ fn corpus(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<O
                     ]),
                     &[],
                 )?;
+                arguments.environment = environment.clone();
                 source_add(&arguments, out)
             }
             _ => Err("expected `corpus source add`".to_owned()),
         },
         "add" => {
-            let arguments = Arguments::parse(
-                rest,
+            let arguments = parse(
                 &with_common(&["source", "tier", "root", "notes", "exclude"]),
                 &[],
             )?;
             add(&arguments, out, err)
         }
         "tag" => {
-            let arguments = Arguments::parse(rest, &COMMON, &["all"])?;
+            let arguments = parse(&COMMON, &["all"])?.without_operands("tag")?;
             tag(&arguments, out, err)
         }
         "verify" => {
-            let arguments = Arguments::parse(rest, &with_common(&["exclude"]), &[])?;
+            let arguments = parse(&with_common(&["exclude"]), &[])?.without_operands("verify")?;
             verify(&arguments, out, err)
         }
         "list" => {
-            let arguments = Arguments::parse(
-                rest,
+            let arguments = parse(
                 &with_common(&["feature", "font", "script", "source", "format"]),
                 &[],
-            )?;
+            )?
+            .without_operands("list")?;
             list(&arguments, out)
         }
         "stats" => {
-            let arguments = Arguments::parse(rest, &with_common(&["format", "title"]), &[])?;
+            let arguments =
+                parse(&with_common(&["format", "title"]), &[])?.without_operands("stats")?;
             stats(&arguments, out)
         }
         "schema" => {
+            parse(&[], &[])?.without_operands("schema")?;
             let text = schema::json_schema_file()?;
             out.write_all(text.as_bytes())
                 .map_err(|error| error.to_string())?;
@@ -254,22 +314,22 @@ fn with_common(options: &[&'static str]) -> Vec<&'static str> {
 /// The manifest path from `--manifest` or `BAYAN_LAB_MANIFEST`.
 fn manifest_path(arguments: &Arguments) -> Result<PathBuf, String> {
     match arguments.one("manifest")? {
+        // An empty path would mean the current folder.
+        Some("") => Err("--manifest cannot be empty".to_owned()),
         Some(path) => Ok(PathBuf::from(path)),
-        None => std::env::var_os("BAYAN_LAB_MANIFEST")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                "give the manifest with --manifest FILE (or BAYAN_LAB_MANIFEST)".to_owned()
-            }),
+        None => arguments.environment.manifest.clone().ok_or_else(|| {
+            "give the manifest with --manifest FILE (or BAYAN_LAB_MANIFEST)".to_owned()
+        }),
     }
 }
 
 /// The store from `--store` or `BAYAN_LAB_STORE`, if either is given.
 fn store_of(arguments: &Arguments) -> Result<Option<Box<dyn Store>>, String> {
     let address = match arguments.one("store")? {
+        // An empty address would mean the current folder.
+        Some("") => return Err("--store cannot be empty".to_owned()),
         Some(address) => Some(address.to_owned()),
-        None => std::env::var("BAYAN_LAB_STORE")
-            .ok()
-            .filter(|value| !value.is_empty()),
+        None => arguments.environment.store.clone(),
     };
     address
         .map(|address| store::open(&address).map_err(|error| error.to_string()))
@@ -485,16 +545,16 @@ fn add(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
         })?
         .clone();
     let tier: Tier = arguments.one("tier")?.unwrap_or("T1").parse()?;
-    if tier == Tier::T2 && source.license != NO_ASSERTION {
+    if tier.is_private() && source.license != NO_ASSERTION {
         return Err(format!(
             "private (T2) documents need a source whose license is {NO_ASSERTION}"
         ));
     }
-    if tier != Tier::T2 && source.license == NO_ASSERTION {
+    if !tier.is_private() && source.license == NO_ASSERTION {
         return Err("documents of public tiers need a source with a license".to_owned());
     }
     let root = arguments.one("root")?.map(PathBuf::from);
-    if tier == Tier::T2 && root.is_some() {
+    if tier.is_private() && root.is_some() {
         return Err(
             "private (T2) documents never record paths, so --root cannot be used with --tier T2"
                 .to_owned(),
@@ -657,6 +717,7 @@ fn tag(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
     let before = problems_of(&manifest);
     let everything = arguments.flags.contains("all");
     let (mut tagged, mut failed) = (0_u64, 0_u64);
+    let mut store_error = None;
     for document in &mut manifest.documents {
         let current = document
             .scan
@@ -678,7 +739,11 @@ fn tag(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
                 failed += 1;
                 continue;
             }
-            Err(error) => return Err(error.to_string()),
+            // The store cannot be read: stop, but keep what was tagged so far.
+            Err(error) => {
+                store_error = Some(error.to_string());
+                break;
+            }
         };
         match scan::scan(&bytes, &Limits::DEFAULT) {
             Ok(findings) => {
@@ -689,13 +754,16 @@ fn tag(arguments: &Arguments, out: &mut dyn Write, err: &mut dyn Write) -> Resul
                 let _ = writeln!(
                     err,
                     "{id}: cannot be tagged: {}",
-                    error.message(document.tier != Tier::T2)
+                    error.message(!document.tier.is_private())
                 );
                 failed += 1;
             }
         }
     }
     save_checked(&manifest_path, &manifest, &before)?;
+    if let Some(error) = store_error {
+        return Err(format!("{error}; tagged and saved before it: {tagged}"));
+    }
     let _ = writeln!(
         out,
         "corpus tag: {tagged} tagged with tagger version {TAGGER_VERSION}, {failed} failed"
@@ -713,9 +781,23 @@ fn verify(
     err: &mut dyn Write,
 ) -> Result<Outcome, String> {
     let manifest_path = manifest_path(arguments)?;
-    let manifest = load(&manifest_path, false)?;
+    let text = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "cannot read the manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest = Manifest::from_json(&text)?;
     let exclusions = exclusions_of(arguments)?;
     let mut failures = 0_usize;
+    // The tools write every manifest in one exact layout, so any other bytes mean a hand edit, or a duplicate key that the reader silently resolved.
+    if manifest.to_json()? != text {
+        failures += 1;
+        let _ = writeln!(
+            err,
+            "the manifest is not in the layout the tools write (edited by hand, or a key appears twice)"
+        );
+    }
     match manifest.check() {
         Ok(()) => {
             let _ = writeln!(
@@ -770,16 +852,18 @@ fn verify(
                     failures += 1;
                     let _ = writeln!(
                         err,
-                        "source {name}: license text {} does not match its SHA-256",
-                        text.path
+                        "source {}: license text {} does not match its SHA-256",
+                        printable(name, 100),
+                        printable(&text.path, 300)
                     );
                 }
                 None => {
                     failures += 1;
                     let _ = writeln!(
                         err,
-                        "source {name}: license text {} is not in the store",
-                        text.path
+                        "source {}: license text {} is not in the store",
+                        printable(name, 100),
+                        printable(&text.path, 300)
                     );
                 }
             }
@@ -890,14 +974,17 @@ fn list(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> {
                 Some(Provenance {
                     source,
                     path: Some(path),
-                }) => format!("{source}:{path}"),
-                Some(Provenance { source, path: None }) => source.clone(),
+                }) => format!("{}:{}", printable(source, 100), printable(path, 300)),
+                Some(Provenance { source, path: None }) => printable(source, 100),
                 None => String::new(),
             };
             writeln!(
                 out,
                 "{} {:>9} {} {} {place}",
-                document.sha256, document.size, document.tier, document.license
+                document.sha256,
+                document.size,
+                document.tier,
+                printable(&document.license, 100)
             )
             .map_err(|error| error.to_string())?;
         }

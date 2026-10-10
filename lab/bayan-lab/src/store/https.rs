@@ -62,6 +62,7 @@ impl HttpsStore {
             url,
             shown: url,
             upload: None,
+            payload_sha256: None,
             max_size,
             local_http: self.local_http,
             signing: None,

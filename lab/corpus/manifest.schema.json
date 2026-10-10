@@ -325,7 +325,7 @@
         },
         {
           "const": "T3",
-          "description": "Torture: known-hard documents, public or private as their licenses allow.",
+          "description": "Torture: known-hard documents. The tools treat the tier as public, like T0 and T1; a hard document that cannot be redistributed belongs in T2.",
           "type": "string"
         }
       ]

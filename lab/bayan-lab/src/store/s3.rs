@@ -8,6 +8,7 @@ use std::path::Path;
 
 use super::curl::{self, Credentials, Method, Request, Response};
 use super::{Key, MAX_OBJECT_SIZE, Store, StoreError};
+use crate::hash::Sha256;
 use crate::scan::xml::{self, Handler, Name, Start, Text, XmlLimits};
 
 /// The most pages of a listing followed (a page holds up to 1,000 keys).
@@ -131,7 +132,7 @@ impl S3Store {
         &self,
         method: Method,
         url: &str,
-        upload: Option<(&Path, &str)>,
+        upload: Option<(&Path, &str, Sha256)>,
         max_size: u64,
     ) -> Result<Response, StoreError> {
         let credentials: Option<Credentials> = curl::credentials()?;
@@ -140,7 +141,8 @@ impl S3Store {
             method,
             url,
             shown: &shown,
-            upload,
+            upload: upload.map(|(file, content_type, _)| (file, content_type)),
+            payload_sha256: upload.map(|(_, _, sha256)| sha256),
             max_size,
             local_http: self.local_http,
             signing: credentials
@@ -163,7 +165,8 @@ impl Store for S3Store {
         } else {
             format!("/{}", self.prefix)
         };
-        format!("s3://{}{prefix} at {}", self.bucket, self.endpoint)
+        // The endpoint can name an account (R2's is `ACCOUNT_ID.r2.cloudflarestorage.com`); messages leave it out, as `redact` does.
+        format!("s3://{}{prefix}", self.bucket)
     }
 
     fn get(&self, key: &Key) -> Result<Option<Vec<u8>>, StoreError> {
@@ -181,7 +184,7 @@ impl Store for S3Store {
 
     fn put(&self, key: &Key, bytes: &[u8], source: &Path) -> Result<(), StoreError> {
         let url = self.object_url(&key.path());
-        // curl sends the file the bytes were read from, so no copy of the document is written anywhere; a file that changed since is refused.
+        // curl sends the file the bytes were read from, so no copy of the document is written anywhere. A file whose size changed since is refused here; one that changed in the same size is refused by the server, because the signed request carries the key's SHA-256 (`x-amz-content-sha256`), which the server checks against what it receives.
         let unchanged = std::fs::metadata(source).is_ok_and(|metadata| {
             u64::try_from(bytes.len()).is_ok_and(|len| len == metadata.len())
         });
@@ -198,7 +201,7 @@ impl Store for S3Store {
         let response = self.request(
             Method::Put,
             &url,
-            Some((source, content_type)),
+            Some((source, content_type, key.sha256)),
             MAX_SMALL_RESPONSE,
         )?;
         match response.status {
@@ -236,16 +239,17 @@ impl Store for S3Store {
                         "the bucket listing has more pages than the limit".to_owned(),
                     ));
                 }
-                let mut url = format!(
-                    "{}/{}?list-type=2&prefix={}",
+                // Signature Version 4 signs the query with its parameters sorted by name. curl sorts them itself only from version 8.3, so they are written in that order: `continuation-token`, `list-type`, `prefix`.
+                let continuation = token
+                    .as_deref()
+                    .map(|token| format!("continuation-token={}&", percent_encode(token)))
+                    .unwrap_or_default();
+                let url = format!(
+                    "{}/{}?{continuation}list-type=2&prefix={}",
                     self.endpoint,
                     self.bucket,
                     percent_encode(&listed_prefix)
                 );
-                if let Some(token) = &token {
-                    url.push_str("&continuation-token=");
-                    url.push_str(&percent_encode(token));
-                }
                 let response = self.request(Method::Get, &url, None, MAX_LIST_PAGE)?;
                 if response.status != 200 {
                     return Err(StoreError(format!(

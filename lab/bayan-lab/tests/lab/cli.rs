@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bayan_lab::cli::{Outcome, run};
+use bayan_lab::cli::{Environment, Outcome, run_in};
 use bayan_lab::hash::Sha256;
 use bayan_lab::manifest::{Document, GroundTruth, Manifest, Provenance, Tier};
 use bayan_lab::store::Key;
@@ -21,7 +21,8 @@ struct Ran {
 fn lab(args: &[&str]) -> Ran {
     let args: Vec<String> = args.iter().map(|&arg| arg.to_owned()).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let outcome = run(&args, &mut out, &mut err);
+    // Never the environment of whoever runs the tests: an exported BAYAN_LAB_MANIFEST must not change what they do.
+    let outcome = run_in(&Environment::default(), &args, &mut out, &mut err);
     Ran {
         outcome,
         out: String::from_utf8(out).unwrap(),
@@ -804,4 +805,229 @@ fn messages_about_private_documents_name_no_part() {
         "{}",
         tagged.err
     );
+}
+
+#[test]
+fn refusals_say_what_is_wrong() {
+    let corpus = Corpus::new("refusals");
+    corpus.add_source();
+    for (command, expected) in [
+        (
+            &["list", "--source", "example", "--source", "other"][..],
+            "--source may be given only once",
+        ),
+        // An operand where an option was meant would otherwise be ignored: this would verify without the store.
+        (&["verify", "store"], "`corpus verify` takes no operand"),
+        (&["tag", "everything"], "`corpus tag` takes no operand"),
+        (&["list", "Arial"], "`corpus list` takes no operand"),
+        (&["stats", "report.md"], "`corpus stats` takes no operand"),
+    ] {
+        let ran = corpus.run(command);
+        assert_eq!(ran.outcome, Outcome::Error, "{command:?}");
+        assert!(ran.err.contains(expected), "{command:?}: {}", ran.err);
+    }
+    // Without the corpus's own options, which would give `--store` twice.
+    for (command, expected) in [
+        (
+            &["corpus", "schema", "extra"][..],
+            "`corpus schema` takes no operand",
+        ),
+        (
+            &["corpus", "verify", "--manifest", ""],
+            "--manifest cannot be empty",
+        ),
+        (
+            &[
+                "corpus",
+                "verify",
+                "--manifest",
+                text(&corpus.manifest),
+                "--store",
+                "",
+            ],
+            "--store cannot be empty",
+        ),
+    ] {
+        let ran = lab(command);
+        assert_eq!(ran.outcome, Outcome::Error, "{command:?}");
+        assert!(ran.err.contains(expected), "{command:?}: {}", ran.err);
+    }
+}
+
+#[test]
+fn verify_checks_sizes_and_the_layout_the_tools_write() {
+    let corpus = Corpus::new("sizes");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    let sha256 = corpus.write("one.docx", &text_document("One"));
+    corpus.run(&["add", "--source", "example", "--root", &root, "one.docx"]);
+    let original = fs::read_to_string(&corpus.manifest).unwrap();
+    // A size the stored bytes do not have.
+    let mut manifest = corpus.manifest();
+    let size = manifest.documents[0].size;
+    manifest.documents[0].size = size + 1;
+    fs::write(&corpus.manifest, manifest.to_json().unwrap()).unwrap();
+    let verified = corpus.run(&["verify"]);
+    assert_eq!(verified.outcome, Outcome::Failed);
+    assert!(
+        verified.err.contains(&format!(
+            "{}: size {} in the manifest, {size} in the store",
+            sha256.short(),
+            size + 1
+        )),
+        "{}",
+        verified.err
+    );
+    // Bytes the tools would not write, such as a key given twice, which the reader would resolve silently.
+    let doubled = original.replacen(
+        "  \"version\": 1,\n",
+        "  \"version\": 1,\n  \"version\": 1,\n",
+        1,
+    );
+    fs::write(&corpus.manifest, &doubled).unwrap();
+    let verified = corpus.run(&["verify"]);
+    assert_ne!(verified.outcome, Outcome::Success);
+    fs::write(&corpus.manifest, format!("{original}\n")).unwrap();
+    let verified = corpus.run(&["verify"]);
+    assert_eq!(verified.outcome, Outcome::Failed);
+    assert!(
+        verified
+            .err
+            .contains("the manifest is not in the layout the tools write"),
+        "{}",
+        verified.err
+    );
+    fs::write(&corpus.manifest, &original).unwrap();
+    assert_eq!(corpus.run(&["verify"]).outcome, Outcome::Success);
+}
+
+#[test]
+fn a_recorded_path_names_one_document() {
+    let corpus = Corpus::new("same-path");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    let first = corpus.write("one.docx", &text_document("One"));
+    corpus.run(&["add", "--source", "example", "--root", &root, "one.docx"]);
+    // The file changed in the source's checkout: the same path cannot name other bytes.
+    corpus.write("one.docx", &text_document("Changed"));
+    let added = corpus.run(&["add", "--source", "example", "--root", &root, "one.docx"]);
+    assert_eq!(added.outcome, Outcome::Failed);
+    assert!(
+        added.err.contains(&format!(
+            "refused one.docx: this source path is already recorded for {}",
+            first.short()
+        )),
+        "{}",
+        added.err
+    );
+    assert_eq!(corpus.manifest().documents.len(), 1);
+}
+
+#[test]
+fn lists_filter_by_font_and_script() {
+    let corpus = Corpus::new("filters");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    let latin = corpus.write("latin.docx", &text_document("Latin"));
+    let arabic = corpus.write(
+        "arabic.docx",
+        &Docx::new(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>مرحبا</w:t></w:r></w:p>"#,
+        )
+        .bytes(),
+    );
+    corpus.run(&[
+        "add",
+        "--source",
+        "example",
+        "--root",
+        &root,
+        "latin.docx",
+        "arabic.docx",
+    ]);
+    let listed = |filter: &[&str]| -> Vec<String> {
+        let mut command = vec!["list"];
+        command.extend_from_slice(filter);
+        corpus
+            .run(&command)
+            .out
+            .lines()
+            .map(|line| line.split(' ').next().unwrap_or_default().to_owned())
+            .collect()
+    };
+    assert_eq!(listed(&["--font", "Arial"]), [arabic.to_string()]);
+    assert_eq!(listed(&["--script", "Arabic"]), [arabic.to_string()]);
+    assert_eq!(listed(&["--script", "Latin"]), [latin.to_string()]);
+    assert!(listed(&["--font", "Missing"]).is_empty());
+}
+
+#[test]
+fn tag_keeps_its_progress_when_the_store_fails() {
+    let corpus = Corpus::new("progress");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    corpus.write("one.docx", &text_document("One"));
+    corpus.write("two.docx", &text_document("Two"));
+    corpus.run(&[
+        "add", "--source", "example", "--root", &root, "one.docx", "two.docx",
+    ]);
+    let mut manifest = corpus.manifest();
+    for document in &mut manifest.documents {
+        document.scan = None;
+    }
+    fs::write(&corpus.manifest, manifest.to_json().unwrap()).unwrap();
+    // The second document's object cannot be read.
+    let unreadable = corpus.object(manifest.documents[1].sha256);
+    fs::remove_file(&unreadable).unwrap();
+    fs::create_dir(&unreadable).unwrap();
+    let tagged = corpus.run(&["tag"]);
+    assert_eq!(tagged.outcome, Outcome::Error);
+    assert!(
+        tagged.err.contains("tagged and saved before it: 1"),
+        "{}",
+        tagged.err
+    );
+    let after = corpus.manifest();
+    assert!(after.documents[0].scan.is_some());
+    assert!(after.documents[1].scan.is_none());
+}
+
+#[test]
+fn the_environment_stands_in_for_missing_options() {
+    let corpus = Corpus::new("environment");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    corpus.write("one.docx", &text_document("One"));
+    corpus.run(&["add", "--source", "example", "--root", &root, "one.docx"]);
+    let run = |environment: &Environment, args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|&arg| arg.to_owned()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let outcome = run_in(environment, &args, &mut out, &mut err);
+        (outcome, String::from_utf8(err).unwrap())
+    };
+    let set = Environment {
+        manifest: Some(corpus.manifest.clone()),
+        store: Some(text(&corpus.store).to_owned()),
+    };
+    let (outcome, err) = run(&set, &["corpus", "verify"]);
+    assert_eq!(outcome, Outcome::Success, "{err}");
+    // An option wins over the environment.
+    let elsewhere = Environment {
+        manifest: Some(corpus.folder.join("missing.json")),
+        store: Some(text(&corpus.folder.join("missing-store")).to_owned()),
+    };
+    let (outcome, err) = run(
+        &elsewhere,
+        &[
+            "corpus",
+            "verify",
+            "--manifest",
+            text(&corpus.manifest),
+            "--store",
+            text(&corpus.store),
+        ],
+    );
+    assert_eq!(outcome, Outcome::Success, "{err}");
+    let (outcome, _) = run(&elsewhere, &["corpus", "verify"]);
+    assert_eq!(outcome, Outcome::Error);
 }

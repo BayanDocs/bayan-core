@@ -1,19 +1,30 @@
 //! HTTP requests through the `curl` program, shared by the S3 and HTTPS stores.
 //!
-//! Every supported platform has curl (Windows 10 and later include it), so the lab needs no HTTP or TLS library of its own, as xtask's crates.io requests do. Each request runs one curl process that reads no personal configuration file (`--disable`), allows only HTTPS (or plain HTTP to this machine, for tests and local servers), never follows a redirect, expands no URL patterns (`--globoff`), and has a time limit. The response body comes back through a pipe, and this module stops reading, and stops curl, as soon as the body exceeds the request's limit, whatever curl's version; no document is ever written to a temporary file. An upload is read by curl from the file the document was read from. Transient failures (no connection, a timeout, a broken transfer, or HTTP status 408, 429 or 5xx) are retried up to three times, each time from the start, so a failed response can never mix with a later one.
+//! Every supported platform has curl (Windows 10 and later include it), so the lab needs no HTTP or TLS library of its own, as xtask's crates.io requests do. Each request runs one curl process that reads no personal configuration file (`--disable`), allows only HTTPS (or plain HTTP to this machine, for tests and local servers), never follows a redirect, expands no URL patterns (`--globoff`), and has time limits: ten minutes in all, 30 seconds to connect, and a minute at most below 1 KiB per second. The response body comes back through a pipe, and this module stops reading, and stops curl, as soon as the body exceeds the request's limit, whatever curl's version; no document is ever written to a temporary file. An upload is read by curl from the file the document was read from. Failures that may pass are retried up to three times, each time from the start, so a failed response can never mix with a later one: no connection, a timeout, a failed TLS handshake, a broken transfer (curl's exit codes 5, 6, 7, 18, 28, 35, 52, 55, 56 and 92), or HTTP status 408, 429 or 5xx. A response larger than its limit is not retried; it would be as large the next time.
 //!
-//! **Credentials** come only from the environment variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN`, and only the S3 store uses them. curl signs requests with AWS Signature Version 4 itself (`--aws-sigv4`, curl 7.75 or later): the tool implements no cryptography. The credentials are handed to curl on its standard input (`--config -`), never on its command line, where other users of the machine could see them, and they never appear in messages.
+//! The module needs curl 7.63 or later, and signed S3 requests need 7.87 or later, which signs an upload's SHA-256 (`x-amz-content-sha256`); it checks the version once, before its first request.
+//!
+//! **Credentials** come only from the environment variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN`, and only the S3 store uses them. curl signs requests with AWS Signature Version 4 itself (`--aws-sigv4`): the tool implements no cryptography. The credentials are handed to curl on its standard input (`--config -`), never on its command line, where other users of the machine could see them, and they never appear in messages.
 
+use std::ffi::OsString;
 use std::io::{Read, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
 use super::StoreError;
+use crate::hash::Sha256;
 
 /// How long one request may take, in seconds.
 const MAX_SECONDS: &str = "600";
+/// How long connecting may take, in seconds.
+const CONNECT_SECONDS: &str = "30";
+/// The slowest transfer accepted, in bytes per second, for longer than [`SLOW_SECONDS`]: a stalled server ends the attempt, which is then tried again.
+const MIN_SPEED: &str = "1024";
+/// How long a transfer may stay slower than [`MIN_SPEED`], in seconds.
+const SLOW_SECONDS: &str = "60";
 /// How often a request that failed transiently is tried again.
 const RETRIES: u32 = 3;
 /// The most of curl's standard error kept for messages, in bytes.
@@ -169,6 +180,8 @@ pub struct Request<'a> {
     pub shown: &'a str,
     /// For a PUT: the file to send, and its content type.
     pub upload: Option<(&'a Path, &'a str)>,
+    /// For a PUT: the SHA-256 the sent bytes must have, sent as `x-amz-content-sha256`. A signed request carries it in its signature (curl 7.87 or later), so the server refuses the upload if the file changed after its SHA-256 was computed.
+    pub payload_sha256: Option<Sha256>,
     /// The largest response body accepted, in bytes.
     pub max_size: u64,
     /// Plain HTTP to this machine instead of HTTPS.
@@ -194,12 +207,42 @@ enum Attempt {
     Transient(StoreError),
 }
 
+/// What curl's exit code and the HTTP status say about one attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// A response arrived, with an HTTP status that is not a transient failure.
+    Response,
+    /// curl stopped because the server announced a body larger than `--max-filesize` (exit 63). Trying again would fetch the same.
+    TooLarge,
+    /// curl failed in a way that may pass: no connection (exit 5, 6, 7), a timeout (28), a failed TLS handshake (35), or a broken transfer (18, 52, 55, 56, 92).
+    TransientFailure,
+    /// The server answered 408, 429 or 5xx: busy, or failing for a moment.
+    TransientStatus,
+    /// curl failed in a way that will not pass, such as a refused certificate, a malformed address or an unreadable upload.
+    Failed,
+}
+
+/// Classifies one attempt by curl's exit code and the HTTP status (0 if none arrived).
+fn classify(exit: Option<i32>, status: u16) -> Class {
+    match exit {
+        Some(0) if status == 0 => Class::Failed,
+        Some(0) if matches!(status, 408 | 429) || (500..600).contains(&status) => {
+            Class::TransientStatus
+        }
+        Some(0) => Class::Response,
+        Some(63) => Class::TooLarge,
+        Some(5 | 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56 | 92) => Class::TransientFailure,
+        _ => Class::Failed,
+    }
+}
+
 /// Runs a request, trying again after transient failures, and returns the response.
 ///
 /// # Errors
 ///
-/// When curl cannot run, the response is larger than the request's limit, or the request still fails after the retries.
+/// When curl cannot run or is too old, the response is larger than the request's limit, or the request still fails after the retries.
 pub fn run(request: &Request<'_>) -> Result<Response, StoreError> {
+    check_version(request.signing.is_some())?;
     let mut delay = Duration::from_secs(1);
     for attempt in 0..=RETRIES {
         match run_once(request)? {
@@ -218,63 +261,167 @@ pub fn run(request: &Request<'_>) -> Result<Response, StoreError> {
     )))
 }
 
-/// Runs curl once.
-fn run_once(request: &Request<'_>) -> Result<Attempt, StoreError> {
-    let shown = format!("{} {}", request.method.name(), request.shown);
-    let mut command = Command::new("curl");
+/// The arguments curl runs with for `request`, the credentials excepted: they reach curl on its standard input ([`credentials_config`]), never on its command line, where other users of the machine could read them. Kept apart from running curl, so that tests can check them.
+///
+/// # Errors
+///
+/// When the file to upload cannot be found.
+fn arguments(request: &Request<'_>) -> Result<Vec<OsString>, StoreError> {
+    let mut arguments: Vec<OsString> = Vec::new();
+    let mut push = |values: &[&str]| arguments.extend(values.iter().map(OsString::from));
     // `--disable` must come first: it stops curl from reading a personal configuration file (.curlrc) that could change what it does.
-    command.args([
+    push(&[
         "--disable",
         "--silent",
         "--show-error",
         "--globoff",
         "--max-time",
         MAX_SECONDS,
+        "--connect-timeout",
+        CONNECT_SECONDS,
+        "--speed-limit",
+        MIN_SPEED,
+        "--speed-time",
+        SLOW_SECONDS,
     ]);
     if request.local_http {
-        command.args(["--proto", "=http", "--noproxy", "*"]);
+        push(&["--proto", "=http", "--noproxy", "*"]);
     } else {
-        command.args(["--proto", "=https", "--tlsv1.2"]);
+        push(&["--proto", "=https", "--tlsv1.2"]);
     }
     match request.method {
         Method::Get => {}
-        Method::Head => {
-            command.arg("--head");
-        }
-        Method::Put => {
-            command.args(["--request", "PUT"]);
-        }
+        Method::Head => push(&["--head"]),
+        Method::Put => push(&["--request", "PUT"]),
     }
-    // Lets curl stop early when a server announces a larger body; the limit below holds anyway. Not for HEAD: its response has no body, and curl would compare the announced size of the object itself.
+    // Lets curl stop early when a server announces a larger body; the limit on the pipe holds anyway. Not for HEAD: its response has no body, and curl would compare the announced size of the object itself.
     if request.method != Method::Head {
-        command
-            .arg("--max-filesize")
-            .arg(request.max_size.to_string());
+        push(&["--max-filesize", &request.max_size.to_string()]);
     }
     if let Some((file, content_type)) = request.upload {
         // An absolute path is never `-`, which curl would read as its standard input.
         let file = std::path::absolute(file).map_err(|error| {
-            StoreError(format!("{shown}: cannot find the file to send: {error}"))
+            StoreError(format!(
+                "{} {}: cannot find the file to send: {error}",
+                request.method.name(),
+                request.shown
+            ))
         })?;
-        command.arg("--upload-file").arg(file);
-        command
-            .arg("--header")
-            .arg(format!("Content-Type: {content_type}"));
+        arguments.push(OsString::from("--upload-file"));
+        arguments.push(file.into_os_string());
+        arguments.push(OsString::from("--header"));
+        arguments.push(OsString::from(format!("Content-Type: {content_type}")));
     }
-    command.args(["--output", "-"]);
-    command
-        .arg("--write-out")
-        .arg(format!("%{{stderr}}\n{STATUS_MARKER}%{{http_code}}\n"));
+    if let Some(sha256) = request.payload_sha256 {
+        arguments.push(OsString::from("--header"));
+        arguments.push(OsString::from(format!("x-amz-content-sha256: {sha256}")));
+    }
+    arguments.push(OsString::from("--output"));
+    arguments.push(OsString::from("-"));
+    arguments.push(OsString::from("--write-out"));
+    arguments.push(OsString::from(format!(
+        "%{{stderr}}\n{STATUS_MARKER}%{{http_code}}\n"
+    )));
     if let Some((_, region)) = request.signing {
-        command
-            .arg("--aws-sigv4")
-            .arg(format!("aws:amz:{region}:s3"));
-        command.args(["--config", "-"]);
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
+        arguments.push(OsString::from("--aws-sigv4"));
+        arguments.push(OsString::from(format!("aws:amz:{region}:s3")));
+        arguments.push(OsString::from("--config"));
+        arguments.push(OsString::from("-"));
     }
-    command.arg("--url").arg(request.url);
+    arguments.push(OsString::from("--url"));
+    arguments.push(OsString::from(request.url));
+    Ok(arguments)
+}
+
+/// What curl reads on its standard input when it signs a request: the credentials, as a configuration file.
+fn credentials_config(credentials: &Credentials) -> String {
+    let mut config = format!(
+        "user = \"{}:{}\"\n",
+        quote(&credentials.access_key),
+        quote(&credentials.secret_key)
+    );
+    if let Some(token) = &credentials.session_token {
+        config.push_str(&format!(
+            "header = \"x-amz-security-token: {}\"\n",
+            quote(token)
+        ));
+    }
+    config
+}
+
+/// A curl version as its three numbers.
+type Version = (u32, u32, u32);
+
+/// The oldest curl this module works with: it reads the HTTP status from `%{stderr}` in `--write-out` (curl 7.63.0).
+const MIN_CURL: Version = (7, 63, 0);
+/// The oldest curl that signs an upload with the SHA-256 it is given in `x-amz-content-sha256` (curl 7.87.0); older versions sign it as an unchecked payload.
+const MIN_CURL_SIGNING: Version = (7, 87, 0);
+
+/// The version that `curl --version` reports first, such as `curl 8.5.0 (x86_64-pc-linux-gnu) …`.
+fn parse_version(text: &str) -> Option<Version> {
+    let version = text.split_whitespace().nth(1)?;
+    let mut numbers = version
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(str::parse::<u32>);
+    let major = numbers.next()?.ok()?;
+    let minor = numbers.next()?.ok()?;
+    let patch = numbers.next().and_then(Result::ok).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Why this curl cannot run a request, if it is too old.
+fn version_problem(version: Version, signing: bool) -> Option<String> {
+    let (major, minor, patch) = version;
+    if version < MIN_CURL {
+        return Some(format!(
+            "the S3 and HTTPS stores need curl 7.63 or later; this curl is {major}.{minor}.{patch}"
+        ));
+    }
+    if signing && version < MIN_CURL_SIGNING {
+        return Some(format!(
+            "signed S3 requests need curl 7.87 or later, which signs an upload's SHA-256; this curl is {major}.{minor}.{patch}"
+        ));
+    }
+    None
+}
+
+/// Checks once per process that curl is new enough for a request.
+fn check_version(signing: bool) -> Result<(), StoreError> {
+    static VERSION: OnceLock<Result<Version, String>> = OnceLock::new();
+    let version = VERSION
+        .get_or_init(|| {
+            let output = Command::new("curl")
+                .args(["--disable", "--version"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|error| {
+                    format!(
+                        "cannot run curl, which the S3 and HTTPS stores use: {error}. Install curl."
+                    )
+                })?;
+            parse_version(&String::from_utf8_lossy(&output.stdout))
+                .ok_or_else(|| "cannot tell curl's version from `curl --version`".to_owned())
+        })
+        .clone()
+        .map_err(StoreError)?;
+    match version_problem(version, signing) {
+        Some(problem) => Err(StoreError(problem)),
+        None => Ok(()),
+    }
+}
+
+/// Runs curl once.
+fn run_once(request: &Request<'_>) -> Result<Attempt, StoreError> {
+    let shown = format!("{} {}", request.method.name(), request.shown);
+    let mut command = Command::new("curl");
+    command.args(arguments(request)?);
+    command.stdin(if request.signing.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| {
         StoreError(format!(
@@ -284,19 +431,8 @@ fn run_once(request: &Request<'_>) -> Result<Attempt, StoreError> {
     if let Some((credentials, _)) = request.signing
         && let Some(mut stdin) = child.stdin.take()
     {
-        let mut config = format!(
-            "user = \"{}:{}\"\n",
-            quote(&credentials.access_key),
-            quote(&credentials.secret_key)
-        );
-        if let Some(token) = &credentials.session_token {
-            config.push_str(&format!(
-                "header = \"x-amz-security-token: {}\"\n",
-                quote(token)
-            ));
-        }
         // Dropping `stdin` at the end of this block closes it, so curl reads the configuration to its end.
-        if let Err(error) = stdin.write_all(config.as_bytes()) {
+        if let Err(error) = stdin.write_all(credentials_config(credentials).as_bytes()) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(StoreError(format!(
@@ -349,32 +485,36 @@ fn run_once(request: &Request<'_>) -> Result<Attempt, StoreError> {
             None => {}
         }
     }
-    match status.code() {
-        Some(0) if code != 0 => {}
-        // curl stopped because the server announced a body larger than `--max-filesize`.
-        Some(63) => {
+    // curl's own messages could name the file being uploaded, whose path is the operator's (and, for a private document, could name a person).
+    let mut message = message.join(" ");
+    if let Some((file, _)) = request.upload
+        && let Ok(file) = std::path::absolute(file)
+    {
+        message = message.replace(&file.display().to_string(), "the file");
+    }
+    match classify(status.code(), code) {
+        Class::Response => {}
+        Class::TooLarge => {
             return Err(StoreError(format!(
                 "{shown}: the response is larger than the limit of {} bytes",
                 request.max_size
             )));
         }
-        exit => {
-            let error = StoreError(format!(
-                "{shown}: curl failed ({status}): {}",
-                message.join(" ")
-            ));
-            // Failures to resolve, connect, send or receive, and timeouts, may pass; anything else (a refused certificate, a malformed address, an unreadable upload) will not.
-            return if matches!(exit, Some(5 | 6 | 7 | 28 | 35 | 52 | 55 | 56)) {
-                Ok(Attempt::Transient(error))
-            } else {
-                Err(error)
-            };
+        Class::TransientStatus => {
+            return Ok(Attempt::Transient(StoreError(format!(
+                "{shown}: HTTP status {code}"
+            ))));
         }
-    }
-    if matches!(code, 408 | 429) || (500..600).contains(&code) {
-        return Ok(Attempt::Transient(StoreError(format!(
-            "{shown}: HTTP status {code}"
-        ))));
+        Class::TransientFailure => {
+            return Ok(Attempt::Transient(StoreError(format!(
+                "{shown}: curl failed ({status}): {message}"
+            ))));
+        }
+        Class::Failed => {
+            return Err(StoreError(format!(
+                "{shown}: curl failed ({status}): {message}"
+            )));
+        }
     }
     Ok(Attempt::Done(Response { status: code, body }))
 }
@@ -393,6 +533,138 @@ fn read_body(reader: impl Read, max_size: u64) -> std::io::Result<Option<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request<'a>(
+        method: Method,
+        upload: Option<(&'a Path, &'a str)>,
+        local_http: bool,
+        signing: Option<(&'a Credentials, &'a str)>,
+    ) -> Request<'a> {
+        Request {
+            method,
+            url: "https://s3.example.invalid/bucket/key",
+            shown: "…/bucket/key",
+            upload,
+            payload_sha256: upload.map(|_| Sha256::of(b"payload")),
+            max_size: 1_000,
+            local_http,
+            signing,
+        }
+    }
+
+    fn strings(arguments: &[OsString]) -> Vec<String> {
+        arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn has_pair(arguments: &[String], name: &str, value: &str) -> bool {
+        arguments
+            .windows(2)
+            .any(|pair| pair[0] == name && pair[1] == value)
+    }
+
+    #[test]
+    fn curl_reads_no_personal_configuration_and_speaks_only_https() {
+        let get = strings(&arguments(&request(Method::Get, None, false, None)).unwrap());
+        // A .curlrc could change everything curl does, so `--disable` must be the very first argument.
+        assert_eq!(get.first().map(String::as_str), Some("--disable"));
+        assert!(has_pair(&get, "--proto", "=https"));
+        assert!(get.iter().any(|argument| argument == "--globoff"));
+        assert!(has_pair(&get, "--max-filesize", "1000"));
+        assert!(!get.iter().any(|argument| argument == "--noproxy"));
+        let local = strings(&arguments(&request(Method::Get, None, true, None)).unwrap());
+        assert!(has_pair(&local, "--proto", "=http"));
+        assert!(has_pair(&local, "--noproxy", "*"));
+        // A HEAD response has no body; `--max-filesize` would compare the object's own size.
+        let head = strings(&arguments(&request(Method::Head, None, false, None)).unwrap());
+        assert!(head.iter().any(|argument| argument == "--head"));
+        assert!(!head.iter().any(|argument| argument == "--max-filesize"));
+    }
+
+    #[test]
+    fn credentials_never_reach_the_command_line() {
+        let credentials = Credentials {
+            access_key: "AKIDEXAMPLE".to_owned(),
+            secret_key: "secret\"key\\".to_owned(),
+            session_token: Some("session-token".to_owned()),
+        };
+        let file = Path::new("document.docx");
+        let put = strings(
+            &arguments(&request(
+                Method::Put,
+                Some((file, "application/x")),
+                false,
+                Some((&credentials, "auto")),
+            ))
+            .unwrap(),
+        );
+        for argument in &put {
+            for secret in ["AKIDEXAMPLE", "secret", "session-token"] {
+                assert!(!argument.contains(secret), "{argument}");
+            }
+        }
+        assert!(has_pair(&put, "--config", "-"));
+        assert!(has_pair(&put, "--aws-sigv4", "aws:amz:auto:s3"));
+        // The upload is the file itself, by an absolute path (never `-`, curl's standard input), and its SHA-256 is signed with it.
+        let upload = put
+            .windows(2)
+            .find(|pair| pair[0] == "--upload-file")
+            .map(|pair| pair[1].clone())
+            .unwrap();
+        assert!(Path::new(&upload).is_absolute());
+        assert!(has_pair(
+            &put,
+            "--header",
+            &format!("x-amz-content-sha256: {}", Sha256::of(b"payload"))
+        ));
+        assert_eq!(
+            credentials_config(&credentials),
+            "user = \"AKIDEXAMPLE:secret\\\"key\\\\\"\nheader = \"x-amz-security-token: session-token\"\n"
+        );
+    }
+
+    #[test]
+    fn only_failures_that_may_pass_are_tried_again() {
+        assert_eq!(classify(Some(0), 200), Class::Response);
+        assert_eq!(classify(Some(0), 404), Class::Response);
+        assert_eq!(classify(Some(0), 503), Class::TransientStatus);
+        assert_eq!(classify(Some(0), 429), Class::TransientStatus);
+        assert_eq!(classify(Some(0), 0), Class::Failed);
+        // An oversized response would be just as large the next time.
+        assert_eq!(classify(Some(63), 0), Class::TooLarge);
+        for transient in [5, 6, 7, 18, 28, 35, 52, 55, 56, 92] {
+            assert_eq!(
+                classify(Some(transient), 0),
+                Class::TransientFailure,
+                "{transient}"
+            );
+        }
+        // A refused certificate, a malformed address, an unreadable upload, a killed curl.
+        for permanent in [Some(3), Some(26), Some(60), None] {
+            assert_eq!(classify(permanent, 0), Class::Failed, "{permanent:?}");
+        }
+    }
+
+    #[test]
+    fn curl_versions_are_read_and_checked() {
+        assert_eq!(
+            parse_version("curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.13"),
+            Some((8, 5, 0))
+        );
+        assert_eq!(
+            parse_version("curl 7.87.0-DEV (Windows) libcurl/7.87.0-DEV Schannel"),
+            Some((7, 87, 0))
+        );
+        assert_eq!(parse_version("curl 8.10"), Some((8, 10, 0)));
+        assert_eq!(parse_version("not curl"), None);
+        assert_eq!(version_problem((8, 5, 0), true), None);
+        assert_eq!(version_problem((7, 87, 0), true), None);
+        assert_eq!(version_problem((7, 81, 0), false), None);
+        assert!(version_problem((7, 81, 0), true).is_some_and(|problem| problem.contains("7.87")));
+        assert!(version_problem((7, 62, 9), false).is_some_and(|problem| problem.contains("7.63")));
+    }
 
     #[test]
     fn bodies_stop_at_their_limit() {

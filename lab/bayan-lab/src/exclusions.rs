@@ -176,6 +176,14 @@ mod tests {
             ),
             (format!("sha256,source,path,reason\n{good}"), "first line"),
             (format!("{HEADER}\n{good}{good}"), "listed twice"),
+            // Two documents found at the same place: one of the lines is wrong.
+            (
+                format!(
+                    "{HEADER}\n{good}{}",
+                    line(b"b", "alpha", "a.docx", "reason")
+                ),
+                "each pair once",
+            ),
             (
                 format!(
                     "{HEADER}\n{}{}",

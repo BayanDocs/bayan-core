@@ -1,4 +1,4 @@
-//! The S3-compatible store and the read-only HTTPS store, end to end: the `bayan-lab` binary keeps a corpus in a fake S3 server on this machine, through the real `curl` program (7.75 or later, as the S3 store requires), and reads it back at the bucket's plain address.
+//! The S3-compatible store and the read-only HTTPS store, end to end: the `bayan-lab` binary keeps a corpus in a fake S3 server on this machine, through the real `curl` program (7.87 or later, which signed requests need; the store checks the version before its first request), and reads it back at the bucket's plain address.
 //!
 //! The fake server answers the four requests the store makes (PUT, GET and HEAD of an object, and `ListObjectsV2` in pages of two keys) and records every request, so the tests can check what reached the wire: requests signed with AWS Signature Version 4 when credentials are set, unsigned ones without, and the secret key never sent. It does not check signatures: computing them is curl's job, and the store implements no cryptography.
 
@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bayan_lab::hash::Sha256;
+use bayan_lab::manifest::Manifest;
 use bayan_lab::store::curl::{self, Method};
 use bayan_lab::store::{self, Key};
 
@@ -381,12 +382,32 @@ fn a_corpus_kept_in_an_s3_bucket() {
             .iter()
             .any(|request| request.target.contains("list-type=2"))
     );
+    // Signature Version 4 signs the query sorted by name, which curl does itself only from version 8.3.
     assert!(
-        requests
-            .iter()
-            .any(|request| request.target.contains("continuation-token=page-2")),
-        "the listing was not followed to its second page"
+        requests.iter().any(|request| request
+            .target
+            .contains("?continuation-token=page-2&list-type=2&prefix=")),
+        "the listing was not followed to its second page, with its query sorted"
     );
+    // Every upload carries the SHA-256 of its bytes, and signs it, so that the server refuses bytes that changed after the key was computed.
+    for put in requests.iter().filter(|request| request.method == "PUT") {
+        assert_eq!(
+            put.header("x-amz-content-sha256"),
+            Some(Sha256::of(&put.body).to_string().as_str()),
+            "{}",
+            put.target
+        );
+        let authorization = put.header("authorization").unwrap_or_default();
+        assert!(
+            authorization
+                .split("SignedHeaders=")
+                .nth(1)
+                .is_some_and(|signed| signed
+                    .split([',', ';'])
+                    .any(|name| name == "x-amz-content-sha256")),
+            "{authorization}"
+        );
+    }
     for request in &requests {
         let authorization = request.header("authorization").unwrap_or_default();
         assert!(
@@ -502,10 +523,118 @@ fn request(
         url: &url,
         shown: &url,
         upload: None,
+        payload_sha256: None,
         max_size,
         local_http: true,
         signing: None,
     })
+}
+
+#[test]
+fn curl_reads_no_personal_configuration() {
+    // A .curlrc in the home folder could add headers, a proxy or another address to every request; curl must never read one.
+    let server = FakeS3::start();
+    let folder = temporary_folder("curlrc");
+    for name in [".curlrc", "_curlrc"] {
+        fs::write(
+            folder.join(name),
+            "header = \"X-From-Curlrc: read\"\nuser-agent = \"from-curlrc\"\n",
+        )
+        .unwrap();
+    }
+    let manifest = folder.join("manifest.json");
+    fs::write(&manifest, Manifest::default().to_json().unwrap()).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bayan-lab"));
+    command.args([
+        "corpus",
+        "verify",
+        "--manifest",
+        path(&manifest),
+        "--store",
+        &server.address(),
+    ]);
+    for name in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "BAYAN_LAB_MANIFEST",
+        "BAYAN_LAB_STORE",
+    ] {
+        command.env_remove(name);
+    }
+    for name in [
+        "HOME",
+        "CURL_HOME",
+        "XDG_CONFIG_HOME",
+        "USERPROFILE",
+        "APPDATA",
+    ] {
+        command.env(name, &folder);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let requests = server.take_requests();
+    assert!(!requests.is_empty());
+    for request in &requests {
+        assert!(
+            request.header("x-from-curlrc").is_none(),
+            "{}",
+            request.target
+        );
+        assert_ne!(request.header("user-agent"), Some("from-curlrc"));
+    }
+}
+
+#[test]
+fn a_curl_too_old_is_refused_before_any_request() {
+    // curl signs the payload's SHA-256 only from 7.87; an older one would store an upload without tying it to its hash.
+    if std::env::consts::FAMILY != "unix" {
+        // A stand-in for curl on Windows would have to be a compiled program. The version rules themselves are unit tests, which run everywhere.
+        return;
+    }
+    let server = FakeS3::start();
+    let folder = temporary_folder("old-curl");
+    let fake = folder.join("curl");
+    fs::write(
+        &fake,
+        "#!/bin/sh\necho 'curl 7.81.0 (x86_64-pc-linux-gnu) libcurl/7.81.0'\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("chmod")
+            .arg("755")
+            .arg(&fake)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let manifest = folder.join("manifest.json");
+    fs::write(&manifest, Manifest::default().to_json().unwrap()).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bayan-lab"));
+    command.args([
+        "corpus",
+        "verify",
+        "--manifest",
+        path(&manifest),
+        "--store",
+        &server.address(),
+    ]);
+    for name in ["AWS_SESSION_TOKEN", "BAYAN_LAB_MANIFEST", "BAYAN_LAB_STORE"] {
+        command.env_remove(name);
+    }
+    command
+        .env("AWS_ACCESS_KEY_ID", ACCESS_KEY)
+        .env("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
+        .env("PATH", &folder);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("signed S3 requests need curl 7.87 or later")
+            && stderr(&output).contains("this curl is 7.81.0"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(server.take_requests().is_empty());
 }
 
 #[test]
@@ -525,6 +654,8 @@ fn responses_are_limited_and_a_retry_starts_afresh() {
             .contains("larger than the limit of 10 bytes"),
         "{error}"
     );
+    // It would be as large the next time, so it is not tried again.
+    assert_eq!(server.take_requests().len(), 1);
     // A response that announces no size is cut off by the tool itself, which stops reading and stops curl one byte past the limit, whatever curl's version.
     let error = request(&server, Method::Head, "padded-headers", 64 * 1024).unwrap_err();
     assert!(
@@ -533,6 +664,7 @@ fn responses_are_limited_and_a_retry_starts_afresh() {
             .contains("larger than the limit of 65536 bytes"),
         "{error}"
     );
+    assert_eq!(server.take_requests().len(), 1);
     // A busy server's answer is not mixed into the retried one (curl's own --retry would append both bodies to its output).
     server.take_requests();
     server.failures.store(1, Ordering::SeqCst);

@@ -2,6 +2,7 @@
 //!
 //! The packages are built in memory by `support`, field by field, so every flaw is deliberate and visible in the test. The limits are the ones the tools use ([`Limits::DEFAULT`]) unless a test says otherwise.
 
+use bayan_lab::scan::features::Feature;
 use bayan_lab::scan::opc::OpcError;
 use bayan_lab::scan::xml::XmlError;
 use bayan_lab::scan::zip::ZipError;
@@ -301,6 +302,68 @@ fn a_compression_bomb_stops_at_its_declared_size() {
 }
 
 #[test]
+fn a_truncated_stream_stops_at_its_declared_size() {
+    // Inflating stops as soon as an entry produces more than it declares. A truncated stream tells this apart from the size check after inflating: inflated to its end, it would fail as a broken stream instead.
+    let mut state = 1_u32;
+    let noise: Vec<u8> = (0..20_000)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            u8::try_from(state >> 24).unwrap()
+        })
+        .collect();
+    let bytes = with_entry("word/document.xml", |entry| {
+        *entry = ZipEntry::deflated("word/document.xml", &noise);
+        entry.data.truncate(entry.data.len() / 2);
+        entry.compressed_size = u32::try_from(entry.data.len()).unwrap();
+        entry.uncompressed_size = 100;
+    });
+    assert_eq!(zip_refusal(&bytes), ZipError::SizeMismatch);
+}
+
+#[test]
+fn entry_data_that_runs_into_the_central_directory() {
+    // The last entry's data seems to go on into the central directory, which no other entry's data would overlap.
+    let mut entries = valid().entries();
+    let last = entries.last_mut().unwrap();
+    last.compressed_size += 40;
+    assert_eq!(zip_refusal(&zip(&entries)), ZipError::Overlap);
+}
+
+#[test]
+fn a_field_instruction_is_read_only_up_to_its_limit() {
+    // Only the first 512 bytes of an instruction are kept: its first word says what the field is, and a crafted instruction of any length costs no more.
+    let field = |instruction: &str| {
+        scan(
+            &Docx::new(&format!(
+                r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+            ))
+            .bytes(),
+            &Limits::DEFAULT,
+        )
+        .unwrap()
+        .features
+    };
+    let simple = |instruction: &str| {
+        scan(
+            &Docx::new(&format!(
+                r#"<w:p><w:fldSimple w:instr="{instruction}"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#
+            ))
+            .bytes(),
+            &Limits::DEFAULT,
+        )
+        .unwrap()
+        .features
+    };
+    for field in [field, simple] {
+        let short = field(r" PAGE \* MERGEFORMAT ");
+        assert!(short.contains(&Feature::FieldFormattingSwitches));
+        let long = field(&format!(r" PAGE {} \* MERGEFORMAT ", " ".repeat(600)));
+        assert!(long.contains(&Feature::PageFields));
+        assert!(!long.contains(&Feature::FieldFormattingSwitches));
+    }
+}
+
+#[test]
 fn entries_that_overlap() {
     // The document's data seems to run on into the next entry: the "overlapping files" bomb reuses data this way.
     let bytes = with_entry("word/document.xml", |entry| {
@@ -507,6 +570,25 @@ fn too_many_parts_relationships_or_content_types() {
         refusal(&bytes),
         ScanError::Part {
             part: "/_rels/.rels".to_owned(),
+            error: OpcError::TooManyItems
+        }
+    );
+    let mut types = String::from(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+    );
+    for number in 0..10_001 {
+        types.push_str(&format!(
+            r#"<Default Extension="x{number}" ContentType="application/x"/>"#
+        ));
+    }
+    types.push_str("</Types>");
+    let bytes = with_entry("[Content_Types].xml", |entry| {
+        *entry = ZipEntry::deflated("[Content_Types].xml", types.as_bytes());
+    });
+    assert_eq!(
+        refusal(&bytes),
+        ScanError::Part {
+            part: "/[Content_Types].xml".to_owned(),
             error: OpcError::TooManyItems
         }
     );

@@ -116,7 +116,7 @@ pub trait Store {
     ///
     /// # Errors
     ///
-    /// When the store cannot be written, or `source` no longer holds `bytes`.
+    /// When the store cannot be written, or `source` no longer holds `bytes`. The S3 store compares the file's size, and the server the SHA-256 of a signed upload (an unsigned upload, which only a bucket open to anonymous writes would accept, is not checked against its hash).
     fn put(&self, key: &Key, bytes: &[u8], source: &Path) -> Result<(), StoreError>;
 
     /// Whether the store has an object.
