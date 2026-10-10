@@ -720,9 +720,12 @@ fn read_local(
     let central_name = data
         .get(central.name_bytes_offset..central.name_bytes_offset + central.name_length)
         .ok_or(malformed)?;
+    // For a name beyond ASCII, the flag that marks it as UTF-8 must be the same too, or a tool that reads the local header would read it in code page 437.
+    let utf8_differs = !central_name.is_ascii() && (flag_bits ^ central.flags) & flags::UTF8 != 0;
     if local_name != central_name
         || method_code != central.method_code
         || flag_bits & flags::COMPARED != central.flags & flags::COMPARED
+        || utf8_differs
     {
         return Err(mismatch.into());
     }

@@ -801,6 +801,17 @@ fn refuses_local_headers_whose_flags_or_sizes_disagree() {
     let mut bytes = Archive::new(vec![item]).build();
     put32(&mut bytes, 14, 0x1234_5678);
     assert_eq!(zip_error(&bytes), ZipError::HeaderMismatch { entry: 0 });
+    // A name beyond ASCII that the central directory marks as UTF-8 and the local header does not: a tool that reads local headers would read it in code page 437, as another name.
+    let mut item = Item::stored("é.xml", b"x");
+    item.local_flags = Some(0);
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::HeaderMismatch { entry: 0 }
+    );
+    // For an ASCII name, which reads the same either way, the flag may differ.
+    let mut item = Item::stored("a.xml", b"x");
+    item.local_flags = Some(1 << 11);
+    open_zip(&Archive::new(vec![item]).build()).unwrap();
 }
 
 #[test]

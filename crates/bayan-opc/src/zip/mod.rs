@@ -76,7 +76,7 @@ mod flags {
     pub(super) const UTF8: u16 = 1 << 11;
     /// Local header values are masked (central directory encryption).
     pub(super) const MASKED: u16 = 1 << 13;
-    /// The bits whose values the local and central headers must agree on.
+    /// The bits whose values the local and central headers must agree on. For a name beyond ASCII, [`UTF8`] must agree too, which the reader checks separately.
     pub(super) const COMPARED: u16 =
         ENCRYPTED | DATA_DESCRIPTOR | PATCHED | STRONG_ENCRYPTION | MASKED;
 }
