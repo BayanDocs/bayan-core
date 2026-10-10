@@ -9,7 +9,7 @@ use bayan_opc::{
     Error, LimitError, Limits, Package, PackageError, RelationshipsError, XmlErrorKind, ZipError,
 };
 
-use craft::{Archive, Descriptor, Item};
+use craft::{Archive, Descriptor, Item, Symbol};
 
 /// A valid minimal package: a content types stream and one part.
 fn package_items() -> Vec<Item> {
@@ -484,6 +484,132 @@ fn refuses_damaged_data() {
     );
 }
 
+#[test]
+fn refuses_references_to_data_before_the_start() {
+    // DEFLATE repeats earlier output with (length, distance) pairs, and a distance that reaches back before the first byte is an error (zlib: "invalid distance too far back"). A decoder that does not check it repeats whatever its buffer holds there, so these headers declare the size and checksum of exactly that, and only the check itself can refuse the data: a copy from 1 byte back as the very first symbol, and the literal `a` followed by a copy from 2 bytes back. The fuzz target zip_archive found the second kind in a damaged document: `read` refused it and `verify`, which then decompressed through a 32 KiB ring buffer, did not.
+    let streams = [
+        (
+            craft::fixed_huffman(&[Symbol::Match {
+                length: 3,
+                distance: 1,
+            }]),
+            vec![0, 0, 0],
+        ),
+        (
+            craft::fixed_huffman(&[
+                Symbol::Literal(b'a'),
+                Symbol::Match {
+                    length: 3,
+                    distance: 2,
+                },
+            ]),
+            b"a\0a\0".to_vec(),
+        ),
+    ];
+    // The builder's streams, which zlib refuses with that message.
+    assert_eq!(streams[0].0, [0x03, 0x02, 0x00]);
+    assert_eq!(streams[1].0, [0x4B, 0x04, 0x42, 0x00]);
+    for (stream, unchecked) in streams {
+        let mut item = Item::stored("a.bin", &unchecked);
+        item.method = 8;
+        item.stored = stream;
+        let bytes = Archive::new(vec![item]).build();
+        let archive = open_zip(&bytes).unwrap();
+        assert_eq!(
+            archive.read(0),
+            Err(Error::Zip(ZipError::CorruptData { entry: 0 }))
+        );
+        assert_eq!(
+            archive.verify(0),
+            Err(Error::Zip(ZipError::CorruptData { entry: 0 }))
+        );
+        assert_eq!(
+            archive.raw_entry(0),
+            Err(Error::Zip(ZipError::CorruptData { entry: 0 }))
+        );
+    }
+    // The same `a` followed by a copy from 1 byte back, which repeats it, is correct (and zlib agrees).
+    let stream = craft::fixed_huffman(&[
+        Symbol::Literal(b'a'),
+        Symbol::Match {
+            length: 3,
+            distance: 1,
+        },
+    ]);
+    assert_eq!(stream, [0x4B, 0x04, 0x02, 0x00]);
+    let mut item = Item::stored("a.bin", b"aaaa");
+    item.method = 8;
+    item.stored = stream;
+    let bytes = Archive::new(vec![item]).build();
+    let archive = open_zip(&bytes).unwrap();
+    assert_eq!(archive.read(0).unwrap(), b"aaaa");
+    assert_eq!(archive.verify(0), Ok(()));
+}
+
+#[test]
+fn reads_and_verifies_copies_from_the_longest_distance() {
+    // 32 KiB of noise as literals, then copies of 258 bytes from 32 KiB back, the longest distance DEFLATE allows, until the data passes 300 KiB. `verify` moves its window several times on the way, and every copy must still find the byte from exactly 32 KiB earlier.
+    let mut data = craft::noise(32 * 1024);
+    let mut symbols: Vec<Symbol> = data.iter().map(|&byte| Symbol::Literal(byte)).collect();
+    while data.len() < 300 * 1024 {
+        symbols.push(Symbol::Match {
+            length: 258,
+            distance: 32_768,
+        });
+        for _ in 0..258 {
+            data.push(data[data.len() - 32 * 1024]);
+        }
+    }
+    let mut item = Item::stored("far.bin", &data);
+    item.method = 8;
+    item.stored = craft::fixed_huffman(&symbols);
+    let bytes = Archive::new(vec![item.clone()]).build();
+    let archive = open_zip(&bytes).unwrap();
+    assert_eq!(archive.read(0).unwrap(), data);
+    assert_eq!(archive.verify(0), Ok(()));
+
+    // A declared size one byte off either way is refused by both.
+    for size in [data.len() - 1, data.len() + 1] {
+        let mut wrong = item.clone();
+        wrong.size = u64::try_from(size).unwrap();
+        let bytes = Archive::new(vec![wrong]).build();
+        let archive = open_zip(&bytes).unwrap();
+        assert_eq!(
+            archive.read(0),
+            Err(Error::Zip(ZipError::SizeMismatch { entry: 0 }))
+        );
+        assert_eq!(
+            archive.verify(0),
+            Err(Error::Zip(ZipError::SizeMismatch { entry: 0 }))
+        );
+    }
+}
+
+#[test]
+fn reads_verifies_and_copies_damaged_entries_alike() {
+    // A large entry compressed as usual, damaged in 24 places one at a time: `read`, `verify` and `raw_entry` give the same answer for each.
+    let item = Item::deflated("text.txt", &craft::text(300 * 1024));
+    let length = item.stored.len();
+    for step in 0..24 {
+        let mut damaged = item.clone();
+        let position = step * length / 24 + step;
+        damaged.stored[position] ^= 1 << (step % 8);
+        let bytes = Archive::new(vec![damaged]).build();
+        let archive = open_zip(&bytes).unwrap();
+        let verified = archive.verify(0);
+        assert_eq!(
+            archive.read(0).map(|_| ()),
+            verified,
+            "damage at {position}"
+        );
+        assert_eq!(
+            archive.raw_entry(0).map(|_| ()),
+            verified,
+            "damage at {position}"
+        );
+    }
+}
+
 // Headers that disagree.
 
 #[test]
@@ -724,6 +850,144 @@ mod craft {
 
     pub fn deflate(data: &[u8]) -> Vec<u8> {
         miniz_oxide::deflate::compress_to_vec(data, 6)
+    }
+
+    /// A symbol of a DEFLATE stream: a byte, or a copy of `length` bytes from `distance` bytes back.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Symbol {
+        Literal(u8),
+        Match { length: u16, distance: u16 },
+    }
+
+    /// One final DEFLATE block with the fixed Huffman codes (RFC 1951, section 3.2.6), written bit by bit, independently of the crate's DEFLATE library. It refers back wherever `symbols` say, also to before the start.
+    pub fn fixed_huffman(symbols: &[Symbol]) -> Vec<u8> {
+        const LENGTH_BASE: [u16; 29] = [
+            3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99,
+            115, 131, 163, 195, 227, 258,
+        ];
+        const LENGTH_EXTRA: [u32; 29] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+        ];
+        const DISTANCE_BASE: [u16; 30] = [
+            1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025,
+            1537, 2049, 3073, 4097, 6145, 8193, 12_289, 16_385, 24_577,
+        ];
+        let mut bits = Bits::default();
+        // The final block, with fixed codes.
+        bits.value(1, 1);
+        bits.value(1, 2);
+        for symbol in symbols {
+            match *symbol {
+                Symbol::Literal(byte) => bits.literal_or_length(u32::from(byte)),
+                Symbol::Match { length, distance } => {
+                    let code = LENGTH_BASE
+                        .iter()
+                        .rposition(|&base| base <= length)
+                        .unwrap();
+                    bits.literal_or_length(257 + u32::try_from(code).unwrap());
+                    bits.value(u32::from(length - LENGTH_BASE[code]), LENGTH_EXTRA[code]);
+                    let code = DISTANCE_BASE
+                        .iter()
+                        .rposition(|&base| base <= distance)
+                        .unwrap();
+                    bits.code(u32::try_from(code).unwrap(), 5);
+                    let extra = u32::try_from(code / 2).unwrap().saturating_sub(1);
+                    bits.value(u32::from(distance - DISTANCE_BASE[code]), extra);
+                }
+            }
+        }
+        // The end of the block.
+        bits.literal_or_length(256);
+        bits.bytes
+    }
+
+    /// Bits written the way DEFLATE packs them: from the lowest bit of each byte up.
+    #[derive(Default)]
+    struct Bits {
+        bytes: Vec<u8>,
+        used: u32,
+    }
+
+    impl Bits {
+        /// `count` bits of `value`, lowest first, as DEFLATE writes header fields and extra bits.
+        fn value(&mut self, value: u32, count: u32) {
+            for bit in 0..count {
+                self.push((value >> bit) & 1);
+            }
+        }
+
+        /// A Huffman code of `count` bits, highest first.
+        fn code(&mut self, code: u32, count: u32) {
+            for bit in (0..count).rev() {
+                self.push((code >> bit) & 1);
+            }
+        }
+
+        /// A literal byte, a length, or the end of the block (256), in the fixed codes.
+        fn literal_or_length(&mut self, symbol: u32) {
+            match symbol {
+                0..=143 => self.code(0x30 + symbol, 8),
+                144..=255 => self.code(0x190 + symbol - 144, 9),
+                256..=279 => self.code(symbol - 256, 7),
+                _ => self.code(0xC0 + symbol - 280, 8),
+            }
+        }
+
+        fn push(&mut self, bit: u32) {
+            if self.used == 0 {
+                self.bytes.push(0);
+            }
+            if bit == 1 {
+                *self.bytes.last_mut().unwrap() |= 1 << self.used;
+            }
+            self.used = (self.used + 1) % 8;
+        }
+    }
+
+    /// `length` bytes of noise from a fixed seed, which DEFLATE cannot shorten.
+    pub fn noise(length: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_u32;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    /// `length` bytes of text: words from a small vocabulary in an order from a fixed seed, so that DEFLATE finds copies at many distances.
+    pub fn text(length: usize) -> Vec<u8> {
+        const WORDS: [&str; 16] = [
+            "package ",
+            "part ",
+            "relationship ",
+            "content ",
+            "type ",
+            "core ",
+            "property ",
+            "stream ",
+            "archive ",
+            "entry ",
+            "window ",
+            "distance ",
+            "length ",
+            "literal ",
+            "block ",
+            "checksum ",
+        ];
+        let mut state = 0x9E37_79B9_u32;
+        let mut text = Vec::new();
+        while text.len() < length {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let word = WORDS[usize::from(state.to_le_bytes()[0] % 16)];
+            text.extend_from_slice(word.as_bytes());
+        }
+        text.truncate(length);
+        text
     }
 
     fn size_of(data: &[u8]) -> u64 {

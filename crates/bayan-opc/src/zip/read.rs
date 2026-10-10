@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
-use miniz_oxide::inflate::core::{DecompressorOxide, decompress};
+use miniz_oxide::inflate::core::{DecompressorOxide, decompress_with_limit};
 
 use super::crc32::Crc32;
 use super::{
@@ -15,8 +15,11 @@ use super::{
 };
 use crate::{Error, LimitError, Limits, ZipError};
 
-/// The size of the window that streaming decompression uses: DEFLATE refers back at most 32 KiB.
-const WINDOW: usize = 32 * 1024;
+/// How far back DEFLATE may refer to earlier output: 32 KiB (RFC 1951, section 3.2.5).
+const HISTORY: usize = 32 * 1024;
+
+/// The buffer that DEFLATE data is decompressed through: the last [`HISTORY`] bytes of output, then room for new ones.
+const WINDOW: usize = 4 * HISTORY;
 
 /// The ZIP comment can be at most this long, so the end-of-central-directory record starts at most this far before the end of the archive (plus its own size).
 const MAX_COMMENT: usize = 0xFFFF;
@@ -267,8 +270,9 @@ impl<'a> ZipArchive<'a> {
                 output.extend_from_slice(raw);
             }
             CompressionMethod::Deflated => {
-                output.resize(size, 0);
-                inflate_exact(raw, &mut output, index)?;
+                inflate(raw, entry.uncompressed_size, index, |piece| {
+                    output.extend_from_slice(piece);
+                })?;
             }
         }
         let mut crc = Crc32::new();
@@ -279,7 +283,7 @@ impl<'a> ZipArchive<'a> {
         Ok(output)
     }
 
-    /// Checks that the entry at `index` decompresses to its declared size and CRC-32 checksum, without keeping the data: it is decompressed through a window of 32 KiB.
+    /// Checks that the entry at `index` decompresses to its declared size and CRC-32 checksum, without keeping the data: it is decompressed through a window of 128 KiB. It accepts and refuses exactly the entries that [`ZipArchive::read`] does, because both decompress with the same code.
     ///
     /// # Errors
     ///
@@ -296,7 +300,9 @@ impl<'a> ZipArchive<'a> {
                 crc.update(raw);
             }
             CompressionMethod::Deflated => {
-                inflate_streaming(raw, entry.uncompressed_size, &mut crc, index)?;
+                inflate(raw, entry.uncompressed_size, index, |piece| {
+                    crc.update(piece)
+                })?;
             }
         }
         if crc.finish() != entry.crc32 {
@@ -829,70 +835,66 @@ fn check_overlaps(extents: &mut [(u64, u64, usize)]) -> Result<(), ZipError> {
     Ok(())
 }
 
-/// Decompresses `input` into `output`, which has exactly the declared size: the stream must fill it exactly and end exactly at the end of `input`.
-fn inflate_exact(input: &[u8], output: &mut [u8], index: usize) -> Result<(), ZipError> {
-    // Some tools store an empty entry as DEFLATE with no data at all instead of an empty DEFLATE stream.
-    if input.is_empty() && output.is_empty() {
-        return Ok(());
-    }
-    let mut state = Box::<DecompressorOxide>::default();
-    let (status, consumed, written) = decompress(
-        &mut state,
-        input,
-        output,
-        0,
-        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
-    );
-    match status {
-        TINFLStatus::Done if consumed == input.len() && written == output.len() => Ok(()),
-        TINFLStatus::Done if consumed == input.len() => {
-            Err(ZipError::SizeMismatch { entry: index })
-        }
-        // More output than the declared size.
-        TINFLStatus::HasMoreOutput => Err(ZipError::SizeMismatch { entry: index }),
-        // Extra bytes after the end of the stream, a stream that ends too early, or damaged data.
-        _ => Err(ZipError::CorruptData { entry: index }),
-    }
-}
-
-/// Decompresses `input` through a 32 KiB window, adding the output to `crc`, and checks that it comes to exactly `expected` bytes and ends exactly at the end of `input`.
-fn inflate_streaming(
+/// Decompresses `input`, handing the output to `sink` piece by piece, and checks that it comes to exactly `expected` bytes and that the stream ends exactly at the end of `input`.
+///
+/// [`ZipArchive::read`] and [`ZipArchive::verify`] both decompress with this function, so they accept and refuse exactly the same data; they differ only in what `sink` does with the output. The decoder writes into a buffer of [`WINDOW`] bytes in miniz_oxide's non-wrapping mode, which refuses a back-reference to before the start of the buffer. Until the buffer is first full, that is the start of the output, so a stream that refers back before its first byte is refused; when the buffer is full, this function keeps its last [`HISTORY`] bytes, as far back as DEFLATE may refer, and continues after them, so from then on no valid reference reaches before the start of the buffer. (miniz_oxide's ring-buffer mode does not check such references at all and repeats whatever its buffer holds there; `tests/malicious.rs` has streams of the kind the fuzz target found.) No call may write more than what is still missing from `expected`, so the decoder stops at exactly the point where it would stop when writing into a buffer of the declared size.
+fn inflate(
     input: &[u8],
     expected: u64,
-    crc: &mut Crc32,
     index: usize,
+    mut sink: impl FnMut(&[u8]),
 ) -> Result<(), ZipError> {
+    // Some tools store an empty entry as DEFLATE with no data at all instead of an empty DEFLATE stream.
     if input.is_empty() && expected == 0 {
         return Ok(());
     }
     let mut state = Box::<DecompressorOxide>::default();
     let mut window = vec![0_u8; WINDOW];
+    // Where the next output goes; the bytes before it are the output so far, or its last `HISTORY` bytes once the window has moved.
+    let mut position = 0;
     let mut input_position = 0;
-    let mut window_position = 0;
-    let mut total: u64 = 0;
+    let mut remaining = expected;
     loop {
+        let space = WINDOW - position;
+        let room = to_usize(remaining).map_or(space, |remaining| remaining.min(space));
         let rest = input.get(input_position..).unwrap_or_default();
-        let (status, consumed, written) =
-            decompress(&mut state, rest, &mut window, window_position, 0);
-        let produced = window
-            .get(window_position..window_position + written)
-            .ok_or(ZipError::CorruptData { entry: index })?;
-        crc.update(produced);
-        total = total.saturating_add(as_u64(written));
-        if total > expected {
-            return Err(ZipError::SizeMismatch { entry: index });
-        }
+        let (status, consumed, written) = decompress_with_limit(
+            &mut state,
+            rest,
+            &mut window,
+            position,
+            room,
+            TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
+        );
+        remaining = remaining
+            .checked_sub(as_u64(written))
+            .ok_or(ZipError::SizeMismatch { entry: index })?;
+        let end = position + written;
+        sink(
+            window
+                .get(position..end)
+                .ok_or(ZipError::CorruptData { entry: index })?,
+        );
         input_position += consumed;
-        window_position = (window_position + written) % WINDOW;
+        position = end;
         match status {
             TINFLStatus::Done if input_position == input.len() => {
-                return if total == expected {
+                return if remaining == 0 {
                     Ok(())
                 } else {
                     Err(ZipError::SizeMismatch { entry: index })
                 };
             }
-            TINFLStatus::HasMoreOutput => {}
+            // The stream goes on after the declared size.
+            TINFLStatus::HasMoreOutput if remaining == 0 => {
+                return Err(ZipError::SizeMismatch { entry: index });
+            }
+            // The window is full: keep the last `HISTORY` bytes and continue after them.
+            TINFLStatus::HasMoreOutput if position == WINDOW => {
+                window.copy_within(WINDOW - HISTORY.., 0);
+                position = HISTORY;
+            }
+            // Extra bytes after the end of the stream, a stream that ends too early, or damaged data.
             _ => return Err(ZipError::CorruptData { entry: index }),
         }
     }
@@ -906,4 +908,21 @@ fn as_u64(value: usize) -> u64 {
 /// `value` as a `usize`, if it fits on this platform.
 fn to_usize(value: u64) -> Option<usize> {
     usize::try_from(value).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hands_on_no_more_than_the_declared_size() {
+        // 8 MiB of zeros under a declared size of 100 bytes: the decoder stops after exactly 100 bytes, so `read` never grows its output beyond the memory it set aside.
+        let stream = miniz_oxide::deflate::compress_to_vec(&vec![0_u8; 8 << 20], 6);
+        let mut received = 0;
+        assert_eq!(
+            inflate(&stream, 100, 0, |piece| received += piece.len()),
+            Err(ZipError::SizeMismatch { entry: 0 })
+        );
+        assert_eq!(received, 100);
+    }
 }
