@@ -690,6 +690,92 @@ fn an_end_record_hidden_in_the_comment_of_another() {
 }
 
 #[test]
+fn an_end_record_signature_in_the_comment_that_does_not_end_the_file() {
+    // The real record A ends the file; its comment holds the signature of a record B that does not. Python's zipfile and Info-ZIP take the last signature they find, B, which can point to another central directory, so the archive is refused.
+    let entries = valid().entries();
+    let real = zip(&entries);
+    let mut record = real.get(real.len() - 22..).unwrap().to_vec();
+    record.extend_from_slice(b"tail");
+    let disguised = zip_with(
+        &entries,
+        &ZipLayout {
+            comment: record,
+            ..ZipLayout::default()
+        },
+    );
+    assert_eq!(
+        zip_refusal(&disguised),
+        ZipError::Corrupt("an end-of-central-directory signature follows the end record")
+    );
+}
+
+#[test]
+fn a_gap_between_the_central_directory_and_its_end_record() {
+    // Python's zipfile looks for the central directory just before its end record (to allow data in front of an archive), so a gap would let it read other bytes than the declared offset points to.
+    let gapped = zip_with(
+        &valid().entries(),
+        &ZipLayout {
+            gap: b"other bytes".to_vec(),
+            ..ZipLayout::default()
+        },
+    );
+    assert_eq!(
+        zip_refusal(&gapped),
+        ZipError::Corrupt("the central directory does not end where its end record begins")
+    );
+}
+
+#[test]
+fn a_zip64_locator_before_an_end_record_that_needs_none() {
+    // A ZIP64 archive whose classic end record states the real values: readers that always follow the locator would read the ZIP64 record instead.
+    let entries = valid().entries();
+    let mut bytes = zip_with(
+        &entries,
+        &ZipLayout {
+            zip64: true,
+            ..ZipLayout::default()
+        },
+    );
+    let end = bytes.len() - 22;
+    let classic = zip(&entries);
+    let classic_end = classic.len() - 22;
+    // The real entry count, directory size and offset, in place of the saturated ones.
+    let real_fields = classic
+        .get(classic_end + 8..classic_end + 20)
+        .unwrap()
+        .to_vec();
+    bytes.splice(end + 8..end + 20, real_fields);
+    assert_eq!(
+        zip_refusal(&bytes),
+        ZipError::Corrupt("a ZIP64 end locator precedes an end record that needs none")
+    );
+}
+
+#[test]
+fn a_zip64_record_with_extensible_data() {
+    // Python's zipfile reads the ZIP64 record just before its locator and assumes it has no extensible data.
+    let mut bytes = zip_with(
+        &valid().entries(),
+        &ZipLayout {
+            zip64: true,
+            ..ZipLayout::default()
+        },
+    );
+    let record = bytes.len() - 22 - 20 - 56;
+    assert_eq!(
+        bytes.get(record..record + 4).unwrap(),
+        [0x50, 0x4b, 0x06, 0x06]
+    );
+    bytes.splice(record + 4..record + 12, 52_u64.to_le_bytes());
+    assert_eq!(
+        zip_refusal(&bytes),
+        ZipError::Corrupt(
+            "the ZIP64 end record does not stand, without extensible data, just before its locator"
+        )
+    );
+}
+
+#[test]
 fn compatibility_options_of_a_documents_own_choosing_are_not_recorded() {
     // Every child of w:compat used to become a recorded option: a million invented names made a 24 MB manifest entry.
     let mut options = String::from("<w:useFELayout/><w:doNotExpandShiftReturn w:val=\"0\"/>");

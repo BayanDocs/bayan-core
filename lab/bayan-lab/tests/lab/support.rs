@@ -129,6 +129,8 @@ pub struct ZipLayout {
     pub directory_offset: Option<u32>,
     /// Whether to write ZIP64 end records, with the classic fields saturated.
     pub zip64: bool,
+    /// Bytes between the central directory and the end records.
+    pub gap: Vec<u8>,
 }
 
 fn put16(out: &mut Vec<u8>, value: u16) {
@@ -186,6 +188,7 @@ pub fn zip_with(entries: &[ZipEntry], layout: &ZipLayout) -> Vec<u8> {
         out.extend_from_slice(&entry.extra);
     }
     let directory_size = out.len() - directory_offset;
+    out.extend_from_slice(&layout.gap);
     let count = u16::try_from(entries.len()).unwrap();
     if layout.zip64 {
         let record = out.len();

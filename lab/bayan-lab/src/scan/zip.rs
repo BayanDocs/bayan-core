@@ -4,7 +4,7 @@
 //!
 //! Every archive is hostile until proven otherwise, so the reader is strict where a lenient reader could be tricked:
 //!
-//! - the end-of-central-directory record must end the file exactly, and only one may: a second record hidden in the comment of the first, or appended data, cannot change what the archive contains;
+//! - the archive must have one reading only, the one other readers find: the end-of-central-directory record must end the file exactly, it must be the last end-record signature in the file (readers such as Python's `zipfile` and Info-ZIP's `unzip` take the last one they find, so a record hidden in the comment would otherwise show them other contents), only one record may end the file, the central directory must end exactly where the end records begin (a reader that finds the directory just before its end record would otherwise read another one), and a ZIP64 locator may stand before the end record only if that record needs it, with the ZIP64 record directly before the locator;
 //! - every entry's local header must repeat its central-directory name and compression method, and no two entries may overlap each other or the central directory (the "overlapping files" zip bomb);
 //! - names must be relative, without `..`, `.`, empty segments, backslashes or control characters, and unique when compared as OPC compares part names (ASCII case-insensitively);
 //! - encrypted entries, symbolic links, archives spanning several disks and compression methods other than stored and DEFLATE are refused;
@@ -23,6 +23,12 @@ const LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
 
 /// The size of the end-of-central-directory record without its comment.
 const END_RECORD_SIZE: usize = 22;
+/// The size of the ZIP64 end-of-central-directory locator.
+const ZIP64_LOCATOR_SIZE: usize = 20;
+/// The size of a ZIP64 end-of-central-directory record without extensible data.
+const ZIP64_RECORD_SIZE: usize = 56;
+/// The value of that record's size field, which leaves out its first 12 bytes.
+const ZIP64_RECORD_SIZE_FIELD: u64 = 44;
 /// The largest comment the end-of-central-directory record can carry.
 const MAX_COMMENT: usize = 0xFFFF;
 /// The size of a central-directory file header without its variable fields.
@@ -286,7 +292,7 @@ fn to_usize(value: u64) -> Result<usize, ZipError> {
     usize::try_from(value).map_err(|_| ZipError::Corrupt("a size or offset does not fit in memory"))
 }
 
-/// The offset of the end-of-central-directory record, which must end the file exactly (its comment included). A file in which two records both end the file is ambiguous (one hides in the other's comment, and readers disagree on which counts), so it is refused.
+/// The offset of the end-of-central-directory record, which must end the file exactly (its comment included) and be the last end-record signature in the file. Readers that search backwards take the last signature they find, so a record whose comment holds another signature is ambiguous, as is a file in which two records both end it (one hides in the other's comment); both are refused.
 fn find_end_record(data: &[u8]) -> Result<usize, ZipError> {
     let last = data
         .len()
@@ -294,8 +300,10 @@ fn find_end_record(data: &[u8]) -> Result<usize, ZipError> {
         .ok_or(ZipError::NotZip)?;
     let first = last.saturating_sub(MAX_COMMENT);
     let mut found = None;
+    let mut last_signature = None;
     for at in (first..=last).rev() {
         if u32_at(data, at)? == END_OF_CENTRAL_DIRECTORY {
+            last_signature.get_or_insert(at);
             let comment = usize::from(u16_at(data, at + 20)?);
             if at + END_RECORD_SIZE + comment == data.len() {
                 if found.is_some() {
@@ -307,7 +315,13 @@ fn find_end_record(data: &[u8]) -> Result<usize, ZipError> {
             }
         }
     }
-    found.ok_or(ZipError::NotZip)
+    let found = found.ok_or(ZipError::NotZip)?;
+    if last_signature != Some(found) {
+        return Err(ZipError::Corrupt(
+            "an end-of-central-directory signature follows the end record",
+        ));
+    }
+    Ok(found)
 }
 
 fn read_directory_location(
@@ -333,6 +347,15 @@ fn read_directory_location(
         if disk != 0 || directory_disk != 0 || entries_on_disk != entries {
             return Err(ZipError::MultiDisk);
         }
+        // Python's `zipfile` and Info-ZIP read a ZIP64 record whenever its locator stands before the end record, needed or not, and would then read another directory.
+        if end
+            .checked_sub(ZIP64_LOCATOR_SIZE)
+            .is_some_and(|locator| u32_at(data, locator).ok() == Some(ZIP64_END_LOCATOR))
+        {
+            return Err(ZipError::Corrupt(
+                "a ZIP64 end locator precedes an end record that needs none",
+            ));
+        }
         DirectoryLocation {
             offset: to_usize(u64::from(offset))?,
             size: to_usize(u64::from(size))?,
@@ -352,6 +375,12 @@ fn read_directory_location(
             "the central directory extends past its end record",
         ));
     }
+    // Readers that look for the directory just before its end record, as Python's `zipfile` does for archives with data in front, would read other bytes than the declared offset points to.
+    if directory_end < location.end {
+        return Err(ZipError::Corrupt(
+            "the central directory does not end where its end record begins",
+        ));
+    }
     // Every header takes at least 46 bytes, so a count the size cannot hold is a lie.
     if location
         .entries
@@ -368,7 +397,7 @@ fn read_directory_location(
 /// The central directory's location from the ZIP64 records, which the locator just before the end record points to.
 fn read_zip64_location(data: &[u8], end: usize) -> Result<DirectoryLocation, ZipError> {
     let locator = end
-        .checked_sub(20)
+        .checked_sub(ZIP64_LOCATOR_SIZE)
         .ok_or(ZipError::Corrupt("ZIP64 end locator missing"))?;
     if u32_at(data, locator)? != ZIP64_END_LOCATOR {
         return Err(ZipError::Corrupt("ZIP64 end locator missing"));
@@ -378,13 +407,20 @@ fn read_zip64_location(data: &[u8], end: usize) -> Result<DirectoryLocation, Zip
     }
     let record = to_usize(u64_at(data, locator + 8)?)?;
     if record
-        .checked_add(56)
+        .checked_add(ZIP64_RECORD_SIZE)
         .is_none_or(|record_end| record_end > locator)
     {
         return Err(ZipError::Corrupt("ZIP64 end record outside the archive"));
     }
     if u32_at(data, record)? != ZIP64_END_OF_CENTRAL_DIRECTORY {
         return Err(ZipError::Corrupt("ZIP64 end record missing"));
+    }
+    // Python's `zipfile` reads the ZIP64 record just before the locator, whatever the locator says, and assumes it has no extensible data; so must the record be.
+    if record + ZIP64_RECORD_SIZE != locator || u64_at(data, record + 4)? != ZIP64_RECORD_SIZE_FIELD
+    {
+        return Err(ZipError::Corrupt(
+            "the ZIP64 end record does not stand, without extensible data, just before its locator",
+        ));
     }
     if u32_at(data, record + 16)? != 0 || u32_at(data, record + 20)? != 0 {
         return Err(ZipError::MultiDisk);
