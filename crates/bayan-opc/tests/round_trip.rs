@@ -1,6 +1,8 @@
 //! Reading and writing real `.docx` files: an unmodified package written back keeps every part byte-identical, regenerated metadata keeps its exact content, and an edit changes only what it touches (work package CORE-005, acceptance criterion 1).
 //!
 //! The documents are python-docx's test files (see `fixtures/python-docx/README.md`); they are compiled into the tests, so the tests read no files and also run in WebAssembly.
+//!
+//! A failure message names the fixture and the position of a part or relationship, never a part name or anything else taken from a document, which nothing may print (CodeQL's code scanning, which treats part names as sensitive, holds the tests to this too).
 
 #![cfg(test)]
 
@@ -64,19 +66,24 @@ fn opens_and_reads_every_part_of_real_documents() {
             names(&package).contains(&"/word/document.xml".to_owned()),
             "{fixture}"
         );
-        for part in package.parts() {
+        for (position, part) in package.parts().enumerate() {
             package.read_part(part).unwrap();
             if !part.is_relationships_part() {
-                assert!(package.content_type(part).is_some(), "{fixture}: {part}");
+                assert!(
+                    package.content_type(part).is_some(),
+                    "{fixture}: part {position}"
+                );
             }
         }
         // Every internal relationship of these documents resolves to a part they contain.
-        for source in sources(&package) {
-            for relationship in package.relationships(&source).unwrap().iter() {
+        for (position, source) in sources(&package).into_iter().enumerate() {
+            for (index, relationship) in package.relationships(&source).unwrap().iter().enumerate()
+            {
                 match relationship.resolve(&source).unwrap() {
-                    Target::Part(target) => {
-                        assert!(package.contains(&target), "{fixture}: {target}")
-                    }
+                    Target::Part(target) => assert!(
+                        package.contains(&target),
+                        "{fixture}: relationship {index} of source {position}"
+                    ),
                     Target::External(_) => {
                         assert_eq!(relationship.target_mode(), TargetMode::External)
                     }
@@ -121,8 +128,11 @@ fn writes_an_unmodified_package_back_with_every_part_byte_identical() {
         let package = open(bytes);
         let written = PackageWriter::from_package(&package).finish().unwrap();
         let reopened = open(&written);
-        assert_eq!(names(&package), names(&reopened), "{fixture}");
-        for part in package.parts() {
+        assert!(
+            names(&package) == names(&reopened),
+            "{fixture}: the copy has other parts"
+        );
+        for (position, part) in package.parts().enumerate() {
             let before = package.entry_of(part).unwrap();
             let after = reopened.entry_of(part).unwrap();
             let (before_entry, after_entry) = (
@@ -132,7 +142,7 @@ fn writes_an_unmodified_package_back_with_every_part_byte_identical() {
             assert_eq!(
                 package.zip().raw_data(before).unwrap(),
                 reopened.zip().raw_data(after).unwrap(),
-                "{fixture}: {part}"
+                "{fixture}: part {position}"
             );
             assert_eq!(before_entry.method(), after_entry.method());
             assert_eq!(before_entry.crc32(), after_entry.crc32());
@@ -173,15 +183,14 @@ fn regenerated_metadata_parts_keep_their_exact_content() {
             original_types,
             "{fixture}"
         );
-        for source in sources(&package) {
-            let name = source.relationships_part();
-            let original = package.read_part(&name).unwrap();
+        for (position, source) in sources(&package).into_iter().enumerate() {
+            let original = package.read_part(&source.relationships_part()).unwrap();
             assert_eq!(
                 Relationships::parse(&original, &Limits::default())
                     .unwrap()
                     .to_xml(),
                 original,
-                "{fixture}: {name}"
+                "{fixture}: relationships part {position}"
             );
         }
 
@@ -210,16 +219,19 @@ fn regenerated_metadata_parts_keep_their_exact_content() {
         let written = writer.finish().unwrap();
         let reopened = open(&written);
         assert_eq!(read_entry(&reopened, ZIP_NAME), original_types, "{fixture}");
-        for source in sources(&package) {
+        for (position, source) in sources(&package).into_iter().enumerate() {
             let name = source.relationships_part();
             assert_eq!(
                 reopened.read_part(&name).unwrap(),
                 package.read_part(&name).unwrap(),
-                "{fixture}: {name}"
+                "{fixture}: relationships part {position}"
             );
         }
         // Every other part is still copied byte for byte.
-        for part in package.parts().filter(|part| !part.is_relationships_part()) {
+        for (position, part) in package.parts().enumerate() {
+            if part.is_relationships_part() {
+                continue;
+            }
             assert_eq!(
                 package
                     .zip()
@@ -229,7 +241,7 @@ fn regenerated_metadata_parts_keep_their_exact_content() {
                     .zip()
                     .raw_data(reopened.entry_of(part).unwrap())
                     .unwrap(),
-                "{fixture}: {part}"
+                "{fixture}: part {position}"
             );
         }
     }
@@ -288,7 +300,7 @@ fn an_edit_changes_only_what_it_touches() {
     assert_eq!(reopened.content_type(&image), Some("image/png"));
     let added = reopened.relationships(&source).unwrap().get(&id).unwrap();
     assert_eq!(added.resolve(&source).unwrap(), Target::Part(image.clone()));
-    for part in package.parts() {
+    for (position, part) in package.parts().enumerate() {
         if *part == document || *part == source.relationships_part() {
             continue;
         }
@@ -301,7 +313,7 @@ fn an_edit_changes_only_what_it_touches() {
                 .zip()
                 .raw_data(reopened.entry_of(part).unwrap())
                 .unwrap(),
-            "{part}"
+            "part {position}"
         );
     }
     // The new part comes last, after every original part.
