@@ -661,7 +661,7 @@ fn reads_and_verifies_copies_from_the_longest_distance() {
 
 #[test]
 fn reads_verifies_and_copies_damaged_entries_alike() {
-    // A large entry compressed as usual, damaged in 24 places one at a time: each damage is refused, and `read`, `verify` and `raw_entry` give the same answer for each.
+    // A large entry compressed as usual, damaged in 24 places one at a time: each damage is refused as damaged data (which of the three errors depends on where the damage falls), and `read`, `verify` and `raw_entry` give the same answer for each.
     let item = Item::deflated("text.txt", &craft::text(300 * 1024));
     let length = item.stored.len();
     for step in 0..24 {
@@ -671,7 +671,17 @@ fn reads_verifies_and_copies_damaged_entries_alike() {
         let bytes = Archive::new(vec![damaged]).build();
         let archive = open_zip(&bytes).unwrap();
         let verified = archive.verify(0);
-        assert!(verified.is_err(), "damage at {position}");
+        assert!(
+            matches!(
+                verified,
+                Err(Error::Zip(
+                    ZipError::CorruptData { entry: 0 }
+                        | ZipError::SizeMismatch { entry: 0 }
+                        | ZipError::ChecksumMismatch { entry: 0 }
+                ))
+            ),
+            "damage at {position}"
+        );
         assert_eq!(
             archive.read(0).map(|_| ()),
             verified,
