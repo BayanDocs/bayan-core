@@ -391,15 +391,16 @@ fn a_corpus_kept_in_an_s3_bucket() {
             .contains("?continuation-token=page-2&list-type=2&prefix=")),
         "the listing was not followed to its second page, with its query sorted"
     );
-    // Every upload carries the SHA-256 of its bytes, and signs it, so that the server refuses bytes that changed after the key was computed.
-    for put in requests.iter().filter(|request| request.method == "PUT") {
+    // Every signed request carries the SHA-256 of its body, and signs it: an upload's, so that the server refuses bytes that changed after the key was computed, and the empty body's on the others, which S3 requires. From version 8.0 curl adds the empty body's itself, so with such a curl this loop cannot tell whether the tool sent it; the unit test `signed_requests_carry_the_sha256_of_their_body` checks that it does, for curl 7.87 and 7.88.
+    for signed in &requests {
         assert_eq!(
-            put.header("x-amz-content-sha256"),
-            Some(Sha256::of(&put.body).to_string().as_str()),
-            "{}",
-            put.target
+            signed.header("x-amz-content-sha256"),
+            Some(Sha256::of(&signed.body).to_string().as_str()),
+            "{} {}",
+            signed.method,
+            signed.target
         );
-        let authorization = put.header("authorization").unwrap_or_default();
+        let authorization = signed.header("authorization").unwrap_or_default();
         assert!(
             authorization
                 .split("SignedHeaders=")
@@ -585,6 +586,29 @@ fn curl_reads_no_personal_configuration() {
         );
         assert_ne!(request.header("user-agent"), Some("from-curlrc"));
     }
+    // The control: in the same environment, a curl that is not told `--disable` reads the file and sends its header.
+    let mut control = Command::new("curl");
+    control.args([
+        "--silent",
+        "--noproxy",
+        "*",
+        "--output",
+        path(&folder.join("control.out")),
+        &format!("http://127.0.0.1:{}/{BUCKET}/control", server.port),
+    ]);
+    for name in [
+        "HOME",
+        "CURL_HOME",
+        "XDG_CONFIG_HOME",
+        "USERPROFILE",
+        "APPDATA",
+    ] {
+        control.env(name, &folder);
+    }
+    assert!(control.status().unwrap().success());
+    let requests = server.take_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].header("x-from-curlrc"), Some("read"));
 }
 
 #[test]
@@ -596,10 +620,20 @@ fn a_curl_too_old_is_refused_before_any_request() {
     }
     let server = FakeS3::start();
     let folder = temporary_folder("old-curl");
+    // The stand-in reports an old version and hands every other call to the real curl, so a request that got past the version check would reach the server.
+    let real = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|folder| folder.join("curl"))
+        .find(|candidate| candidate.is_file())
+        .expect("curl on PATH");
     let fake = folder.join("curl");
     fs::write(
         &fake,
-        "#!/bin/sh\necho 'curl 7.81.0 (x86_64-pc-linux-gnu) libcurl/7.81.0'\n",
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --disable ] && [ \"$2\" = --version ]; then\n  echo 'curl 7.81.0 (x86_64-pc-linux-gnu) libcurl/7.81.0'\n  exit 0\nfi\nexec '{}' \"$@\"\n",
+            real.display()
+        ),
     )
     .unwrap();
     assert!(
@@ -637,6 +671,29 @@ fn a_curl_too_old_is_refused_before_any_request() {
         stderr(&output)
     );
     assert!(server.take_requests().is_empty());
+    // Unsigned requests need only 7.63, so the same stand-in lets them through to the server.
+    let mut anonymous = Command::new(env!("CARGO_BIN_EXE_bayan-lab"));
+    anonymous.args([
+        "corpus",
+        "verify",
+        "--manifest",
+        path(&manifest),
+        "--store",
+        &server.address(),
+    ]);
+    for name in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "BAYAN_LAB_MANIFEST",
+        "BAYAN_LAB_STORE",
+    ] {
+        anonymous.env_remove(name);
+    }
+    anonymous.env("PATH", &folder);
+    let output = anonymous.output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!server.take_requests().is_empty());
 }
 
 #[test]
@@ -673,6 +730,29 @@ fn responses_are_limited_and_a_retry_starts_afresh() {
     let response = request(&server, Method::Get, "object", 1024).unwrap();
     assert_eq!((response.status, response.body), (200, object));
     assert_eq!(server.take_requests().len(), 2);
+}
+
+#[test]
+fn curl_messages_never_name_the_file_being_sent() {
+    // A private document's file name could name a person; curl quotes the path of a file it cannot open.
+    let server = FakeS3::start();
+    let folder = temporary_folder("upload-path");
+    let missing = folder.join("Jane-Doe-medical-letter.docx");
+    let url = format!("http://127.0.0.1:{}/{BUCKET}/object", server.port);
+    let error = curl::run(&curl::Request {
+        method: Method::Put,
+        url: &url,
+        shown: "…/object",
+        upload: Some((&missing, "application/octet-stream")),
+        payload_sha256: None,
+        max_size: 1024,
+        local_http: true,
+        signing: None,
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("the file"), "{error}");
+    assert!(!error.contains("Jane-Doe"), "{error}");
 }
 
 #[test]

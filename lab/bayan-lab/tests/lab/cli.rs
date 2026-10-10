@@ -882,15 +882,24 @@ fn verify_checks_sizes_and_the_layout_the_tools_write() {
         "{}",
         verified.err
     );
-    // Bytes the tools would not write, such as a key given twice, which the reader would resolve silently.
-    let doubled = original.replacen(
-        "  \"version\": 1,\n",
-        "  \"version\": 1,\n  \"version\": 1,\n",
-        1,
-    );
+    // Bytes the tools would not write: a source given twice, which the reader resolves silently by keeping the second, so only the layout check sees it.
+    let start = original.find("    \"example\": {").unwrap();
+    let end = start + original[start..].find("\n    }").unwrap() + "\n    }".len();
+    let entry = &original[start..end];
+    let doubled = original.replacen(entry, &format!("{entry},\n{entry}"), 1);
     fs::write(&corpus.manifest, &doubled).unwrap();
     let verified = corpus.run(&["verify"]);
-    assert_ne!(verified.outcome, Outcome::Success);
+    assert_eq!(verified.outcome, Outcome::Failed, "{}", verified.err);
+    assert!(
+        verified
+            .err
+            .contains("the manifest is not in the layout the tools write"),
+        "{}",
+        verified.err
+    );
+    // Line endings do not count: a copy edited on Windows verifies.
+    fs::write(&corpus.manifest, original.replace('\n', "\r\n")).unwrap();
+    assert_eq!(corpus.run(&["verify"]).outcome, Outcome::Success);
     fs::write(&corpus.manifest, format!("{original}\n")).unwrap();
     let verified = corpus.run(&["verify"]);
     assert_eq!(verified.outcome, Outcome::Failed);
@@ -994,6 +1003,35 @@ fn tag_keeps_its_progress_when_the_store_fails() {
     let after = corpus.manifest();
     assert!(after.documents[0].scan.is_some());
     assert!(after.documents[1].scan.is_none());
+}
+
+#[test]
+fn strings_from_a_manifest_reach_the_terminal_escaped() {
+    let corpus = Corpus::new("escaped");
+    corpus.add_source();
+    let root = text(&corpus.source).to_owned();
+    corpus.write("one.docx", &text_document("One"));
+    corpus.run(&["add", "--source", "example", "--root", &root, "one.docx"]);
+    // A manifest from elsewhere may hold any text: an escape sequence that would recolor the terminal, a right-to-left override.
+    let mut manifest = corpus.manifest();
+    manifest.documents[0].provenance[0].path = Some("sub/\u{1b}[31mred\u{202E}xcod.docx".into());
+    manifest.documents[0].license = "MIT\u{1b}[0m".into();
+    fs::write(&corpus.manifest, manifest.to_json().unwrap()).unwrap();
+    let listed = corpus.run(&["list"]);
+    let verified = corpus.run(&["verify"]);
+    for output in [&listed.out, &listed.err, &verified.out, &verified.err] {
+        assert!(!output.contains(['\u{1b}', '\u{202E}']), "{output:?}");
+    }
+    assert!(
+        listed.out.contains("example:sub/?[31mred?xcod.docx"),
+        "{}",
+        listed.out
+    );
+    assert!(
+        verified.err.contains("license `MIT?[0m`"),
+        "{}",
+        verified.err
+    );
 }
 
 #[test]

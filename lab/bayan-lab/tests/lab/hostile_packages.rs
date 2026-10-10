@@ -858,6 +858,58 @@ fn a_zip64_record_with_extensible_data() {
 }
 
 #[test]
+fn a_zip64_record_away_from_its_locator() {
+    // The locator points to the record, but Python's zipfile looks just before the locator: eight bytes between them give it other bytes to read.
+    let mut bytes = zip_with(
+        &valid().entries(),
+        &ZipLayout {
+            zip64: true,
+            ..ZipLayout::default()
+        },
+    );
+    let record_end = bytes.len() - 22 - 20;
+    bytes.splice(record_end..record_end, [0_u8; 8]);
+    assert_eq!(
+        zip_refusal(&bytes),
+        ZipError::Corrupt(
+            "the ZIP64 end record does not stand, without extensible data, just before its locator"
+        )
+    );
+}
+
+#[test]
+fn entry_counts_that_disagree_claim_several_disks() {
+    // The end record counts the entries on this disk and in all; a single-disk archive has the same number in both.
+    let mut classic = zip(&valid().entries());
+    let end = classic.len() - 22;
+    let entries = u16::from_le_bytes([classic[end + 10], classic[end + 11]]);
+    classic.splice(end + 8..end + 10, (entries - 1).to_le_bytes());
+    assert_eq!(zip_refusal(&classic), ZipError::MultiDisk);
+    let mut zip64 = zip_with(
+        &valid().entries(),
+        &ZipLayout {
+            zip64: true,
+            ..ZipLayout::default()
+        },
+    );
+    let record = zip64.len() - 22 - 20 - 56;
+    let entries = u64::from_le_bytes(zip64[record + 32..record + 40].try_into().unwrap());
+    zip64.splice(record + 24..record + 32, (entries - 1).to_le_bytes());
+    assert_eq!(zip_refusal(&zip64), ZipError::MultiDisk);
+}
+
+#[test]
+fn a_folder_entry_with_content() {
+    // A name ending in `/` is a folder; content under it would be a file that most readers never show.
+    let mut entries = valid().entries();
+    entries.push(ZipEntry::stored("word/hidden/", b"content"));
+    assert_eq!(zip_refusal(&zip(&entries)), ZipError::BadName);
+    let mut empty = valid().entries();
+    empty.push(ZipEntry::stored("word/folder/", b""));
+    assert!(scan(&zip(&empty), &Limits::DEFAULT).is_ok());
+}
+
+#[test]
 fn compatibility_options_of_a_documents_own_choosing_are_not_recorded() {
     // Every child of w:compat used to become a recorded option: a million invented names made a 24 MB manifest entry.
     let mut options = String::from("<w:useFELayout/><w:doNotExpandShiftReturn w:val=\"0\"/>");

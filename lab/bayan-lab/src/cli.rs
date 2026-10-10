@@ -791,8 +791,8 @@ fn verify(
     let manifest = Manifest::from_json(&text)?;
     let exclusions = exclusions_of(arguments)?;
     let mut failures = 0_usize;
-    // The tools write every manifest in one exact layout, so any other bytes mean a hand edit, or a duplicate key that the reader silently resolved.
-    if manifest.to_json()? != text {
+    // The tools write every manifest in one exact layout, so any other bytes mean a hand edit, or a duplicate key that the reader silently resolved. Line endings are not compared: a copy edited on Windows may end its lines with CR LF.
+    if manifest.to_json()? != text.replace("\r\n", "\n") {
         failures += 1;
         let _ = writeln!(
             err,

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::hash::Sha256;
 use crate::scan::features::Feature;
 use crate::scan::scripts::Script;
-use crate::scan::{Findings, TAGGER_VERSION, is_hidden_character};
+use crate::scan::{Findings, TAGGER_VERSION, is_hidden_character, printable};
 
 /// The value of [`Manifest::format`].
 pub const FORMAT: &str = "bayan-lab-corpus-manifest";
@@ -419,7 +419,7 @@ impl Manifest {
                 if !PUBLIC_LICENSES.contains(&document.license.as_str()) {
                     problems.push(format!(
                         "{id}: license `{}` is not one of the licenses allowed for public tiers ({})",
-                        document.license,
+                        printable(&document.license, 100),
                         PUBLIC_LICENSES.join(", ")
                     ));
                 }
@@ -434,7 +434,9 @@ impl Manifest {
         {
             problems.push(format!(
                 "{id}: license `{}` differs from the license `{}` of its first source `{}`",
-                document.license, source.license, first.source
+                printable(&document.license, 100),
+                printable(&source.license, 100),
+                printable(&first.source, 100)
             ));
         }
         let mut seen = BTreeSet::new();
@@ -442,7 +444,7 @@ impl Manifest {
             if !self.sources.contains_key(&provenance.source) {
                 problems.push(format!(
                     "{id}: source `{}` is not defined",
-                    provenance.source
+                    printable(&provenance.source, 100)
                 ));
             }
             if !seen.insert(provenance) {
@@ -493,8 +495,10 @@ pub fn is_source_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn check_source(name: &str, source: &Source, problems: &mut Vec<String>) {
-    if !is_source_name(name) {
+fn check_source(raw_name: &str, source: &Source, problems: &mut Vec<String>) {
+    // Every string of a manifest may come from someone else's file: messages show it escaped, so that it cannot hide or reorder text or send escape sequences to a terminal.
+    let name = printable(raw_name, 100);
+    if !is_source_name(raw_name) {
         problems.push(format!(
             "source `{name}`: names use lower-case letters, digits and hyphens"
         ));
@@ -510,7 +514,7 @@ fn check_source(name: &str, source: &Source, problems: &mut Vec<String>) {
     if !PUBLIC_LICENSES.contains(&source.license.as_str()) && source.license != NO_ASSERTION {
         problems.push(format!(
             "source `{name}`: license `{}` is not allowed",
-            source.license
+            printable(&source.license, 100)
         ));
     }
     if source.copyright.trim().is_empty() && source.license != NO_ASSERTION {
@@ -539,7 +543,7 @@ fn check_source(name: &str, source: &Source, problems: &mut Vec<String>) {
         if !is_relative_path(&text.path) {
             problems.push(format!(
                 "source `{name}`: license text path `{}` is not a relative path",
-                text.path
+                printable(&text.path, 300)
             ));
         }
     }
@@ -554,7 +558,10 @@ fn check_scan(id: &str, scan: &Scan, problems: &mut Vec<String>) {
     }
     for feature in &scan.features {
         match Feature::from_name(feature) {
-            None => problems.push(format!("{id}: unknown feature `{feature}`")),
+            None => problems.push(format!(
+                "{id}: unknown feature `{}`",
+                printable(feature, 100)
+            )),
             Some(known) if known.not_detectable().is_some() => {
                 problems.push(format!(
                     "{id}: feature `{feature}` cannot be detected by scanning"
@@ -806,6 +813,58 @@ mod tests {
                 assert!(problems.contains(&id), "{problems}");
             }
         }
+        // The rules about a source name the source.
+        type SourceFault = Box<dyn Fn(&mut Source)>;
+        let source_cases: Vec<(&str, SourceFault)> = vec![
+            (
+                "source `example`: no revision",
+                Box::new(|s| s.revision = " ".into()),
+            ),
+            (
+                "source `example`: license `GPL-3.0-only` is not allowed",
+                Box::new(|s| s.license = "GPL-3.0-only".into()),
+            ),
+            (
+                "source `example`: no copyright notice",
+                Box::new(|s| s.copyright = String::new()),
+            ),
+            (
+                "source `example`: no license text",
+                Box::new(|s| s.license_texts.clear()),
+            ),
+            (
+                "source `example`: license text path `../LICENSE` is not a relative path",
+                Box::new(|s| s.license_texts[0].path = "../LICENSE".into()),
+            ),
+        ];
+        for (expected, fault) in source_cases {
+            let mut manifest = manifest();
+            if let Some(source) = manifest.sources.get_mut("example") {
+                fault(source);
+            }
+            let problems = manifest.check().unwrap_err().to_string();
+            assert!(
+                problems.contains(expected),
+                "missing {expected:?} in:\n{problems}"
+            );
+        }
+    }
+
+    #[test]
+    fn messages_show_manifest_strings_escaped() {
+        // Someone else's manifest can hold any text, such as an escape sequence that recolors a terminal.
+        let mut manifest = manifest();
+        manifest.documents[0].license = "MIT\u{1b}[31m".into();
+        if let Some(source) = manifest.sources.get_mut("example") {
+            source.license_texts[0].path = "\u{202E}LICENSE".into();
+        }
+        let problems = manifest.check().unwrap_err().to_string();
+        assert!(!problems.contains(['\u{1b}', '\u{202E}']), "{problems:?}");
+        assert!(problems.contains("license `MIT?[31m`"), "{problems}");
+        assert!(
+            problems.contains("license text path `?LICENSE`"),
+            "{problems}"
+        );
     }
 
     #[test]

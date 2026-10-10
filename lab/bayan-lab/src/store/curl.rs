@@ -2,7 +2,7 @@
 //!
 //! Every supported platform has curl (Windows 10 and later include it), so the lab needs no HTTP or TLS library of its own, as xtask's crates.io requests do. Each request runs one curl process that reads no personal configuration file (`--disable`), allows only HTTPS (or plain HTTP to this machine, for tests and local servers), never follows a redirect, expands no URL patterns (`--globoff`), and has time limits: ten minutes in all, 30 seconds to connect, and a minute at most below 1 KiB per second. The response body comes back through a pipe, and this module stops reading, and stops curl, as soon as the body exceeds the request's limit, whatever curl's version; no document is ever written to a temporary file. An upload is read by curl from the file the document was read from. Failures that may pass are retried up to three times, each time from the start, so a failed response can never mix with a later one: no connection, a timeout, a failed TLS handshake, a broken transfer (curl's exit codes 5, 6, 7, 18, 28, 35, 52, 55, 56 and 92), or HTTP status 408, 429 or 5xx. A response larger than its limit is not retried; it would be as large the next time.
 //!
-//! The module needs curl 7.63 or later, and signed S3 requests need 7.87 or later, which signs an upload's SHA-256 (`x-amz-content-sha256`); it checks the version once, before its first request.
+//! The module needs curl 7.63 or later, and signed S3 requests need 7.87 or later, which signs the SHA-256 the module sends in `x-amz-content-sha256`: an upload's, and the empty body's on every other signed request, as S3 requires (curl adds that header by itself only from version 8.0). It checks the version once, before its first request.
 //!
 //! **Credentials** come only from the environment variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN`, and only the S3 store uses them. curl signs requests with AWS Signature Version 4 itself (`--aws-sigv4`): the tool implements no cryptography. The credentials are handed to curl on its standard input (`--config -`), never on its command line, where other users of the machine could see them, and they never appear in messages.
 
@@ -312,7 +312,11 @@ fn arguments(request: &Request<'_>) -> Result<Vec<OsString>, StoreError> {
         arguments.push(OsString::from("--header"));
         arguments.push(OsString::from(format!("Content-Type: {content_type}")));
     }
-    if let Some(sha256) = request.payload_sha256 {
+    // Signature Version 4 for S3 signs the body's SHA-256, sent as `x-amz-content-sha256`, which S3 requires on every signed request. curl adds it by itself only from version 8.0, so a signed request without a body sends the SHA-256 of nothing.
+    let payload_sha256 = request
+        .payload_sha256
+        .or_else(|| request.signing.map(|_| Sha256::of(b"")));
+    if let Some(sha256) = payload_sha256 {
         arguments.push(OsString::from("--header"));
         arguments.push(OsString::from(format!("x-amz-content-sha256: {sha256}")));
     }
@@ -573,6 +577,11 @@ mod tests {
         assert!(has_pair(&get, "--proto", "=https"));
         assert!(get.iter().any(|argument| argument == "--globoff"));
         assert!(has_pair(&get, "--max-filesize", "1000"));
+        // A stalled server holds no request for long: ten minutes in all, 30 seconds to connect, a minute below 1 KiB per second.
+        assert!(has_pair(&get, "--max-time", "600"));
+        assert!(has_pair(&get, "--connect-timeout", "30"));
+        assert!(has_pair(&get, "--speed-limit", "1024"));
+        assert!(has_pair(&get, "--speed-time", "60"));
         assert!(!get.iter().any(|argument| argument == "--noproxy"));
         let local = strings(&arguments(&request(Method::Get, None, true, None)).unwrap());
         assert!(has_pair(&local, "--proto", "=http"));
@@ -623,6 +632,39 @@ mod tests {
             credentials_config(&credentials),
             "user = \"AKIDEXAMPLE:secret\\\"key\\\\\"\nheader = \"x-amz-security-token: session-token\"\n"
         );
+    }
+
+    #[test]
+    fn signed_requests_carry_the_sha256_of_their_body() {
+        let credentials = Credentials {
+            access_key: "AKIDEXAMPLE".to_owned(),
+            secret_key: "secret".to_owned(),
+            session_token: None,
+        };
+        let header = |arguments: &[String]| {
+            arguments
+                .windows(2)
+                .find(|pair| pair[0] == "--header" && pair[1].starts_with("x-amz-content-sha256:"))
+                .map(|pair| pair[1].clone())
+        };
+        // curl 7.87 and 7.88 sign whatever this header says but do not add it, and S3 refuses a signed request without it.
+        let signed = strings(
+            &arguments(&request(
+                Method::Get,
+                None,
+                false,
+                Some((&credentials, "auto")),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            header(&signed).as_deref(),
+            Some(
+                "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            )
+        );
+        let anonymous = strings(&arguments(&request(Method::Head, None, false, None)).unwrap());
+        assert_eq!(header(&anonymous), None);
     }
 
     #[test]
