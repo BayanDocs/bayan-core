@@ -2,7 +2,7 @@
 
 /// The limits bayan-opc enforces while reading a package or a compound file (ADR-0006 §5: every parser limits sizes, depths and counts).
 ///
-/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata of a package, from the content types stream to the core properties, is limited in total size and in XML nodes, and so are the names and identifiers that its models keep several times. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, opening a package at most about 90 MiB for its metadata, and opening it and reading its core properties at most about 110 MiB together, whatever the input claims (the crate's documentation says how that was measured).
+/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata of a package, from the content types stream to the core properties, is limited in total size and in XML nodes, and so are the names and identifiers that its models keep several times. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, and opening a package and reading its core properties at most about 200 MiB together, whatever the input claims (the crate's documentation says how that was measured).
 ///
 /// The defaults ([`Limits::DEFAULT`]) open ordinary documents comfortably and stop malicious ones; a host can raise a limit (for example after asking the user, for a document with very large embedded media) by changing one field:
 ///
@@ -73,13 +73,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_the_defaults_the_memory_bounds_were_measured_with() {
-        // The documented bounds (about 90 MiB to open a package, about 110 MiB with its core properties) were measured with these values; a change to one of them must measure the bounds again and update the documentation.
+    fn keeps_the_defaults_the_memory_bound_was_measured_with() {
+        // The documented bound (about 200 MiB to open a package and read its core properties) was measured with these values; a change to one of them must measure the bound again and update the documentation.
         let limits = Limits::default();
+        assert_eq!(limits.max_entries, 10_000);
+        assert_eq!(limits.max_name_length, 1_024);
         assert_eq!(limits.max_metadata_size, 8 << 20);
         assert_eq!(limits.max_metadata_total_size, 16 << 20);
         assert_eq!(limits.max_xml_nodes, 250_000);
-        assert_eq!(limits.max_name_length, 1_024);
         assert_eq!(limits.max_xml_name_length, 256);
     }
 }
