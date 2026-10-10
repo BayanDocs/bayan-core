@@ -1,6 +1,6 @@
 # Private corpus (T2): options for the owner
 
-**Status: for the owner's decision** (LAB-001 AC-4; owner checklist item 10). Nothing described here exists yet: setting up the private corpus is part of LAB-101, once the owner has decided the questions below and created the accounts.
+**Status: open, for the owner's decision** (LAB-001 AC-4; owner checklist item 10). On 2026-10-10 the owner decided to make these decisions before LAB-101 starts collecting, after the legal check (decision 6); until then this page stays as it is. Nothing described here exists yet: setting up the private corpus is part of LAB-101, once the owner has decided the questions below and created the accounts. Two things are already settled: the public corpus lives in its own R2 bucket (see [storage.md](storage.md)), so the private one never shares it, and `bayan-lab corpus stats` refuses manifests with private documents until LAB-101 adds the folding of rare names that decision 5 describes.
 
 ## What the private corpus is for
 

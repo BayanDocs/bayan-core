@@ -48,7 +48,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The limits the corpus tools use. Real documents stay far below them: in the 19,209 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 43 elements, and no name is longer than 37 bytes.
+    /// The limits the corpus tools use. Real documents stay far below them: in the 17,458 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 29 elements, and no name is longer than 37 bytes.
     pub const DEFAULT: Self = Self {
         max_package_size: 512 * 1024 * 1024,
         zip: ZipLimits {
