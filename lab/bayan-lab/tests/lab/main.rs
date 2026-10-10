@@ -6,6 +6,7 @@
 
 mod cli;
 mod hostile_packages;
+mod public_corpus;
 mod s3_store;
 mod support;
 mod tagging;

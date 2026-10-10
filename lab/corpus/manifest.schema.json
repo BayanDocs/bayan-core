@@ -1,0 +1,372 @@
+{
+  "$defs": {
+    "Compatibility": {
+      "additionalProperties": false,
+      "description": "A document's compatibility settings.",
+      "properties": {
+        "mode": {
+          "description": "The `compatibilityMode` setting (15 for Word 2013 and later, 14, 12 or 11), or `null` when the document has none.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "options": {
+          "description": "The legacy compatibility options it switches on, by element name, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "options"
+      ],
+      "type": "object"
+    },
+    "Document": {
+      "additionalProperties": false,
+      "description": "One document of the corpus.",
+      "properties": {
+        "ground_truth": {
+          "$ref": "#/$defs/GroundTruth",
+          "description": "Whether Word ground truth exists for it."
+        },
+        "license": {
+          "description": "The SPDX license expression under which the corpus redistributes it; `NOASSERTION` for private documents.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Curator's notes: never document content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "page_count": {
+          "description": "Its page count in Word, once ground truth exists (LAB-002); `null` until then.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "provenance": {
+          "description": "Where it was found: at least one source, the first being the one whose license applies.",
+          "items": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "type": "array"
+        },
+        "scan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Scan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the tagger found; `null` until the document is tagged."
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256",
+          "description": "The SHA-256 of the document's bytes: its identity, and its key in the store."
+        },
+        "size": {
+          "description": "Its size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "description": "Its corpus tier."
+        }
+      },
+      "required": [
+        "sha256",
+        "size",
+        "tier",
+        "license",
+        "provenance",
+        "ground_truth"
+      ],
+      "type": "object"
+    },
+    "GroundTruth": {
+      "additionalProperties": false,
+      "description": "Whether Word ground truth exists for a document (LAB-002 fills it in).",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/GroundTruthStatus",
+          "description": "`none`, `produced` or `failed`."
+        },
+        "word_build": {
+          "description": "The Word build that produced it, once produced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "GroundTruthStatus": {
+      "description": "The ground-truth status of a document.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not produced yet.",
+          "type": "string"
+        },
+        {
+          "const": "produced",
+          "description": "Produced by the Word build in [`GroundTruth::word_build`].",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Word could not produce it (the harness logs why).",
+          "type": "string"
+        }
+      ]
+    },
+    "LicenseText": {
+      "additionalProperties": false,
+      "description": "A license or notice file of a source.",
+      "properties": {
+        "path": {
+          "description": "The file's path in the source, such as `LICENSE`.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256",
+          "description": "The SHA-256 of the file, under which the store keeps it."
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Where a document was found.",
+      "properties": {
+        "path": {
+          "description": "The document's path in the source. Never recorded for private documents, whose file names can reveal personal data.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "The name of a source in [`Manifest::sources`].",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
+    "Scan": {
+      "additionalProperties": false,
+      "description": "What the tagger found in a document.",
+      "properties": {
+        "application": {
+          "description": "The application that last saved it, from its application properties.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compatibility": {
+          "$ref": "#/$defs/Compatibility",
+          "description": "Its compatibility settings."
+        },
+        "features": {
+          "description": "The coverage-matrix features the document uses, by their names in the matrix, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fonts": {
+          "description": "The fonts it names, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "languages": {
+          "description": "The language tags it declares, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "description": "Non-fatal observations of the tagger.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pages_hint": {
+          "description": "The page count that application recorded: a hint until Word's own count is known.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scripts": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Characters per script in its text.",
+          "type": "object"
+        },
+        "tagger": {
+          "description": "The version of the tagging rules that produced this ([`TAGGER_VERSION`]).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tagger",
+        "features",
+        "fonts",
+        "languages",
+        "scripts",
+        "compatibility"
+      ],
+      "type": "object"
+    },
+    "Sha256": {
+      "description": "A SHA-256 digest: 64 lower-case hexadecimal digits.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Where documents come from, described once for all of them.",
+      "properties": {
+        "copyright": {
+          "description": "The copyright notice of the source, as its license file states it.",
+          "type": "string"
+        },
+        "license": {
+          "description": "The SPDX license expression under which the source distributes its documents.",
+          "type": "string"
+        },
+        "license_texts": {
+          "description": "The source's license and notice files, which the store keeps by SHA-256 so the corpus can be redistributed with them.",
+          "items": {
+            "$ref": "#/$defs/LicenseText"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "description": "Why the license applies to the documents, and anything else a reviewer should know.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "The exact revision the documents were taken from, such as a full Git commit hash.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Where the source can be found, such as a repository's HTTPS address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "revision",
+        "license",
+        "copyright",
+        "license_texts"
+      ],
+      "type": "object"
+    },
+    "Tier": {
+      "description": "The corpus tiers of the Fidelity Lab specification (§3).",
+      "oneOf": [
+        {
+          "const": "T0",
+          "description": "Probes: small generated documents, each isolating one behavior.",
+          "type": "string"
+        },
+        {
+          "const": "T1",
+          "description": "Public: real or realistic documents with redistributable licenses.",
+          "type": "string"
+        },
+        {
+          "const": "T2",
+          "description": "Private: real-world documents that are never redistributed.",
+          "type": "string"
+        },
+        {
+          "const": "T3",
+          "description": "Torture: known-hard documents, public or private as their licenses allow.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "urn:bayandocs:lab:corpus-manifest:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A corpus manifest.",
+  "properties": {
+    "documents": {
+      "description": "The documents, sorted by SHA-256.",
+      "items": {
+        "$ref": "#/$defs/Document"
+      },
+      "type": "array"
+    },
+    "format": {
+      "description": "Always `bayan-lab-corpus-manifest`.",
+      "type": "string"
+    },
+    "sources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Source"
+      },
+      "description": "The sources of the documents, by name.",
+      "type": "object"
+    },
+    "version": {
+      "description": "The version of the manifest's layout; this is version 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "sources",
+    "documents"
+  ],
+  "title": "BayanDocs Fidelity Lab corpus manifest",
+  "type": "object"
+}
