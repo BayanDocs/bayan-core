@@ -747,6 +747,12 @@ fn properties_count_only_where_they_switch_something_on() {
             Feature::HighlightAndShading,
             true,
         ),
+        // `nil` means no shading, whatever its fill says.
+        (
+            run(r#"<w:shd w:val="nil" w:fill="FFFF00"/>"#),
+            Feature::HighlightAndShading,
+            false,
+        ),
         (
             run(r#"<w:spacing w:val="0"/><w:w w:val="100"/><w:kern w:val="0"/>"#),
             Feature::CharacterSpacing,
@@ -778,12 +784,23 @@ fn properties_count_only_where_they_switch_something_on() {
             true,
         ),
         (
-            paragraph_with(r#"<w:keepNext w:val="0"/><w:widowControl w:val="0"/>"#),
+            paragraph_with(r#"<w:jc w:val="start"/>"#),
+            Feature::Alignment,
+            false,
+        ),
+        // Keeping with the next paragraph is off unless switched on; widow control is on unless switched off.
+        (
+            paragraph_with(r#"<w:keepNext w:val="0"/><w:widowControl/>"#),
             Feature::KeepAndWidowControl,
             false,
         ),
         (
-            paragraph_with("<w:widowControl/>"),
+            paragraph_with("<w:keepNext/>"),
+            Feature::KeepAndWidowControl,
+            true,
+        ),
+        (
+            paragraph_with(r#"<w:widowControl w:val="0"/>"#),
             Feature::KeepAndWidowControl,
             true,
         ),
@@ -797,11 +814,38 @@ fn properties_count_only_where_they_switch_something_on() {
             Feature::OutlineLevel,
             true,
         ),
-        // East Asian line breaking is on unless switched off.
+        // East Asian line breaking is on unless switched off; only `w:topLinePunct` is off unless switched on.
         (
             paragraph_with("<w:kinsoku/><w:autoSpaceDE/>"),
             Feature::EastAsianLineBreaking,
             false,
+        ),
+        (
+            paragraph_with(
+                r#"<w:snapToGrid/><w:wordWrap/><w:overflowPunct/><w:topLinePunct w:val="0"/>"#,
+            ),
+            Feature::EastAsianLineBreaking,
+            false,
+        ),
+        (
+            paragraph_with(r#"<w:snapToGrid w:val="0"/>"#),
+            Feature::EastAsianLineBreaking,
+            true,
+        ),
+        (
+            paragraph_with(r#"<w:wordWrap w:val="0"/>"#),
+            Feature::EastAsianLineBreaking,
+            true,
+        ),
+        (
+            paragraph_with(r#"<w:overflowPunct w:val="0"/>"#),
+            Feature::EastAsianLineBreaking,
+            true,
+        ),
+        (
+            paragraph_with("<w:topLinePunct/>"),
+            Feature::EastAsianLineBreaking,
+            true,
         ),
         (
             paragraph_with(r#"<w:autoSpaceDE w:val="0"/>"#),
@@ -900,8 +944,14 @@ fn equation_fields_are_told_apart_by_their_form() {
     assert!(has(&formula, Feature::Fields));
     assert!(!has(&formula, Feature::CombineCharacters));
     assert!(!has(&formula, Feature::Ruby));
-    // Word's Enclose Characters, and older versions' Phonetic Guide.
+    // Word's Enclose Characters and Combine Characters, and older versions' Phonetic Guide.
     assert!(has(&field(r" eq \o\ac(○,字) "), Feature::CombineCharacters));
+    assert!(has(
+        &field(r" EQ \o(\s\up 6(合并),\s\do 2(字符)) "),
+        Feature::CombineCharacters
+    ));
+    // An overstrike alone builds a formula.
+    assert!(!has(&field(r" EQ \o(=,/) "), Feature::CombineCharacters));
     let ruby = field(r#" EQ \* jc2 \* "Font:MS Mincho" \* hps10 \o\ad(\s\up 9(かん),漢) "#);
     assert!(has(&ruby, Feature::Ruby));
     assert!(!has(&ruby, Feature::CombineCharacters));
@@ -919,6 +969,7 @@ fn heading_numbering_needs_a_heading_style() {
         concat!(
             r#"{}<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/></w:style>"#,
             r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>"#,
+            r#"<w:style w:type="paragraph" w:styleId="HeadingNoteList"><w:name w:val="Heading Note List"/></w:style>"#,
             r#"<w:style w:type="paragraph" w:styleId="Chapter"><w:name w:val="Chapter"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#
         ),
         STYLES
@@ -932,6 +983,8 @@ fn heading_numbering_needs_a_heading_style() {
         has(&tag(&docx), Feature::HeadingNumbering)
     };
     assert!(!linked("ListBullet", true));
+    // Only Word's "heading 1" to "heading 9" are heading styles by name.
+    assert!(!linked("HeadingNoteList", true));
     assert!(linked("Heading1", true));
     assert!(linked("Chapter", true));
     // A level linked to a style that the document does not define numbers nothing.
@@ -971,6 +1024,11 @@ fn smaller_rules_of_the_second_review() {
     );
     assert!(has(&equation, Feature::OleObjects));
     assert!(has(&equation, Feature::LegacyEquations));
+    let workbook = tag_body(
+        r#"<w:p><w:r><w:object><w:objectEmbed w:progId="Excel.Sheet.12" r:id="rId9"/></w:object></w:r></w:p>"#,
+    );
+    assert!(has(&workbook, Feature::OleObjects));
+    assert!(!has(&workbook, Feature::LegacyEquations));
     // A table in a text box in a table cell is not a table nested in a table.
     let boxed = tag_body(concat!(
         r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:pict><v:shape><v:textbox><w:txbxContent>"#,

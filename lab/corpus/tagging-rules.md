@@ -12,6 +12,7 @@ Whenever a rule changes what a document is tagged with, `TAGGER_VERSION` in `sca
 |---|---|
 | 1 | the first rules |
 | 2 | the second review of LAB-001: property elements count only where they switch something on (above); comments count only where there is a comment, not from a comments, comment-extension or people relationship alone; a document without Word's `compatibilityMode` setting is in mode 12; WordArt needs a text warp other than `textNoShape`; an `EQ` field counts by its form; heading numbering needs a level linked to a heading style; "Link to previous" needs an earlier section with references; `w:numFmt` counts only in a list level; a table in a text box is not nested in the table around the text box; `w:sym` names a font; Strict `w:objectEmbed` names its program; language tags are recorded only in their simple shape |
+| 3 | the re-check of the second review: `w:widowControl` counts when it switches widow control off, which applies without it (version 2 counted it when switched on); Word's Combine Characters form of `EQ` (`\o(\s\up …,\s\do …)`) counts like Enclose Characters; only styles named "heading 1" to "heading 9" are heading styles by name (version 2 took any name that starts with "heading") |
 
 ## Safety first
 
@@ -107,7 +108,7 @@ Drawings, objects and equations count only in the document's **stories**: the ma
 | Spacing before/after, auto spacing, contextual spacing | `w:spacing` in paragraph properties with `before`, `after`, `beforeLines`, `afterLines` or an auto-spacing attribute, or `w:contextualSpacing` switched on |
 | Line spacing (auto, exact, at least) | `w:spacing` in paragraph properties with `line` |
 | Tab stops (all alignments and leaders, bar tabs) | `w:tabs` |
-| Keep with next, keep lines together, page break before, widow control | `w:keepNext`, `w:keepLines`, `w:pageBreakBefore`, `w:widowControl`, switched on |
+| Keep with next, keep lines together, page break before, widow control | `w:keepNext`, `w:keepLines` or `w:pageBreakBefore` switched on, or `w:widowControl` switched off (widow control applies unless a document switches it off, ISO/IEC 29500-1 §17.3.1.44) |
 | Paragraph borders and shading (with border merging) | `w:pBdr`, or `w:shd` in paragraph properties |
 | Outline level | `w:outlineLvl` from 0 to 8 (9 is body text) |
 | Drop caps and frames | `w:framePr` |
@@ -206,7 +207,7 @@ A field's instruction (from `w:fldSimple`, or from the `w:instrText` of a comple
 | External and active fields (blocked by default) | `INCLUDETEXT`, `INCLUDEPICTURE`, `INCLUDE`, `IMPORT`, `LINK`, `DDE`, `DDEAUTO` (only counted: nothing is ever fetched or run) |
 | Formatting switches | `\*`, `\#` or `\@` anywhere in the instruction, or `MERGEFORMAT` |
 
-An `EQ` field counts by its form: Word's Enclose Characters writes `EQ \o\ac(○,字)`, which tags "Combine characters, two lines in one, enclosed characters", and older versions' Phonetic Guide wrote `EQ … \o\ad(\s\up …)`, which tags "Ruby (phonetic guide)". Every other `EQ` field builds a formula (`\f` fractions, `\r` radicals, `\i` integrals and so on); the coverage matrix has no row for such formulas, so they count only as fields. A `HYPERLINK` field tags "Hyperlinks".
+An `EQ` field counts by its form: Word's Enclose Characters writes `EQ \o\ac(○,字)` and its Combine Characters overstrikes a raised and a lowered half, `EQ \o(\s\up 6(…),\s\do 2(…))`; both tag "Combine characters, two lines in one, enclosed characters", and older versions' Phonetic Guide wrote `EQ … \o\ad(\s\up …)`, which tags "Ruby (phonetic guide)". Every other `EQ` field builds a formula (`\f` fractions, `\r` radicals, `\i` integrals and so on); the coverage matrix has no row for such formulas, so they count only as fields. A `HYPERLINK` field tags "Hyperlinks".
 
 ### Notes, comments and review
 
@@ -268,7 +269,7 @@ An `EQ` field counts by its form: Word's Enclose Characters writes `EQ \o\ac(○
 | Auto-spacing between Asian and Latin text and numbers | `w:autoSpaceDE` or `w:autoSpaceDN` switched off |
 | Character grid | `w:docGrid` of type `linesAndChars` or `snapToChars` |
 | Vertical text | a text direction other than left to right, top to bottom (`lrTb`, which Strict spells `tb`; Strict's `lr` is vertical text read from the bottom up) |
-| Combine characters, two lines in one, enclosed characters | `w:eastAsianLayout` with `combine` or `vert`, or an `EQ` field that encloses a character (see Fields) |
+| Combine characters, two lines in one, enclosed characters | `w:eastAsianLayout` with `combine` or `vert`, or an `EQ` field that encloses or combines characters (see Fields) |
 | Indic and Southeast Asian shaping and breaking | the text has characters of an Indic or Southeast Asian script (Devanagari to Malayalam, Sinhala, Thai, Lao, Tibetan, Myanmar, Khmer) |
 
 ### Compatibility settings

@@ -526,7 +526,7 @@ struct Field {
 /// What the tagger knows about the open `w:style`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StyleState {
-    /// Its name starts with "heading", or its paragraph properties set an outline level from 0 to 8.
+    /// It is named "heading 1" to "heading 9", or its paragraph properties set an outline level from 0 to 8.
     heading: bool,
     /// It is a numbering style (`w:type="numbering"`).
     numbering: bool,
@@ -1163,9 +1163,11 @@ impl<'c> PartTagger<'c> {
                 self.tag(Feature::TabStops);
                 return Context::Tabs;
             }
-            "keepNext" | "keepLines" | "pageBreakBefore" | "widowControl" if switched_on(start) => {
+            "keepNext" | "keepLines" | "pageBreakBefore" if switched_on(start) => {
                 self.tag(Feature::KeepAndWidowControl)
             }
+            // Widow control applies unless a document switches it off (ISO/IEC 29500-1 §17.3.1.44), so only switching it off differs from the default.
+            "widowControl" if !switched_on(start) => self.tag(Feature::KeepAndWidowControl),
             "pBdr" => self.tag(Feature::ParagraphBordersAndShading),
             "outlineLvl" => {
                 // Level 9 is body text, the level of a paragraph without one.
@@ -1239,8 +1241,7 @@ impl<'c> PartTagger<'c> {
                 return Context::Style;
             }
             "name" if parent == Context::Style => {
-                if val(start)
-                    .is_some_and(|name| name.trim().to_ascii_lowercase().starts_with("heading"))
+                if val(start).is_some_and(|name| is_heading_style_name(&name))
                     && let Some(style) = &mut self.style
                 {
                     style.heading = true;
@@ -1645,11 +1646,22 @@ fn equation_field(instruction: &str) -> Option<Feature> {
         .to_ascii_uppercase();
     if compact.contains("\\O\\AD(") && compact.contains("\\S\\UP") {
         Some(Feature::Ruby)
-    } else if compact.contains("\\O\\AC(") {
+    } else if compact.contains("\\O\\AC(")
+        || (compact.contains("\\O(\\S\\UP") && compact.contains("\\S\\DO"))
+    {
+        // Enclose Characters writes `\o\ac(…)`; Combine Characters overstrikes a raised and a lowered half, `\o(\s\up6(…),\s\do2(…))`.
         Some(Feature::CombineCharacters)
     } else {
         None
     }
+}
+
+/// Whether a style's name is one of Word's built-in heading styles, "heading 1" to "heading 9" (in any case); "Heading Note List" is not one.
+fn is_heading_style_name(name: &str) -> bool {
+    name.trim()
+        .to_ascii_lowercase()
+        .strip_prefix("heading ")
+        .is_some_and(|level| matches!(level, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
 }
 
 /// Appends as much of `text` to `buffer` as fits in `limit` bytes, cut at a character boundary.

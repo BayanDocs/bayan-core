@@ -25,7 +25,7 @@ use xml::{XmlError, XmlLimits};
 use zip::{Archive, ZipError, ZipLimits};
 
 /// The version of the tagging rules. Raise it whenever a rule changes what a document is tagged with; `corpus verify` then reports the documents tagged by an older version, and `corpus tag` tags them again.
-pub const TAGGER_VERSION: u32 = 2;
+pub const TAGGER_VERSION: u32 = 3;
 
 /// The content type of the main part of a `.docx` document (Transitional and Strict alike).
 const DOCUMENT_CONTENT_TYPE: &str =
