@@ -1,5 +1,6 @@
 //! Relationships parts, which connect the package and its parts to other parts and to external resources (ECMA-376 Part 2 §6.5).
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use crate::content_types::DECLARATION;
@@ -92,10 +93,15 @@ impl Relationship {
 /// The relationships of one source, as one relationships part holds them.
 ///
 /// Like [`ContentTypes`](crate::ContentTypes), it keeps the document it was read from: written back without changes, it gives exactly the original text, and a change writes only the relationships it adds; the others, elements from other namespaces (extensions that Markup Compatibility allows here, §6.5.3.2), comments and formatting are copied as they were.
+///
+/// The relationships are kept in an ordered map by identifier, so finding one ([`Relationships::get`]), refusing a duplicate and choosing a new identifier take logarithmic time per relationship however many there are.
 #[derive(Clone, Debug)]
 pub struct Relationships {
     original: Option<Original>,
+    /// The relationships, the elements from other namespaces, and the text between them, in document order.
     items: Vec<Item>,
+    /// The relationships, by identifier.
+    relationships: BTreeMap<String, Entry>,
     modified: bool,
 }
 
@@ -115,14 +121,17 @@ enum Item {
     Trivia(Range<usize>),
     /// An element from another namespace, kept as written and not interpreted.
     Extension(Range<usize>),
-    /// A relationship.
-    Relationship {
-        relationship: Relationship,
-        /// The element in the original text.
-        raw: Option<Range<usize>>,
-        /// White space written before a new relationship, copied from its neighbours.
-        indent: String,
-    },
+    /// The relationship with this identifier, kept in the map.
+    Relationship(String),
+}
+
+#[derive(Clone, Debug)]
+struct Entry {
+    relationship: Relationship,
+    /// The element in the original text.
+    raw: Option<Range<usize>>,
+    /// White space written before a new relationship, copied from its neighbours.
+    indent: String,
 }
 
 impl Default for Relationships {
@@ -137,6 +146,7 @@ impl Relationships {
         Relationships {
             original: None,
             items: Vec::new(),
+            relationships: BTreeMap::new(),
             modified: true,
         }
     }
@@ -165,14 +175,23 @@ impl Relationships {
             return Err(invalid(RelationshipsError::XmlBase));
         }
         let mut items = Vec::with_capacity(root.children.len());
+        let mut relationships = BTreeMap::new();
         for node in &root.children {
             match node {
                 Node::Element(element) if element.is(NAMESPACE, "Relationship") => {
-                    items.push(Item::Relationship {
-                        relationship: read_relationship(element).map_err(invalid)?,
-                        raw: Some(element.span.clone()),
-                        indent: String::new(),
-                    });
+                    let relationship = read_relationship(element).map_err(invalid)?;
+                    if relationships.contains_key(&relationship.id) {
+                        return Err(invalid(RelationshipsError::DuplicateId));
+                    }
+                    items.push(Item::Relationship(relationship.id.clone()));
+                    relationships.insert(
+                        relationship.id.clone(),
+                        Entry {
+                            relationship,
+                            raw: Some(element.span.clone()),
+                            indent: String::new(),
+                        },
+                    );
                 }
                 Node::Element(element) if element.namespace.as_deref() == Some(NAMESPACE) => {
                     return Err(invalid(RelationshipsError::UnexpectedElement));
@@ -187,7 +206,7 @@ impl Relationships {
                 }
             }
         }
-        let relationships = Relationships {
+        Ok(Relationships {
             original: Some(Original {
                 root_start: root.start_tag.clone(),
                 root_end: root.end_tag.clone(),
@@ -197,39 +216,32 @@ impl Relationships {
                 text: document.text,
             }),
             items,
+            relationships,
             modified: false,
-        };
-        let mut seen = std::collections::BTreeSet::new();
-        if !relationships
-            .iter()
-            .all(|relationship| seen.insert(relationship.id.as_str()))
-        {
-            return Err(invalid(RelationshipsError::DuplicateId));
-        }
-        Ok(relationships)
+        })
     }
 
     /// The relationships, in document order.
     pub fn iter(&self) -> impl Iterator<Item = &Relationship> {
         self.items.iter().filter_map(|item| match item {
-            Item::Relationship { relationship, .. } => Some(relationship),
+            Item::Relationship(id) => self.get(id),
             Item::Trivia(_) | Item::Extension(_) => None,
         })
     }
 
     /// The number of relationships.
     pub fn len(&self) -> usize {
-        self.iter().count()
+        self.relationships.len()
     }
 
     /// Whether there are no relationships.
     pub fn is_empty(&self) -> bool {
-        self.iter().next().is_none()
+        self.relationships.is_empty()
     }
 
     /// The relationship with the identifier `id` (compared exactly, as XML identifiers are).
     pub fn get(&self, id: &str) -> Option<&Relationship> {
-        self.iter().find(|relationship| relationship.id == id)
+        self.relationships.get(id).map(|entry| &entry.relationship)
     }
 
     /// The relationships of the type `relationship_type` (compared exactly, as §6.5.3.4 requires).
@@ -244,15 +256,16 @@ impl Relationships {
     /// An identifier that no relationship has yet: `rId` followed by one more than the highest number among identifiers of that form (`rId1` if there is none), so that the same relationships always get the same next identifier.
     pub fn next_id(&self) -> String {
         let highest = self
-            .iter()
-            .filter_map(|relationship| relationship.id.strip_prefix("rId"))
+            .relationships
+            .keys()
+            .filter_map(|id| id.strip_prefix("rId"))
             .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
             .filter_map(|digits| digits.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
         // Only when the highest number is u64::MAX is there no next one; then count up from 1 to the first free one.
         let mut number = highest.checked_add(1).unwrap_or(1);
-        while self.get(&format!("rId{number}")).is_some() {
+        while self.relationships.contains_key(&format!("rId{number}")) {
             number = number.saturating_add(1);
         }
         format!("rId{number}")
@@ -268,7 +281,7 @@ impl Relationships {
         if relationship.id.is_empty() || relationship.relationship_type.is_empty() {
             return Err(invalid(RelationshipsError::MissingAttribute));
         }
-        if self.get(&relationship.id).is_some() {
+        if self.relationships.contains_key(&relationship.id) {
             return Err(invalid(RelationshipsError::DuplicateId));
         }
         let index = self
@@ -277,9 +290,11 @@ impl Relationships {
             .rposition(|item| !matches!(item, Item::Trivia(_)))
             .map_or(0, |index| index + 1);
         let indent = self.indent_before_relationships();
-        self.items.insert(
-            index,
-            Item::Relationship {
+        self.items
+            .insert(index, Item::Relationship(relationship.id.clone()));
+        self.relationships.insert(
+            relationship.id.clone(),
+            Entry {
                 relationship,
                 raw: None,
                 indent,
@@ -291,12 +306,12 @@ impl Relationships {
 
     /// Removes the relationship with the identifier `id`, with the white space before it, and returns it.
     pub fn remove(&mut self, id: &str) -> Option<Relationship> {
-        let index = self.items.iter().position(
-            |item| matches!(item, Item::Relationship { relationship, .. } if relationship.id == id),
-        )?;
-        let Item::Relationship { relationship, .. } = self.items.remove(index) else {
-            return None;
-        };
+        let index = self
+            .items
+            .iter()
+            .position(|item| matches!(item, Item::Relationship(other) if other == id))?;
+        let entry = self.relationships.remove(id)?;
+        self.items.remove(index);
         if let Some(previous) = index.checked_sub(1)
             && let Some(Item::Trivia(span)) = self.items.get(previous)
             && self
@@ -308,7 +323,7 @@ impl Relationships {
             self.items.remove(previous);
         }
         self.modified = true;
-        Some(relationship)
+        Some(entry.relationship)
     }
 
     /// Whether the relationships differ from those they were read from (always true for new relationships).
@@ -325,14 +340,19 @@ impl Relationships {
         for item in &self.items {
             match item {
                 Item::Trivia(span) => previous = Some(span),
-                Item::Relationship { raw: Some(_), .. } => {
+                Item::Relationship(id)
+                    if self
+                        .relationships
+                        .get(id)
+                        .is_some_and(|entry| entry.raw.is_some()) =>
+                {
                     return previous
                         .and_then(|span| original.text.get(span.clone()))
                         .filter(|text| text.chars().all(xml::is_space))
                         .map(str::to_owned)
                         .unwrap_or_default();
                 }
-                Item::Relationship { .. } | Item::Extension(_) => previous = None,
+                Item::Relationship(_) | Item::Extension(_) => previous = None,
             }
         }
         String::new()
@@ -385,35 +405,38 @@ impl Relationships {
                 .unwrap_or_default()
         };
         for item in &self.items {
-            match item {
-                Item::Trivia(span) | Item::Extension(span) => text.push_str(original(span)),
-                Item::Relationship {
-                    raw: Some(span), ..
-                } if source.is_some() => text.push_str(original(span)),
-                Item::Relationship {
-                    relationship,
-                    indent,
-                    ..
-                } => {
-                    // As Word writes it: Id, Type, Target, then TargetMode for external targets only.
-                    text.push_str(indent);
-                    text.push('<');
-                    if !prefix.is_empty() {
-                        text.push_str(prefix);
-                        text.push(':');
-                    }
-                    text.push_str("Relationship Id=\"");
-                    xml::escape_attribute(&relationship.id, text);
-                    text.push_str("\" Type=\"");
-                    xml::escape_attribute(&relationship.relationship_type, text);
-                    text.push_str("\" Target=\"");
-                    xml::escape_attribute(&relationship.target, text);
-                    if relationship.target_mode == TargetMode::External {
-                        text.push_str("\" TargetMode=\"External");
-                    }
-                    text.push_str("\"/>");
+            let entry = match item {
+                Item::Trivia(span) | Item::Extension(span) => {
+                    text.push_str(original(span));
+                    continue;
                 }
+                Item::Relationship(id) => match self.relationships.get(id) {
+                    Some(entry) => entry,
+                    None => continue,
+                },
+            };
+            if let (Some(span), true) = (&entry.raw, source.is_some()) {
+                text.push_str(original(span));
+                continue;
             }
+            // As Word writes it: Id, Type, Target, then TargetMode for external targets only.
+            let relationship = &entry.relationship;
+            text.push_str(&entry.indent);
+            text.push('<');
+            if !prefix.is_empty() {
+                text.push_str(prefix);
+                text.push(':');
+            }
+            text.push_str("Relationship Id=\"");
+            xml::escape_attribute(&relationship.id, text);
+            text.push_str("\" Type=\"");
+            xml::escape_attribute(&relationship.relationship_type, text);
+            text.push_str("\" Target=\"");
+            xml::escape_attribute(&relationship.target, text);
+            if relationship.target_mode == TargetMode::External {
+                text.push_str("\" TargetMode=\"External");
+            }
+            text.push_str("\"/>");
         }
     }
 }

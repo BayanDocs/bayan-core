@@ -765,6 +765,107 @@ fn opens_a_long_namespace_on_many_elements_cheaply() {
     assert!(relationships.is_empty());
 }
 
+// Many entries: every lookup and duplicate check in the metadata takes logarithmic time, so a stream with a hundred thousand entries opens in a moment instead of minutes (the review of pull request 17 measured 34 to 78 s, in release builds, for streams of 160 to 250 KB). The streams are stored uncompressed, to keep the tests quick.
+
+const CONTENT_TYPES_NAMESPACE: &str =
+    "http://schemas.openxmlformats.org/package/2006/content-types";
+
+#[test]
+fn opens_content_types_with_many_overrides_quickly() {
+    let mut types = format!(
+        "<Types xmlns=\"{CONTENT_TYPES_NAMESPACE}\"><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+    );
+    for index in 0..100_000 {
+        types.push_str(&format!(
+            "<Override PartName=\"/p{index}\" ContentType=\"a/b\"/>"
+        ));
+    }
+    types.push_str("</Types>");
+    let mut items = vec![Item::stored("[Content_Types].xml", types.as_bytes())];
+    // Many parts too, each looked up in the overrides.
+    for index in (0..100_000).step_by(20) {
+        items.push(Item::stored(&format!("p{index}"), b"x"));
+    }
+    let bytes = Archive::new(items).build();
+    let package = Package::open(&bytes, &Limits::default()).unwrap();
+    assert_eq!(package.parts().count(), 5_000);
+    for part in package.parts() {
+        assert_eq!(package.content_type(part), Some("a/b"));
+    }
+    // A duplicate at the very end is still found.
+    let duplicate = types.replace(
+        "</Types>",
+        "<Override PartName=\"/P99999\" ContentType=\"a/c\"/></Types>",
+    );
+    let bytes = Archive::new(vec![Item::stored(
+        "[Content_Types].xml",
+        duplicate.as_bytes(),
+    )])
+    .build();
+    assert_eq!(
+        package_error(&bytes),
+        Error::Package(PackageError::ContentTypes(
+            bayan_opc::ContentTypesError::DuplicateOverride
+        ))
+    );
+}
+
+#[test]
+fn opens_content_types_with_many_defaults_quickly() {
+    let mut types = format!("<Types xmlns=\"{CONTENT_TYPES_NAMESPACE}\">");
+    for index in 0..60_000 {
+        types.push_str(&format!(
+            "<Default Extension=\"e{index}\" ContentType=\"a/b\"/>"
+        ));
+    }
+    types.push_str("</Types>");
+    let items = vec![
+        Item::stored("[Content_Types].xml", types.as_bytes()),
+        Item::stored("a.e59999", b"x"),
+    ];
+    let bytes = Archive::new(items).build();
+    let package = Package::open(&bytes, &Limits::default()).unwrap();
+    let part = bayan_opc::PartName::new("/a.e59999").unwrap();
+    assert_eq!(package.content_type(&part), Some("a/b"));
+    let duplicate = types.replace(
+        "</Types>",
+        "<Default Extension=\"E59999\" ContentType=\"a/c\"/></Types>",
+    );
+    let bytes = Archive::new(vec![Item::stored(
+        "[Content_Types].xml",
+        duplicate.as_bytes(),
+    )])
+    .build();
+    assert_eq!(
+        package_error(&bytes),
+        Error::Package(PackageError::ContentTypes(
+            bayan_opc::ContentTypesError::DuplicateDefault
+        ))
+    );
+}
+
+#[test]
+fn finds_relationships_quickly_among_many() {
+    // With the largest possible number taken, the next identifier is the first free one counting from 1, and every relationship is found by its identifier.
+    let mut text = String::from(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId18446744073709551615\" Type=\"t\" Target=\"a\"/>",
+    );
+    for index in 1..=60_000 {
+        text.push_str(&format!(
+            "<Relationship Id=\"rId{index}\" Type=\"t\" Target=\"a\"/>"
+        ));
+    }
+    text.push_str("</Relationships>");
+    let relationships =
+        bayan_opc::Relationships::parse(text.as_bytes(), &Limits::default()).unwrap();
+    assert_eq!(relationships.len(), 60_001);
+    assert_eq!(relationships.next_id(), "rId60001");
+    for index in 1..=60_000 {
+        assert!(relationships.get(&format!("rId{index}")).is_some());
+    }
+    assert!(relationships.get("rId60001").is_none());
+}
+
 #[test]
 fn refuses_oversized_metadata_before_decompressing_it() {
     let mut items = package_items();

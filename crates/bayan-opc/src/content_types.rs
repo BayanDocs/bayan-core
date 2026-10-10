@@ -1,5 +1,6 @@
 //! The content types stream, `[Content_Types].xml`, which gives every part its media type (ECMA-376 Part 2 §7.2.3).
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use crate::part_name::PartName;
@@ -20,10 +21,17 @@ pub(crate) const DECLARATION: &str =
 /// The content types stream: default media types by extension and media types for individual parts.
 ///
 /// It keeps the document it was read from, so that writing it back without changes gives exactly the original text ([`ContentTypes::to_xml`]), and a change rewrites only the entries it touches: the rest, with its formatting, comments and order, is copied as it was (ADR-0018 rule 3).
+///
+/// The entries are kept in ordered maps by extension and by part name, so looking one up, or refusing a duplicate, takes logarithmic time however many entries a stream has.
 #[derive(Clone, Debug)]
 pub struct ContentTypes {
     original: Option<Original>,
+    /// The entries, and the text between them, in document order.
     items: Vec<Item>,
+    /// The defaults, by the key of their extension ([`extension_key`]).
+    defaults: BTreeMap<String, Entry>,
+    /// The overrides, by the key of their part name.
+    overrides: BTreeMap<String, Entry>,
     modified: bool,
 }
 
@@ -46,8 +54,15 @@ struct Original {
 enum Item {
     /// White space, comments or processing instructions between the entries of the original, kept as written.
     Trivia(Range<usize>),
-    /// A `Default` or `Override` element.
-    Entry(Entry),
+    /// A `Default` or `Override` element, kept in the map of its kind.
+    Entry(Key),
+}
+
+/// Where an entry is kept: its kind, and its key in the map of that kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Key {
+    Default(String),
+    Override(String),
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +81,23 @@ enum Kind {
     Override { part_name: PartName },
 }
 
+impl Kind {
+    fn key(&self) -> Key {
+        match self {
+            Kind::Default { extension } => Key::Default(extension_key(extension)),
+            Kind::Override { part_name } => Key::Override(part_name.key().to_owned()),
+        }
+    }
+
+    /// The extension or part name as written.
+    fn spelling(&self) -> &str {
+        match self {
+            Kind::Default { extension } => extension,
+            Kind::Override { part_name } => part_name.as_str(),
+        }
+    }
+}
+
 impl Default for ContentTypes {
     fn default() -> Self {
         ContentTypes::new()
@@ -78,6 +110,8 @@ impl ContentTypes {
         ContentTypes {
             original: None,
             items: Vec::new(),
+            defaults: BTreeMap::new(),
+            overrides: BTreeMap::new(),
             modified: true,
         }
     }
@@ -105,82 +139,91 @@ impl ContentTypes {
         if !root.attributes.is_empty() {
             return Err(invalid(ContentTypesError::UnexpectedAttribute));
         }
-        let mut items = Vec::with_capacity(root.children.len());
+        let mut content_types = ContentTypes {
+            original: None,
+            items: Vec::with_capacity(root.children.len()),
+            defaults: BTreeMap::new(),
+            overrides: BTreeMap::new(),
+            modified: false,
+        };
         for node in &root.children {
             match node {
                 Node::Element(element) => {
-                    items.push(Item::Entry(read_entry(element).map_err(invalid)?))
+                    let entry = read_entry(element).map_err(invalid)?;
+                    content_types.push_read(entry).map_err(invalid)?;
                 }
                 Node::Text { span, value } if value.chars().all(xml::is_space) => {
-                    items.push(Item::Trivia(span.clone()));
+                    content_types.items.push(Item::Trivia(span.clone()));
                 }
-                Node::Markup { span } => items.push(Item::Trivia(span.clone())),
+                Node::Markup { span } => content_types.items.push(Item::Trivia(span.clone())),
                 Node::Text { .. } | Node::CData { .. } => {
                     return Err(invalid(ContentTypesError::UnexpectedText));
                 }
             }
         }
-        let content_types = ContentTypes {
-            original: Some(Original {
-                root_start: root.start_tag.clone(),
-                root_end: root.end_tag.clone(),
-                root_span_end: root.span.end,
-                root_name: root.qualified_name.clone(),
-                encoding: document.encoding,
-                text: document.text,
-            }),
-            items,
-            modified: false,
-        };
-        content_types.check_duplicates().map_err(invalid)?;
+        content_types.original = Some(Original {
+            root_start: root.start_tag.clone(),
+            root_end: root.end_tag.clone(),
+            root_span_end: root.span.end,
+            root_name: root.qualified_name.clone(),
+            encoding: document.encoding,
+            text: document.text,
+        });
         Ok(content_types)
     }
 
-    /// Refuses two defaults for one extension and two overrides for one part.
-    fn check_duplicates(&self) -> Result<(), ContentTypesError> {
-        let entries: Vec<&Entry> = self.entries().collect();
-        for (index, entry) in entries.iter().enumerate() {
-            for earlier in entries.iter().take(index) {
-                match (&entry.kind, &earlier.kind) {
-                    (Kind::Default { extension }, Kind::Default { extension: other })
-                        if extension_key(extension) == extension_key(other) =>
-                    {
-                        return Err(ContentTypesError::DuplicateDefault);
-                    }
-                    (Kind::Override { part_name }, Kind::Override { part_name: other })
-                        if part_name == other =>
-                    {
-                        return Err(ContentTypesError::DuplicateOverride);
-                    }
-                    _ => {}
-                }
-            }
+    /// Adds an entry read from the stream after the others, refusing a second default for one extension and a second override for one part.
+    fn push_read(&mut self, entry: Entry) -> Result<(), ContentTypesError> {
+        let key = entry.kind.key();
+        if self.get(&key).is_some() {
+            return Err(match key {
+                Key::Default(_) => ContentTypesError::DuplicateDefault,
+                Key::Override(_) => ContentTypesError::DuplicateOverride,
+            });
         }
+        self.items.push(Item::Entry(key.clone()));
+        self.insert(key, entry);
         Ok(())
     }
 
+    fn get(&self, key: &Key) -> Option<&Entry> {
+        match key {
+            Key::Default(key) => self.defaults.get(key),
+            Key::Override(key) => self.overrides.get(key),
+        }
+    }
+
+    fn get_mut(&mut self, key: &Key) -> Option<&mut Entry> {
+        match key {
+            Key::Default(key) => self.defaults.get_mut(key),
+            Key::Override(key) => self.overrides.get_mut(key),
+        }
+    }
+
+    fn insert(&mut self, key: Key, entry: Entry) {
+        match key {
+            Key::Default(key) => self.defaults.insert(key, entry),
+            Key::Override(key) => self.overrides.insert(key, entry),
+        };
+    }
+
+    /// The entries, in document order.
     fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.items.iter().filter_map(|item| match item {
-            Item::Entry(entry) => Some(entry),
+            Item::Entry(key) => self.get(key),
             Item::Trivia(_) => None,
         })
     }
 
     /// The media type of `part`: its override if there is one, otherwise the default for its extension (§7.2.3.5). Part names and extensions are compared without regard to the case of ASCII letters.
     pub fn content_type(&self, part: &PartName) -> Option<&str> {
-        let overridden = self.entries().find_map(|entry| match &entry.kind {
-            Kind::Override { part_name } if part_name == part => Some(entry.content_type.as_str()),
-            _ => None,
-        });
-        overridden.or_else(|| {
-            let key = extension_key(part.extension()?);
-            self.entries().find_map(|entry| match &entry.kind {
-                Kind::Default { extension } if extension_key(extension) == key => {
-                    Some(entry.content_type.as_str())
-                }
-                _ => None,
-            })
-        })
+        if let Some(entry) = self.overrides.get(part.key()) {
+            return Some(entry.content_type.as_str());
+        }
+        let key = extension_key(part.extension()?);
+        self.defaults
+            .get(&key)
+            .map(|entry| entry.content_type.as_str())
     }
 
     /// The default media types: pairs of an extension and a media type, in document order.
@@ -212,12 +255,7 @@ impl ContentTypes {
         if !is_media_type(content_type) {
             return Err(invalid(ContentTypesError::InvalidContentType));
         }
-        let key = extension_key(extension);
-        let existing = self.position(
-            |kind| matches!(kind, Kind::Default { extension } if extension_key(extension) == key),
-        );
         self.put(
-            existing,
             Kind::Default {
                 extension: extension.to_owned(),
             },
@@ -228,11 +266,7 @@ impl ContentTypes {
 
     /// Removes the default media type for `extension`. Returns whether there was one.
     pub fn remove_default(&mut self, extension: &str) -> bool {
-        let key = extension_key(extension);
-        let existing = self.position(
-            |kind| matches!(kind, Kind::Default { extension } if extension_key(extension) == key),
-        );
-        self.remove_at(existing)
+        self.remove(&Key::Default(extension_key(extension)))
     }
 
     /// Sets the media type of `part`, replacing an existing override for it in place.
@@ -246,10 +280,7 @@ impl ContentTypes {
                 ContentTypesError::InvalidContentType,
             )));
         }
-        let existing =
-            self.position(|kind| matches!(kind, Kind::Override { part_name } if part_name == part));
         self.put(
-            existing,
             Kind::Override {
                 part_name: part.clone(),
             },
@@ -260,9 +291,7 @@ impl ContentTypes {
 
     /// Removes the override for `part`. Returns whether there was one.
     pub fn remove_override(&mut self, part: &PartName) -> bool {
-        let existing =
-            self.position(|kind| matches!(kind, Kind::Override { part_name } if part_name == part));
-        self.remove_at(existing)
+        self.remove(&Key::Override(part.key().to_owned()))
     }
 
     /// Makes sure that `part` has the media type `content_type`, the way §7.2.3.4 describes it: a part without an extension gets an override; a part whose extension has a default with another media type gets an override; an extension without a default gets one. Media types are compared without regard to case. An existing override for the part is updated.
@@ -276,7 +305,7 @@ impl ContentTypes {
                 ContentTypesError::InvalidContentType,
             )));
         }
-        let has_override = self.overrides().any(|(name, _)| name == part);
+        let has_override = self.overrides.contains_key(part.key());
         let extension = part.extension().filter(|extension| is_extension(extension));
         let Some(extension) = extension else {
             return self.set_override(part, content_type);
@@ -290,11 +319,10 @@ impl ContentTypes {
             }
             return self.set_override(part, content_type);
         }
-        let key = extension_key(extension);
         let default = self
-            .defaults()
-            .find(|(other, _)| extension_key(other) == key)
-            .map(|(_, media)| media.to_owned());
+            .defaults
+            .get(&extension_key(extension))
+            .map(|entry| entry.content_type.clone());
         match default {
             Some(media) if media.eq_ignore_ascii_case(content_type) => Ok(()),
             Some(_) => self.set_override(part, content_type),
@@ -307,29 +335,12 @@ impl ContentTypes {
         self.modified
     }
 
-    /// The position of the entry whose kind matches.
-    fn position(&self, matches: impl Fn(&Kind) -> bool) -> Option<usize> {
-        self.items.iter().position(|item| match item {
-            Item::Entry(entry) => matches(&entry.kind),
-            Item::Trivia(_) => false,
-        })
-    }
-
-    /// Replaces the entry at `existing`, or adds a new one: a default after the last default, an override at the end.
-    fn put(&mut self, existing: Option<usize>, kind: Kind, content_type: &str) {
-        if let Some(index) = existing
-            && let Some(Item::Entry(entry)) = self.items.get_mut(index)
-        {
-            let same = entry.content_type == content_type
-                && match (&entry.kind, &kind) {
-                    (Kind::Default { extension }, Kind::Default { extension: new }) => {
-                        extension == new
-                    }
-                    (Kind::Override { part_name }, Kind::Override { part_name: new }) => {
-                        part_name.as_str() == new.as_str()
-                    }
-                    _ => false,
-                };
+    /// Replaces the entry for the same extension or part in place, or adds a new one: a default after the last default, an override at the end.
+    fn put(&mut self, kind: Kind, content_type: &str) {
+        let key = kind.key();
+        if let Some(entry) = self.get_mut(&key) {
+            let same =
+                entry.content_type == content_type && entry.kind.spelling() == kind.spelling();
             if !same {
                 entry.kind = kind;
                 entry.content_type = content_type.to_owned();
@@ -343,32 +354,25 @@ impl ContentTypes {
             .items
             .iter()
             .rposition(|item| matches!(item, Item::Entry(_)));
-        let after = match kind {
-            Kind::Default { .. } => self
+        let after = match key {
+            Key::Default(_) => self
                 .items
                 .iter()
-                .rposition(|item| {
-                    matches!(
-                        item,
-                        Item::Entry(Entry {
-                            kind: Kind::Default { .. },
-                            ..
-                        })
-                    )
-                })
+                .rposition(|item| matches!(item, Item::Entry(Key::Default(_))))
                 .or(last_entry),
-            Kind::Override { .. } => last_entry,
+            Key::Override(_) => last_entry,
         };
         let index = after.map_or(0, |index| index + 1);
         let indent = self.indent_before_entries();
-        self.items.insert(
-            index,
-            Item::Entry(Entry {
+        self.items.insert(index, Item::Entry(key.clone()));
+        self.insert(
+            key,
+            Entry {
                 kind,
                 content_type: content_type.to_owned(),
                 raw: None,
                 indent,
-            }),
+            },
         );
         self.modified = true;
     }
@@ -382,7 +386,7 @@ impl ContentTypes {
         for item in &self.items {
             match item {
                 Item::Trivia(span) => previous = Some(span),
-                Item::Entry(entry) if entry.raw.is_some() => {
+                Item::Entry(key) if self.get(key).is_some_and(|entry| entry.raw.is_some()) => {
                     return previous
                         .and_then(|span| original.text.get(span.clone()))
                         .filter(|text| text.chars().all(xml::is_space))
@@ -395,12 +399,20 @@ impl ContentTypes {
         String::new()
     }
 
-    /// Removes the entry at `existing`, with the white space before it. Returns whether there was one.
-    fn remove_at(&mut self, existing: Option<usize>) -> bool {
-        let Some(index) = existing else {
+    /// Removes the entry kept under `key`, with the white space before it. Returns whether there was one.
+    fn remove(&mut self, key: &Key) -> bool {
+        let Some(index) = self
+            .items
+            .iter()
+            .position(|item| matches!(item, Item::Entry(other) if other == key))
+        else {
             return false;
         };
         self.items.remove(index);
+        match key {
+            Key::Default(key) => self.defaults.remove(key),
+            Key::Override(key) => self.overrides.remove(key),
+        };
         if let Some(previous) = index.checked_sub(1)
             && let Some(Item::Trivia(span)) = self.items.get(previous)
             && self
@@ -458,41 +470,44 @@ impl ContentTypes {
 
     fn write_items(&self, text: &mut String, source: Option<&str>, prefix: &str) {
         for item in &self.items {
-            match item {
+            let entry = match item {
                 Item::Trivia(span) => {
                     text.push_str(
                         source
                             .and_then(|source| source.get(span.clone()))
                             .unwrap_or_default(),
                     );
+                    continue;
                 }
-                Item::Entry(entry) => {
-                    if let (Some(raw), Some(source)) = (&entry.raw, source) {
-                        text.push_str(source.get(raw.clone()).unwrap_or_default());
-                        continue;
-                    }
-                    text.push_str(&entry.indent);
-                    text.push('<');
-                    if !prefix.is_empty() {
-                        text.push_str(prefix);
-                        text.push(':');
-                    }
-                    match &entry.kind {
-                        Kind::Default { extension } => {
-                            text.push_str("Default Extension=\"");
-                            xml::escape_attribute(extension, text);
-                        }
-                        Kind::Override { part_name } => {
-                            // In ASCII, as ZIP entry names are, for readers that follow the 2006 edition of the standard.
-                            text.push_str("Override PartName=\"/");
-                            xml::escape_attribute(&part_name.zip_name(), text);
-                        }
-                    }
-                    text.push_str("\" ContentType=\"");
-                    xml::escape_attribute(&entry.content_type, text);
-                    text.push_str("\"/>");
+                Item::Entry(key) => match self.get(key) {
+                    Some(entry) => entry,
+                    None => continue,
+                },
+            };
+            if let (Some(raw), Some(source)) = (&entry.raw, source) {
+                text.push_str(source.get(raw.clone()).unwrap_or_default());
+                continue;
+            }
+            text.push_str(&entry.indent);
+            text.push('<');
+            if !prefix.is_empty() {
+                text.push_str(prefix);
+                text.push(':');
+            }
+            match &entry.kind {
+                Kind::Default { extension } => {
+                    text.push_str("Default Extension=\"");
+                    xml::escape_attribute(extension, text);
+                }
+                Kind::Override { part_name } => {
+                    // In ASCII, as ZIP entry names are, for readers that follow the 2006 edition of the standard.
+                    text.push_str("Override PartName=\"/");
+                    xml::escape_attribute(&part_name.zip_name(), text);
                 }
             }
+            text.push_str("\" ContentType=\"");
+            xml::escape_attribute(&entry.content_type, text);
+            text.push_str("\"/>");
         }
     }
 }
