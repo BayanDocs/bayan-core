@@ -367,6 +367,14 @@ fn refuses_names_that_escape_or_confuse() {
         zip_error(&Archive::new(vec![item]).build()),
         ZipError::UnsafeName { entry: 0 }
     );
+    // Without the UTF-8 flag, a ZIP name is in code page 437, where the bytes of `é` in UTF-8 spell `Ã©`: another program would read another name, so such a name is refused.
+    let mut item = Item::stored("é.xml", b"x");
+    item.flags = 0;
+    assert_eq!(
+        zip_error(&Archive::new(vec![item]).build()),
+        ZipError::UnsafeName { entry: 0 }
+    );
+    assert!(open_zip(&Archive::new(vec![Item::stored("é.xml", b"x")]).build()).is_ok());
 }
 
 #[test]
@@ -1487,7 +1495,8 @@ mod craft {
                 crc32: crc32(data),
                 size: size_of(data),
                 compressed_size: None,
-                flags: 0,
+                // A name beyond ASCII is written in UTF-8, which bit 11 says.
+                flags: if name.is_ascii() { 0 } else { 1 << 11 },
                 made_by: 20,
                 external: 0,
                 zip64: false,

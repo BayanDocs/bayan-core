@@ -520,6 +520,10 @@ fn read_central(
     };
 
     let name_bytes = header.get(name_start..extra_start).ok_or(malformed)?;
+    // Without the UTF-8 flag, a ZIP name is in code page 437, where non-ASCII bytes are other characters than in UTF-8: other programs would read another name, so such a name is refused. (Packages write non-ASCII characters percent-encoded, or as UTF-8 with the flag.)
+    if !name_bytes.is_ascii() && flag_bits & flags::UTF8 == 0 {
+        return Err(ZipError::UnsafeName { entry: index }.into());
+    }
     let name = std::str::from_utf8(name_bytes)
         .map_err(|_| ZipError::UnsafeName { entry: index })?
         .to_owned();

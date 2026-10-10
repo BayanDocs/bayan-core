@@ -130,7 +130,7 @@ pub enum ZipError {
         /// The entry.
         entry: usize,
     },
-    /// The entry's name could escape the folder it is extracted to or be read differently by different tools: it is empty, absolute, has a drive letter, a backslash, a `.` or `..` segment, an empty segment or a control character, or it is not valid UTF-8.
+    /// The entry's name could escape the folder it is extracted to or be read differently by different tools: it is empty, absolute, has a drive letter, a backslash, a `.` or `..` segment, an empty segment or a control character, it is not valid UTF-8, or it has characters beyond ASCII without the flag that marks it as UTF-8 (other tools would read it in code page 437).
     UnsafeName {
         /// The entry.
         entry: usize,
