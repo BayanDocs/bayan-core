@@ -397,8 +397,23 @@ fn doc(root: &Path) -> Result<(), String> {
 }
 
 fn deny(root: &Path) -> Result<(), String> {
-    process::run(cargo(root).args(["deny", "--locked", "check"]))
+    process::run(cargo(root).args(["deny", "--locked", "check"]))?;
+    println!(
+        "    The fuzz workspace (fuzz/), with its own deny.toml: the main policy plus the NCSA license of libFuzzer, which ADR-0017's amendment of 2026-10-08 allows for fuzzing dependencies only:"
+    );
+    process::run(cargo(root).args(FUZZ_DENY))
 }
+
+/// The arguments after `cargo` that check the dependencies of the fuzz workspace, a separate Cargo workspace for cargo-fuzz (CORE-005), against its own `fuzz/deny.toml`.
+const FUZZ_DENY: [&str; 7] = [
+    "deny",
+    "--locked",
+    "--manifest-path",
+    "fuzz/Cargo.toml",
+    "--config",
+    "fuzz/deny.toml",
+    "check",
+];
 
 fn guardrails(root: &Path) -> Result<(), String> {
     let workspace = policy::Workspace::load(root)?;
@@ -734,6 +749,31 @@ mod tests {
                 "test off, debug_assertions off, target_arch = \"wasm32\" on",
                 "test on, debug_assertions off, target_arch = \"wasm32\" on",
             ]
+        );
+    }
+
+    /// ADR-0017's amendment of 2026-10-08 accepts libFuzzer's NCSA license for the fuzz workspace's dependencies only, recorded in that workspace's own license check and never in the main workspace's.
+    #[test]
+    fn allows_the_ncsa_license_for_libfuzzer_in_the_fuzz_workspace_only() {
+        let main = include_str!("../../deny.toml");
+        let fuzz = include_str!("../../fuzz/deny.toml");
+        fn mentions(text: &str) -> Vec<&str> {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with('#') && line.contains("NCSA"))
+                .map(str::trim)
+                .collect()
+        }
+        assert!(
+            mentions(main).is_empty(),
+            "the main deny.toml must not allow NCSA"
+        );
+        assert_eq!(
+            mentions(fuzz),
+            ["{ crate = \"libfuzzer-sys\", allow = [\"NCSA\"] },"]
+        );
+        assert_eq!(
+            FUZZ_DENY.join(" "),
+            "deny --locked --manifest-path fuzz/Cargo.toml --config fuzz/deny.toml check"
         );
     }
 

@@ -1,0 +1,62 @@
+# The fuzz targets of bayan-core (see README.md). A Cargo workspace of its own, excluded from the main one, because cargo-fuzz builds with the nightly toolchain and its sanitizer flags, and because its dependencies (libfuzzer-sys, which compiles LLVM's libFuzzer from C++) are for fuzzing only and are never linked into, or shipped with, BayanDocs (ADR-0017, amendment of 2026-10-08).
+
+[package]
+name = "bayan-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later WITH AdditionRef-BayanDocs-App-Store-Permission"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# The fuzzing engine: LLVM's libFuzzer, which the crate compiles from C++ with its build script, and the `fuzz_target!` macro. Published 2026-06-04; (MIT OR Apache-2.0) AND NCSA, accepted for fuzzing dependencies only (ADR-0017, amendment of 2026-10-08).
+libfuzzer-sys = "=0.4.13"
+bayan-opc = { path = "../crates/bayan-opc" }
+
+[[bin]]
+name = "zip_archive"
+path = "fuzz_targets/zip_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "package"
+path = "fuzz_targets/package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_types"
+path = "fuzz_targets/content_types.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relationships"
+path = "fuzz_targets/relationships.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_properties"
+path = "fuzz_targets/core_properties.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compound_file"
+path = "fuzz_targets/compound_file.rs"
+test = false
+doc = false
+bench = false
+
+# A workspace of its own: the main workspace excludes this folder.
+[workspace]
+members = ["."]

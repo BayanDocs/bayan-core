@@ -42,6 +42,10 @@ serde_test = "=1.0.177"
 loro = "=1.16.2"
 # The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.
 automerge = "=0.12.0"
+# DEFLATE in pure Rust for bayan-opc's ZIP layer (CORE-005): decompresses the parts of a package and compresses the parts BayanDocs writes. It and its only dependency, adler2, are `#![forbid(unsafe_code)]`; the default features (`with-alloc` only) leave out serde and the SIMD checksum. Published 2026-03-13; MIT OR Zlib OR Apache-2.0.
+miniz_oxide = "=0.9.1"
+# Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-09-18; MIT.
+cfb = "=0.15.0"
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.
