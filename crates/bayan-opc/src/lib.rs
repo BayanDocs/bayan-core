@@ -56,7 +56,7 @@
 //! | [`Limits::max_xml_depth`], [`Limits::max_xml_attributes`], [`Limits::max_xml_name_length`] | 64, 64, 256 bytes | while metadata XML is parsed |
 //! | [`Limits::max_compound_file_entries`] | 65,536 | while a compound file's entries are listed |
 //!
-//! Decompression never exceeds a declared size: a part is decompressed into a buffer of exactly its declared size, which the limits have bounded, and decompression fails as soon as the data would go beyond it. So the memory a hostile package can make the reader use is bounded by these numbers, whatever its headers claim.
+//! Decompression never goes beyond a declared size: a part is read into memory set aside once, at exactly its declared size, which the limits have bounded, and decompression stops with an error as soon as the data would go beyond it. A part that is only checked, not kept (when the writer copies it unchanged), passes through a window of 128 KiB instead. So the memory a hostile package can make the reader use is bounded by these numbers, whatever its headers claim.
 //!
 //! ## What is refused
 //!

@@ -2,7 +2,7 @@
 
 /// The limits bayan-opc enforces while reading a package or a compound file (ADR-0006 §5: every parser limits sizes, depths and counts).
 ///
-/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or nest XML deeply enough to exhaust memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed, and a part is decompressed into a buffer of exactly its declared size, which decompression may never exceed. Memory therefore stays bounded by these numbers whatever the input claims.
+/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or nest XML deeply enough to exhaust memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed, and a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size. Memory therefore stays bounded by these numbers whatever the input claims.
 ///
 /// The defaults ([`Limits::DEFAULT`]) open ordinary documents comfortably and stop malicious ones; a host can raise a limit (for example after asking the user, for a document with very large embedded media) by changing one field:
 ///
