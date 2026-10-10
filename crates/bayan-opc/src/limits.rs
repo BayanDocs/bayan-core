@@ -1,0 +1,85 @@
+//! Resource limits for reading untrusted packages and compound files.
+
+/// The limits bayan-opc enforces while reading a package or a compound file (ADR-0006 §5: every parser limits sizes, depths and counts).
+///
+/// A package is hostile input: a few kilobytes of ZIP can claim gigabytes of content (a "zip bomb"), hold millions of entries, or hold metadata XML whose tree takes a hundred times its size in memory. Every check below happens before the work it protects: entry counts, names and declared sizes are checked while the central directory is read, before anything is decompressed; a part is decompressed into memory set aside once at exactly its declared size (or, when it is only checked, through a window of 128 KiB), and decompression may never go beyond that size; and the metadata of a package, from the content types stream to the core properties, is limited in total size and in XML nodes, and so are the names and identifiers that its models keep several times. With the defaults, reading one part takes at most [`Limits::max_entry_size`] bytes, opening a package at most about 90 MiB for its metadata, and opening it and reading its core properties at most about 110 MiB together, whatever the input claims (the crate's documentation says how that was measured).
+///
+/// The defaults ([`Limits::DEFAULT`]) open ordinary documents comfortably and stop malicious ones; a host can raise a limit (for example after asking the user, for a document with very large embedded media) by changing one field:
+///
+/// ```
+/// let limits = bayan_opc::Limits {
+///     max_entry_size: 2 << 30,
+///     ..bayan_opc::Limits::default()
+/// };
+/// assert_eq!(limits.max_entries, 10_000);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The most entries a ZIP archive may have, folders included. Default: 10,000 (a typical document has 10 to 50 parts; one with hundreds of images has a few hundred).
+    pub max_entries: usize,
+    /// The longest entry name, in bytes. A content types stream may not name a longer part or extension either, since no part could have it. Default: 1,024 (Word's own part names are short; Windows paths are limited to about 260 characters).
+    pub max_name_length: usize,
+    /// The most bytes one entry may uncompress to, and the largest compound file stream that may be read. Default: 512 MiB.
+    pub max_entry_size: u64,
+    /// The most bytes all entries together may uncompress to, as their headers declare. Default: 2 GiB.
+    pub max_total_size: u64,
+    /// The highest compression ratio (uncompressed size divided by compressed size) of an entry, and of the archive as a whole (all uncompressed sizes divided by the size of the input). DEFLATE compresses at most about 1,032 to 1, and the very highest ratios come only from long runs of identical bytes, which is how zip bombs are built; ordinary document XML compresses about 5 to 20 to 1. Default: 100, the ratio Apache POI also uses. Entries, and archives, that uncompress to no more than [`Limits::compression_ratio_grace`] bytes are exempt.
+    pub max_compression_ratio: u64,
+    /// Entries, and archives, that uncompress to at most this many bytes are exempt from [`Limits::max_compression_ratio`]: small data can compress very well and cannot exhaust anything. Default: 1 MiB.
+    pub compression_ratio_grace: u64,
+    /// The largest metadata part (the content types stream, a relationships part or the core properties part) that is parsed, in bytes. Default: 8 MiB (a content types stream for 10,000 parts takes about 1.5 MB; a relationships part takes about 200 bytes per hyperlink, so 8 MiB holds about 40,000).
+    pub max_metadata_size: usize,
+    /// The most bytes that the metadata parts of a package (the content types stream, every relationships part, and the core properties part when [`Package::core_properties`](crate::Package::core_properties) reads it) may uncompress to together; a part that would pass it is refused before it is decompressed. Default: 16 MiB.
+    pub max_metadata_total_size: usize,
+    /// The most nodes (elements, attributes, namespace declarations included, runs of text, CDATA sections, comments and processing instructions) in the XML of the metadata parts of a package, all of them together, the core properties part included when [`Package::core_properties`](crate::Package::core_properties) reads it; a metadata part parsed on its own gets the whole budget. While a part is parsed, each of its nodes takes up to about 400 bytes, however short it is in the input, so this is what bounds the memory parsing takes. Default: 250,000 (a relationship takes 4 or 5 nodes, so this allows about 50,000 hyperlinks).
+    pub max_xml_nodes: usize,
+    /// The deepest nesting of elements in a metadata part. Default: 64 (these parts nest two or three levels deep). Values above 256 count as 256, because dropping a deeper tree could take too much stack space.
+    pub max_xml_depth: usize,
+    /// The most attributes, namespace declarations included, of one element in a metadata part. Default: 64.
+    pub max_xml_attributes: usize,
+    /// The longest element or attribute name in a metadata part, and the longest relationship identifier, which is an XML name too (`xsd:ID`), in bytes. Default: 256.
+    pub max_xml_name_length: usize,
+    /// The most entries (storages and streams) of an OLE compound file. Default: 65,536.
+    pub max_compound_file_entries: usize,
+}
+
+impl Limits {
+    /// The default limits, described with each field.
+    pub const DEFAULT: Limits = Limits {
+        max_entries: 10_000,
+        max_name_length: 1_024,
+        max_entry_size: 512 << 20,
+        max_total_size: 2 << 30,
+        max_compression_ratio: 100,
+        compression_ratio_grace: 1 << 20,
+        max_metadata_size: 8 << 20,
+        max_metadata_total_size: 16 << 20,
+        max_xml_nodes: 250_000,
+        max_xml_depth: 64,
+        max_xml_attributes: 64,
+        max_xml_name_length: 256,
+        max_compound_file_entries: 65_536,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits::DEFAULT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_defaults_the_memory_bounds_were_measured_with() {
+        // The documented bounds (about 90 MiB to open a package, about 110 MiB with its core properties) were measured with these values; a change to one of them must measure the bounds again and update the documentation.
+        let limits = Limits::default();
+        assert_eq!(limits.max_metadata_size, 8 << 20);
+        assert_eq!(limits.max_metadata_total_size, 16 << 20);
+        assert_eq!(limits.max_xml_nodes, 250_000);
+        assert_eq!(limits.max_name_length, 1_024);
+        assert_eq!(limits.max_xml_name_length, 256);
+    }
+}
