@@ -994,7 +994,7 @@ fn list(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> {
 
 fn stats(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> {
     let manifest = load(&manifest_path(arguments)?, false)?;
-    let stats = Stats::of(&manifest);
+    let stats = Stats::of(&manifest)?;
     let text = match arguments.one("format")? {
         None | Some("markdown") => stats.to_markdown(
             arguments.one("title")?.unwrap_or("Corpus frequency report"),

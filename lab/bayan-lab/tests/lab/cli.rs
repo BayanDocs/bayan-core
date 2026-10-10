@@ -10,6 +10,10 @@ use bayan_lab::store::Key;
 
 use crate::support::{Docx, temporary_folder};
 
+// REUSE-IgnoreStart: REUSE would read the test source's copyright statement as this file's own.
+const COPYRIGHT: &str = "Copyright (c) Example";
+// REUSE-IgnoreEnd
+
 /// What one command printed, and how it ended.
 #[derive(Debug)]
 struct Ran {
@@ -49,7 +53,7 @@ impl Corpus {
         fs::create_dir_all(source.join("sub")).unwrap();
         fs::write(
             source.join("LICENSE"),
-            "MIT License\n\nCopyright (c) Example\n",
+            format!("MIT License\n\n{COPYRIGHT}\n"),
         )
         .unwrap();
         Self {
@@ -91,7 +95,7 @@ impl Corpus {
             "--license",
             "MIT",
             "--copyright",
-            "Copyright (c) Example",
+            COPYRIGHT,
             "--license-file",
             &license,
         ])
@@ -143,7 +147,7 @@ fn a_corpus_from_its_source_to_its_verification() {
         "--license",
         "MIT",
         "--copyright",
-        "Copyright (c) Example",
+        COPYRIGHT,
         "--license-file",
         &license,
     ]);
@@ -637,7 +641,7 @@ fn a_refused_source_leaves_nothing_in_the_store() {
         "--license",
         "MIT",
         "--copyright",
-        "Copyright (c) Example",
+        COPYRIGHT,
         "--license-file",
         &license,
     ]);
@@ -666,7 +670,7 @@ fn empty_notes_are_refused_before_anything_is_stored() {
         "--license",
         "MIT",
         "--copyright",
-        "Copyright (c) Example",
+        COPYRIGHT,
         "--license-file",
         &license,
         "--notes",

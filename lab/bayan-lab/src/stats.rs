@@ -1,6 +1,6 @@
 //! Frequencies over a corpus manifest: by feature, font, script, language, compatibility mode, legacy compatibility option, source, license and application.
 //!
-//! Everything is counted in documents (how many documents use a feature), with integer arithmetic only, and written in a fixed order (most frequent first, then by name), so the same manifest always gives the same report. Reports contain only aggregate numbers and names of features, fonts, scripts and languages, never document content or file names, so they may also be made for the private corpus.
+//! Everything is counted in documents (how many documents use a feature), with integer arithmetic only, and written in a fixed order (most frequent first, then by name), so the same manifest always gives the same report. Reports contain aggregate numbers and names of features, fonts, scripts, languages and programs, never file names. Font and program names come from the documents, though, and a rare one can identify a document, so reports are made for public manifests only: [`Stats::of`] refuses a manifest with private (T2) documents until LAB-101 adds the folding of rare names that the Fidelity Lab specification (§12) asks for.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -39,7 +39,7 @@ pub struct Stats {
     pub scripts: BTreeMap<String, (u64, u64)>,
     /// Documents per language tag.
     pub languages: BTreeMap<String, u64>,
-    /// Documents per compatibility mode (`none` when absent).
+    /// Documents per compatibility mode (`12 (no setting)` when the document sets none, since Word then uses mode 12).
     pub compatibility_modes: BTreeMap<String, u64>,
     /// Documents per legacy compatibility option.
     pub compatibility_options: BTreeMap<String, u64>,
@@ -52,8 +52,21 @@ fn bump<K: Ord>(map: &mut BTreeMap<K, u64>, key: K) {
 
 impl Stats {
     /// Counts a manifest.
-    #[must_use]
-    pub fn of(manifest: &Manifest) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// When the manifest has private (T2) documents: their font and program names could identify a document, and the report's folding of rare names (LAB-101) does not exist yet.
+    pub fn of(manifest: &Manifest) -> Result<Self, String> {
+        let private = manifest
+            .documents
+            .iter()
+            .filter(|document| document.tier.is_private())
+            .count();
+        if private > 0 {
+            return Err(format!(
+                "the manifest has {private} private (T2) documents; reports are made for public manifests only, until LAB-101 adds the folding of rare font and program names that keeps a private document from being recognized"
+            ));
+        }
         let mut stats = Self::default();
         for document in &manifest.documents {
             stats.documents += 1;
@@ -105,7 +118,7 @@ impl Stats {
                 bump(&mut stats.compatibility_options, option.clone());
             }
         }
-        stats
+        Ok(stats)
     }
 
     /// The counts as JSON.
@@ -390,7 +403,30 @@ mod tests {
             };
             assert!(manifest.insert(document).is_ok());
         }
-        let report = Stats::of(&manifest).to_markdown("Untagged", &manifest);
+        let report = Stats::of(&manifest)
+            .unwrap()
+            .to_markdown("Untagged", &manifest);
         assert!(report.contains("| MIT | 6 | 100.0% |"), "{report}");
+        // A private document's rare font or program name could identify it: no report until LAB-101 folds rare names.
+        assert!(
+            manifest
+                .insert(Document {
+                    sha256: Sha256::of(b"private"),
+                    size: 1,
+                    tier: Tier::T2,
+                    license: "NOASSERTION".to_owned(),
+                    provenance: vec![Provenance {
+                        source: "private".to_owned(),
+                        path: None,
+                    }],
+                    scan: None,
+                    page_count: None,
+                    ground_truth: GroundTruth::default(),
+                    notes: None,
+                })
+                .is_ok()
+        );
+        let refused = Stats::of(&manifest).unwrap_err();
+        assert!(refused.contains("1 private (T2) documents"), "{refused}");
     }
 }

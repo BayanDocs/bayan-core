@@ -124,13 +124,28 @@ impl ScanError {
     }
 }
 
-/// Whether a character must not reach a message, a report or the manifest from a document: a control character, or an invisible character that can reorder or hide text (a bidirectional control or a zero-width character), as in "Trojan Source" attacks on reviewers.
+/// Whether a character must not reach a message, a report or the manifest from a document: a control character, or a character that is invisible or changes how the text around it reads, as in "Trojan Source" attacks on reviewers. The manifest is read by people and by AI agents, and both can be misled by text they cannot see.
 #[must_use]
 pub fn is_hidden_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+            // Soft hyphen and combining grapheme joiner: invisible.
+            '\u{00AD}' | '\u{034F}'
+            // Arabic letter mark; Hangul and Khmer fillers and inherent vowels, which display as nothing.
+            | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{3164}' | '\u{FFA0}'
+            // Mongolian variation selectors and vowel separator.
+            | '\u{180B}'..='\u{180F}'
+            // Zero-width characters and directional marks.
+            | '\u{200B}'..='\u{200F}'
+            // Line and paragraph separators, and the bidirectional embeddings and overrides.
+            | '\u{2028}'..='\u{202E}'
+            // Word joiner, invisible operators, bidirectional isolates and the deprecated format characters.
+            | '\u{2060}'..='\u{206F}'
+            // Variation selectors, the byte order mark and the interlinear annotation characters.
+            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+            // Tag characters, which can spell out hidden text, and the variation selectors supplement.
+            | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}'
         )
 }
 
@@ -421,5 +436,57 @@ impl<'a, 'b> Package<'a, 'b> {
         })?;
         tagger.finish();
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_characters_are_refused_and_visible_ones_kept() {
+        for hidden in [
+            '\u{0}',
+            '\u{1B}',
+            '\u{7F}',
+            '\u{85}',
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{061C}',
+            '\u{115F}',
+            '\u{17B4}',
+            '\u{180E}',
+            '\u{200B}',
+            '\u{200D}',
+            '\u{200F}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{206A}',
+            '\u{206F}',
+            '\u{3164}',
+            '\u{FE0F}',
+            '\u{FEFF}',
+            '\u{FFA0}',
+            '\u{FFF9}',
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{E0100}',
+            '\u{E01EF}',
+        ] {
+            assert!(is_hidden_character(hidden), "U+{:04X}", u32::from(hidden));
+        }
+        for visible in [
+            'a', 'Z', ' ', '-', 'é', 'ß', 'ع', 'א', '字', 'ㄱ', '한', '🙂', '\u{2010}',
+        ] {
+            assert!(
+                !is_hidden_character(visible),
+                "U+{:04X}",
+                u32::from(visible)
+            );
+        }
+        assert_eq!(printable("Ari\u{202E}la\u{E0041}", 100), "Ari?la?");
     }
 }

@@ -130,7 +130,8 @@ REVIEW="Every file was reviewed for content from third parties that this license
 
 # The sources, in the order in which they are added: a document found in several sources takes the license of the
 # first. Changing a revision makes a new source (register it under a new name, such as python-docx-2): sources never
-# change.
+# change. The REUSE markers keep the sources' copyright statements from being read as this file's own.
+# REUSE-IgnoreStart
 import_source python-docx https://github.com/python-openxml/python-docx \
   e45454602b53e8e572b179ccf1c91093ec9f4ed7 MIT \
   "Copyright (c) 2013 Steve Canny, https://github.com/scanny" \
@@ -166,6 +167,7 @@ import_source apache-tika https://github.com/apache/tika \
   "Copyright 2007-2026 The Apache Software Foundation" \
   "Test documents of Apache Tika, under the repository's Apache-2.0 license, whose NOTICE file is kept with it. $REVIEW" \
   LICENSE.txt NOTICE.txt
+# REUSE-IgnoreEnd
 
 log "verifying the corpus"
 "$LAB" corpus verify --manifest "$MANIFEST" --store "$STORE" --exclude "$EXCLUSIONS"

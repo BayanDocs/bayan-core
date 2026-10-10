@@ -328,7 +328,9 @@ fn a_corpus_kept_in_an_s3_bucket() {
         "--license",
         "MIT",
         "--copyright",
+        // REUSE-IgnoreStart: REUSE would read this test value as the file's own copyright.
         "Copyright (c) Example",
+        // REUSE-IgnoreEnd
         "--license-file",
         &license_file,
     ];

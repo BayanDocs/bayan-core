@@ -121,7 +121,9 @@ fn the_frequency_report_is_current() {
     let manifest = public_manifest();
     check_generated(
         &corpus_dir().join("public").join("frequency-report.md"),
-        &Stats::of(&manifest).to_markdown(REPORT_TITLE, &manifest),
+        &Stats::of(&manifest)
+            .unwrap()
+            .to_markdown(REPORT_TITLE, &manifest),
         "the public manifest",
     );
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::hash::Sha256;
 use crate::scan::features::Feature;
 use crate::scan::scripts::Script;
-use crate::scan::{Findings, TAGGER_VERSION};
+use crate::scan::{Findings, TAGGER_VERSION, is_hidden_character};
 
 /// The value of [`Manifest::format`].
 pub const FORMAT: &str = "bayan-lab-corpus-manifest";
@@ -579,14 +579,14 @@ fn check_scan(id: &str, scan: &Scan, problems: &mut Vec<String>) {
     }
 }
 
-/// Whether `path` is a relative path that stays inside its root on every platform: `/`-separated, without empty, `.` or `..` segments, backslashes, colons (`C:` would name a Windows drive, `a.docx:stream` an alternate data stream) or control characters.
+/// Whether `path` is a relative path that stays inside its root on every platform: `/`-separated, without empty, `.` or `..` segments, backslashes, colons (`C:` would name a Windows drive, `a.docx:stream` an alternate data stream), or control and [hidden characters](is_hidden_character), which upstream authors choose and `corpus list` prints.
 #[must_use]
 pub fn is_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path
             .chars()
-            .any(|character| matches!(character, '\\' | ':') || character.is_control())
+            .any(|character| matches!(character, '\\' | ':') || is_hidden_character(character))
         && path
             .split('/')
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
@@ -601,7 +601,9 @@ mod tests {
             url: "https://example.invalid/repo".into(),
             revision: "0123456789abcdef0123456789abcdef01234567".into(),
             license: "MIT".into(),
+            // REUSE-IgnoreStart: REUSE would read this test value as the file's own copyright.
             copyright: "Copyright (c) Example".into(),
+            // REUSE-IgnoreEnd
             license_texts: vec![LicenseText {
                 path: "LICENSE".into(),
                 sha256: Sha256::of(b"license"),
@@ -843,6 +845,11 @@ mod tests {
             "C:/Users/me/secret.docx",
             "a/C:",
             "a.docx:stream",
+            // Upstream authors choose paths, and `corpus list` prints them: nothing in one may hide or reorder text.
+            "a/\u{202E}xcod.exe",
+            "a\u{200B}b.docx",
+            "a\u{E0041}b.docx",
+            "a\u{00AD}b.docx",
         ] {
             assert!(!is_relative_path(bad), "{bad:?}");
         }
