@@ -91,7 +91,7 @@ impl<'a> CompoundFile<'a> {
         if !CompoundFile::is_compound_file(data) {
             return Err(CompoundFileError::NotCompoundFile.into());
         }
-        // The crate's messages can quote entry names, which are document content, so they are not passed on.
+        // The crate's messages can quote entry names, which are document content, so they are not passed on. Keep the permissive `open`, never `open_strict`: in strict mode cfb puts a stream's class ID into its error message through uuid's text formatting, the `unsafe` code that accepting uuid assumes bayan-opc never runs (the owner's answer to open question 2 of pull request 17).
         let inner =
             cfb::CompoundFile::open(Cursor::new(data)).map_err(|_| CompoundFileError::Malformed)?;
         let mut entries = Vec::new();
