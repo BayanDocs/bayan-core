@@ -1,12 +1,12 @@
 # Public corpus v1 (tier T1)
 
-The public corpus is the Fidelity Lab's set of real or realistic `.docx` documents that anyone may download and redistribute ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers)). Version 1, built by work package LAB-001, holds **1,259 documents** (23.5 MiB) from the test suites of seven open-source projects, every one tagged with the coverage-matrix features it uses.
+The public corpus is the Fidelity Lab's set of real or realistic `.docx` documents that anyone may download and redistribute ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers)). Version 1, built by work package LAB-001, holds **1,256 documents** (23.1 MiB) from the test suites of seven open-source projects, every one tagged with the coverage-matrix features it uses.
 
 | File | What it is |
 |---|---|
 | [manifest.json](manifest.json) | The corpus manifest: every document's SHA-256, size, license, provenance and tags ([manifest-schema.md](../manifest-schema.md)). Generated; never edit it by hand. |
 | [frequency-report.md](frequency-report.md) | How many documents use each feature, font, script, language and compatibility setting. Generated from the manifest. |
-| [excluded.tsv](excluded.tsv) | The 274 documents the review kept out, by SHA-256, each with its reason. |
+| [excluded.tsv](excluded.tsv) | The 277 documents the review kept out, by SHA-256, each with its reason. |
 | [import.sh](import.sh) | Rebuilds the corpus from its sources: the manifest, the report, and a store of the documents. |
 | [inspect-content.py](inspect-content.py) | The automated part of the content review: reports what a curator must judge in every document of a store (see below). |
 
@@ -26,9 +26,9 @@ Each source is a Git repository at a pinned commit. Like every dependency of the
 | Source | Repository | Commit (date) | License | Documents |
 |---|---|---|---|---:|
 | open-xml-powertools | [OfficeDev/Open-Xml-PowerTools](https://github.com/OfficeDev/Open-Xml-PowerTools) | `5881422a881f` (2019-02-04; archived) | MIT | 649 |
-| open-xml-sdk | [dotnet/Open-XML-SDK](https://github.com/dotnet/Open-XML-SDK) | `431ab05cf160` (2026-08-18) | MIT | 290 |
-| docx4j | [plutext/docx4j](https://github.com/plutext/docx4j) | `0e8e7633ef46` (2026-09-27) | Apache-2.0 | 117 |
-| apache-poi | [apache/poi](https://github.com/apache/poi) | `ae62bb5116b9` (2026-10-05) | Apache-2.0 | 106 |
+| open-xml-sdk | [dotnet/Open-XML-SDK](https://github.com/dotnet/Open-XML-SDK) | `431ab05cf160` (2026-08-18) | MIT | 289 |
+| docx4j | [plutext/docx4j](https://github.com/plutext/docx4j) | `0e8e7633ef46` (2026-09-27) | Apache-2.0 | 116 |
+| apache-poi | [apache/poi](https://github.com/apache/poi) | `ae62bb5116b9` (2026-10-05) | Apache-2.0 | 105 |
 | python-docx | [python-openxml/python-docx](https://github.com/python-openxml/python-docx) | `e45454602b53` (2025-06-16) | MIT | 42 |
 | apache-tika | [apache/tika](https://github.com/apache/tika) | `63284c17c0ee` (2026-10-07) | Apache-2.0 | 38 |
 | mammoth-js | [mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) | `791a18923097` (2026-09-26) | BSD-2-Clause | 17 |
@@ -57,7 +57,7 @@ The script prints names, addresses and numbers masked, so its report can be shar
 ### The rules applied
 
 - **Kept:** documents the projects made for their tests (synthetic content, "lorem ipsum", feature samples), documents whose content belongs to the project or its sponsor (for example Microsoft's own documents and templates in Microsoft's MIT-licensed repositories, the OpenDoPE specification in docx4j, or the OpenXML4J test files that came to Apache POI with OpenXML4J, made at the company whose logo they carry, as their properties say), templates and examples written for the project, screenshots of the programs they discuss, and short quotations with their source inside a project's own text (docx4j's guide quotes one sentence of Wikipedia).
-- **Excluded for their license (208 documents):**
+- **Excluded for their license (211 documents):**
   - third-party text the repository's license may not cover: government and United Nations documents, news and news-agency articles, contracts, academic papers and theses, book excerpts, Wikipedia articles (CC BY-SA, a license the corpus does not allow), templates of other publishers (a business plan template, résumé templates, a telecom operator's letter template), verbatim excerpts of standards (ECMA-376 and others; documents that discuss a standard in their own words stay), a contributor license agreement form, and a file from Ecma's distribution of the ECMA-376 schemas;
   - documents marked "All rights reserved", "Microsoft Confidential" or with another publisher's copyright inside, even where the repository's own owner wrote the marking;
   - **documents that embed programs, always** (one embedded two Windows programs of other companies), and documents that embed complete font files (Microsoft and Monotype fonts; the owner's decision of 2026-10-10; two documents with font subsets keep "Embedded fonts" covered);

@@ -8,7 +8,7 @@ The Fidelity Lab measures how closely BayanDocs matches Microsoft Word ([Fidelit
 | [corpus/manifest-schema.md](corpus/manifest-schema.md) | The corpus manifest, field by field; [corpus/manifest.schema.json](corpus/manifest.schema.json) is its generated JSON Schema. |
 | [corpus/tagging-rules.md](corpus/tagging-rules.md) | What each feature tag means and how the scanner stays safe on hostile files. |
 | [corpus/storage.md](corpus/storage.md) | How documents are stored (local, S3-compatible, HTTPS), and the proposal for the public corpus's location. |
-| [corpus/public/](corpus/public/README.md) | The public corpus v1 (tier T1): 1,259 documents, their manifest, exclusion list, frequency report, import script and content inspection. |
+| [corpus/public/](corpus/public/README.md) | The public corpus v1 (tier T1): 1,256 documents, their manifest, exclusion list, frequency report, import script and content inspection. |
 | [corpus/private-corpus-options.md](corpus/private-corpus-options.md) | Options for the private corpus (tier T2), for the owner's decision. |
 
 ## Using bayan-lab

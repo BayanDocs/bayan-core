@@ -27,7 +27,7 @@ Both network backends use the `curl` program, which every supported platform has
 
 ## Where the public corpus lives
 
-The public corpus v1 is 1,259 documents and 24.6 MB, and the Fidelity Lab specification's target for the end of Phase 1 is 2,000 public documents: well under 1 GB for years. Nightly CI runs and contributors will download it, so what matters is anonymous public reads without per-download fees, writes limited to the curator, and as little to administer as possible.
+The public corpus v1 is 1,256 documents and 24.2 MB, and the Fidelity Lab specification's target for the end of Phase 1 is 2,000 public documents: well under 1 GB for years. Nightly CI runs and contributors will download it, so what matters is anonymous public reads without per-download fees, writes limited to the curator, and as little to administer as possible.
 
 **Decided by the owner on 2026-10-10 (review of LAB-001): a Cloudflare R2 bucket with the custom domain `corpus.bayandocs.org`.** The project's domain, `bayandocs.org`, already uses Cloudflare (for e-mail routing), so the subdomain is one setting away. The owner creates the account and the bucket (owner checklist, item 10 covers the private corpus; this one is its public counterpart):
 
