@@ -27,8 +27,14 @@ const MAX_INSTRUCTION: usize = 512;
 const MAX_PROPERTY_TEXT: usize = 128;
 /// The most prefixes an `mc:Choice` may require to be chosen; real documents require one or two.
 const MAX_REQUIRED_PREFIXES: usize = 16;
+/// The most style identifiers kept for resolving which numbering levels link to heading styles: the heading styles, and the styles that numbering levels link to, each.
+const MAX_LINKED_STYLES: usize = 1_024;
+/// The namespace that Word's own `w:compatSetting` entries carry in `w:uri`.
+const WORD_SETTINGS_URI: &str = "http://schemas.microsoft.com/office/word";
+/// The compatibility mode that applies when a document has no `compatibilityMode` setting: Word 2007's ([MS-DOCX], "compatibilityMode": value 12, "This is the default").
+pub const DEFAULT_COMPATIBILITY_MODE: u32 = 12;
 
-/// The legacy compatibility options, the children of `w:compat` that ECMA-376 Part 1 §17.15.3 defines (besides `w:compatSetting`), sorted. Only these names are recorded, so a document cannot write names of its own choosing into the manifest.
+/// The legacy compatibility options, the children of `w:compat` that ECMA-376 defines besides `w:compatSetting` (Part 4, Transitional Migration Features), sorted. Only these names are recorded, so a document cannot write names of its own choosing into the manifest.
 const COMPATIBILITY_OPTIONS: [&str; 65] = [
     "adjustLineHeightInTable",
     "alignTablesRowByRow",
@@ -196,7 +202,7 @@ pub struct Collected {
     pub languages: BTreeSet<String>,
     /// Characters per script in the document's text.
     pub scripts: BTreeMap<Script, u64>,
-    /// The value of the `compatibilityMode` setting, if present and a number.
+    /// The value of Word's `compatibilityMode` setting, if present and a number; without one, Word uses [`DEFAULT_COMPATIBILITY_MODE`].
     pub compatibility_mode: Option<u32>,
     /// The legacy compatibility options switched on (children of `w:compat` other than `w:compatSetting`).
     pub compatibility_options: BTreeSet<String>,
@@ -212,8 +218,14 @@ pub struct Collected {
     pub theme_slots_used: BTreeSet<ThemeSlot>,
     /// Sections (`w:sectPr`) of the main document.
     pub sections: u32,
-    /// Sections that have at least one header or footer reference.
-    pub sections_with_references: u32,
+    /// Whether a section seen so far has a header or footer reference.
+    pub references_seen: bool,
+    /// Whether a section without header and footer references follows one with them, and so inherits them ("Link to Previous").
+    pub inherits_references: bool,
+    /// The identifiers of heading styles: styles named "heading 1" to "heading 9", or with an outline level from 0 to 8.
+    pub heading_styles: BTreeSet<String>,
+    /// The styles that numbering levels link to (`w:lvl/w:pStyle`).
+    pub level_styles: BTreeSet<String>,
     /// Tables in the stories.
     pub tables: u32,
     /// Tables with a fixed layout.
@@ -256,14 +268,22 @@ impl Collected {
         self.fonts.insert(name.to_owned());
     }
 
-    /// The canonical form of a language tag, or `None` (with a note) if it is not well-formed.
+    /// The canonical form of a language tag, or `None` (with a note) if it is not well-formed, or not of the simple shape that real documents use: a language, optionally a script and a region (`en-US`, `zh-Hant-TW`), or Word's `x-none`. Variants, extensions and private-use parts are refused, because they can carry any short text a document chooses.
     fn checked_language(&mut self, tag: &str) -> Option<String> {
-        let canonical = canonical_language(tag);
-        if canonical.is_none() && !tag.trim().is_empty() {
-            self.notes
-                .insert("a language tag that is not well-formed was not recorded");
+        let Some(canonical) = canonical_language(tag) else {
+            if !tag.trim().is_empty() {
+                self.notes
+                    .insert("a language tag that is not well-formed was not recorded");
+            }
+            return None;
+        };
+        if !is_simple_language(&canonical) {
+            self.notes.insert(
+                "a language tag with variants, extensions or private-use parts was not recorded",
+            );
+            return None;
         }
-        canonical
+        Some(canonical)
     }
 
     fn add_language(&mut self, tag: &str) {
@@ -281,15 +301,50 @@ impl Collected {
         self.languages.insert(tag);
     }
 
+    /// Keeps an East Asian or complex-script language tag aside until the scripts of the text are known, within the same limit as the recorded tags.
+    fn hold_language(&mut self, tag: &str, east_asian: bool) {
+        let Some(tag) = self.checked_language(tag) else {
+            return;
+        };
+        let held = if east_asian {
+            &mut self.east_asian_languages
+        } else {
+            &mut self.complex_script_languages
+        };
+        if held.len() >= MAX_LANGUAGES && !held.contains(&tag) {
+            self.notes
+                .insert("more language tags than the limit of 100; the list is cut");
+            return;
+        }
+        held.insert(tag);
+    }
+
+    /// Adds a style identifier to one of the sets used to resolve heading numbering, within [`MAX_LINKED_STYLES`].
+    fn link_style(&mut self, id: &str, heading: bool) {
+        let id = id.trim();
+        if id.is_empty() {
+            return;
+        }
+        let set = if heading {
+            &mut self.heading_styles
+        } else {
+            &mut self.level_styles
+        };
+        if set.len() >= MAX_LINKED_STYLES && !set.contains(id) {
+            self.notes.insert(
+                "more linked styles than the limit of 1024; heading numbering may be missed",
+            );
+            return;
+        }
+        set.insert(id.to_owned());
+    }
+
     /// Derives the features that depend on the whole document rather than on one element.
     pub fn finish(&mut self) {
         if self.sections >= 2 {
             self.tag(Feature::SectionBreaks);
         }
-        if self.sections >= 2
-            && self.sections_with_references > 0
-            && self.sections_with_references < self.sections
-        {
+        if self.inherits_references {
             self.tag(Feature::LinkToPrevious);
         }
         if self.tables > self.fixed_tables {
@@ -298,10 +353,20 @@ impl Collected {
         if self.strict {
             self.tag(Feature::StrictNamespaces);
         }
-        match self.compatibility_mode {
-            Some(mode) if mode >= 15 => self.tag(Feature::CompatibilityMode15),
-            Some(11 | 12 | 14) => self.tag(Feature::OlderCompatibilityModes),
+        match self
+            .compatibility_mode
+            .unwrap_or(DEFAULT_COMPATIBILITY_MODE)
+        {
+            mode if mode >= 15 => self.tag(Feature::CompatibilityMode15),
+            11 | 12 | 14 => self.tag(Feature::OlderCompatibilityModes),
             _ => {}
+        }
+        if self
+            .level_styles
+            .iter()
+            .any(|style| self.heading_styles.contains(style))
+        {
+            self.tag(Feature::HeadingNumbering);
         }
         if !self.compatibility_options.is_empty() {
             self.tag(Feature::LegacyCompatibilityOptions);
@@ -382,6 +447,30 @@ fn canonical_language(tag: &str) -> Option<String> {
     Some(out)
 }
 
+/// Whether a canonical language tag has the simple shape that documents use: a language of two or three letters, optionally a script of four letters and a region of two letters or three digits; or Word's `x-none` (no proofing language).
+fn is_simple_language(tag: &str) -> bool {
+    if tag == "x-none" {
+        return true;
+    }
+    let mut subtags = tag.split('-');
+    let language_ok = subtags.next().is_some_and(|language| {
+        (2..=3).contains(&language.len()) && language.bytes().all(|byte| byte.is_ascii_lowercase())
+    });
+    let mut rest: Vec<&str> = subtags.collect();
+    if rest.first().is_some_and(|script| {
+        script.len() == 4 && script.bytes().all(|byte| byte.is_ascii_alphabetic())
+    }) {
+        rest.remove(0);
+    }
+    if rest.first().is_some_and(|region| {
+        (region.len() == 2 && region.bytes().all(|byte| byte.is_ascii_uppercase()))
+            || (region.len() == 3 && region.bytes().all(|byte| byte.is_ascii_digit()))
+    }) {
+        rest.remove(0);
+    }
+    language_ok && rest.is_empty()
+}
+
 /// What an open element means for the rules of its children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Context {
@@ -402,7 +491,14 @@ enum Context {
     MajorFont,
     MinorFont,
     AlternateContent,
+    /// A text box's content (`w:txbxContent`).
+    TextBox,
     Other,
+}
+
+/// Whether an embedded object's program (its `ProgID`) is an equation editor: Equation Editor 3 (`Equation.3`) or MathType (`Equation.DSMT4`…).
+fn is_equation_program(program: &str) -> bool {
+    program.starts_with("Equation.") || program.contains("MathType") || program.contains("DSMT")
 }
 
 /// What the text being read belongs to.
@@ -430,10 +526,12 @@ struct Field {
 /// What the tagger knows about the open `w:style`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StyleState {
-    /// Its name starts with "heading".
+    /// Its name starts with "heading", or its paragraph properties set an outline level from 0 to 8.
     heading: bool,
     /// It is a numbering style (`w:type="numbering"`).
     numbering: bool,
+    /// Its paragraph properties number the paragraph (`w:numPr`).
+    numbered: bool,
 }
 
 /// The tagger for one part. Create it with [`PartTagger::new`], give it to the XML scanner, then call [`PartTagger::finish`].
@@ -454,8 +552,12 @@ pub struct PartTagger<'c> {
     fields: Vec<Field>,
     /// The open `w:style`.
     style: Option<StyleState>,
+    /// The identifier (`w:styleId`) of the open `w:style`.
+    style_id: String,
     table_depth: usize,
     cell_depth: usize,
+    /// For each open text box (`w:txbxContent`), the table and cell depths outside it: a table in a text box starts afresh, even if the text box sits in a table cell.
+    text_boxes: Vec<(usize, usize)>,
     columns: u32,
     section_has_references: bool,
 }
@@ -519,6 +621,35 @@ fn val<'s>(start: &Start<'_, 's>) -> Option<Cow<'s, str>> {
     attribute(start, Ns::W, "val").map(|value| value.decoded())
 }
 
+/// Whether a toggle or on/off property element (`w:caps`, `w:bidi`…) switches its property on. An element that switches it off, such as `<w:caps w:val="0"/>`, uses nothing.
+fn switched_on(start: &Start<'_, '_>) -> bool {
+    is_on(attribute(start, Ns::W, "val"))
+}
+
+/// Whether a property element's `w:val` differs from the values that mean the property is absent, such as `none` for `w:u` or `baseline` for `w:vertAlign`. An element without a value counts.
+fn val_other_than(start: &Start<'_, '_>, defaults: &[&str]) -> bool {
+    val(start).is_none_or(|value| !defaults.contains(&value.trim()))
+}
+
+/// Whether a numeric property element's `w:val` differs from `default` (0 for `w:position`, 100 for `w:w`); a value that is not a number counts.
+fn number_other_than(start: &Start<'_, '_>, default: i64) -> bool {
+    val(start).is_some_and(|value| value.trim().parse::<i64>() != Ok(default))
+}
+
+/// Whether `w:shd` shades anything: a pattern other than clear, or a fill other than automatic. `nil` means no shading at all.
+fn shades(start: &Start<'_, '_>) -> bool {
+    let pattern = val(start);
+    let pattern = pattern.as_deref().map(str::trim);
+    if pattern == Some("nil") {
+        return false;
+    }
+    let patterned = pattern.is_some_and(|pattern| pattern != "clear");
+    let filled = attribute(start, Ns::W, "fill")
+        .is_some_and(|fill| !fill.decoded().trim().eq_ignore_ascii_case("auto"))
+        || attribute(start, Ns::W, "themeFill").is_some();
+    patterned || filled
+}
+
 impl<'c> PartTagger<'c> {
     /// A tagger for one part of the given kind.
     pub fn new(collected: &'c mut Collected, kind: PartKind) -> Self {
@@ -534,8 +665,10 @@ impl<'c> PartTagger<'c> {
             script_counts: [0; 35],
             fields: Vec::new(),
             style: None,
+            style_id: String::new(),
             table_depth: 0,
             cell_depth: 0,
+            text_boxes: Vec::new(),
             columns: 0,
             section_has_references: false,
         }
@@ -683,10 +816,7 @@ impl<'c> PartTagger<'c> {
                     .or_else(|| start.attribute("", "ProgID"))
                     .map(|value| value.decoded().into_owned())
                     .unwrap_or_default();
-                if program.starts_with("Equation.")
-                    || program.contains("MathType")
-                    || program.contains("DSMT")
-                {
+                if is_equation_program(&program) {
                     self.tag(Feature::LegacyEquations);
                 }
                 Context::Other
@@ -803,7 +933,14 @@ impl<'c> PartTagger<'c> {
             }
             "effectLst" => return Context::EffectList,
             "scene3d" | "sp3d" => self.tag(Feature::ShapeEffects),
-            "prstTxWarp" => self.tag(Feature::WordArt),
+            // `textNoShape` is Word's "no transform", written into ordinary shapes' text.
+            "prstTxWarp"
+                if start
+                    .attribute("", "prst")
+                    .is_some_and(|preset| preset.decoded().trim() != "textNoShape") =>
+            {
+                self.tag(Feature::WordArt)
+            }
             "latin" | "ea" | "cs" | "sym" => self.drawing_font(start),
             _ => {}
         }
@@ -913,34 +1050,61 @@ impl<'c> PartTagger<'c> {
                     self.text = TextKind::Story;
                 }
             }
-            "br" | "cr" | "sym" => self.tag(Feature::TextTabsBreaksSymbols),
+            "br" | "cr" => self.tag(Feature::TextTabsBreaksSymbols),
+            "sym" => {
+                self.tag(Feature::TextTabsBreaksSymbols);
+                if let Some(font) = attribute(start, Ns::W, "font") {
+                    self.collected.add_font(&font.decoded());
+                }
+            }
             "tab" if parent == Context::Tabs => self.tag(Feature::TabStops),
             "tab" => self.tag(Feature::TextTabsBreaksSymbols),
             "rFonts" => self.fonts_of_run(start),
-            "sz" | "szCs" | "b" | "bCs" | "i" | "iCs" => self.tag(Feature::SizeBoldItalic),
-            "u" => self.tag(Feature::Underline),
-            "strike" | "dstrike" | "caps" | "smallCaps" | "vanish" => {
+            // A property element counts only where it switches its property on, or sets a value other than the one that applies without it: `<w:caps w:val="0"/>`, `<w:u w:val="none"/>` and `<w:vertAlign w:val="baseline"/>` use nothing.
+            "sz" | "szCs" => self.tag(Feature::SizeBoldItalic),
+            "b" | "bCs" | "i" | "iCs" if switched_on(start) => self.tag(Feature::SizeBoldItalic),
+            "u" if val_other_than(start, &["none"]) => self.tag(Feature::Underline),
+            "strike" | "dstrike" | "caps" | "smallCaps" | "vanish" if switched_on(start) => {
                 self.tag(Feature::StrikeCapsHidden)
             }
-            "outline" | "shadow" | "emboss" | "imprint" => self.tag(Feature::TextEffects),
-            "color" if parent == Context::RunProperties => {
-                self.tag(Feature::Color);
-                self.theme_color(start);
+            "outline" | "shadow" | "emboss" | "imprint" if switched_on(start) => {
+                self.tag(Feature::TextEffects)
             }
-            "highlight" => self.tag(Feature::HighlightAndShading),
-            "shd" => {
-                match parent {
-                    Context::RunProperties => self.tag(Feature::HighlightAndShading),
-                    Context::ParagraphProperties => self.tag(Feature::ParagraphBordersAndShading),
-                    Context::CellProperties | Context::TableProperties => {
-                        self.table_tag(Feature::TableBordersAndShading)
-                    }
-                    _ => {}
+            "color" if parent == Context::RunProperties => {
+                if val_other_than(start, &["auto"])
+                    || attribute(start, Ns::W, "themeColor").is_some()
+                {
+                    self.tag(Feature::Color);
                 }
                 self.theme_color(start);
             }
-            "vertAlign" | "position" => self.tag(Feature::VerticalPosition),
-            "spacing" if parent == Context::RunProperties => self.tag(Feature::CharacterSpacing),
+            "highlight" if val_other_than(start, &["none"]) => {
+                self.tag(Feature::HighlightAndShading)
+            }
+            "shd" => {
+                if shades(start) {
+                    match parent {
+                        Context::RunProperties => self.tag(Feature::HighlightAndShading),
+                        Context::ParagraphProperties => {
+                            self.tag(Feature::ParagraphBordersAndShading)
+                        }
+                        Context::CellProperties | Context::TableProperties => {
+                            self.table_tag(Feature::TableBordersAndShading)
+                        }
+                        _ => {}
+                    }
+                }
+                self.theme_color(start);
+            }
+            "vertAlign" if val_other_than(start, &["baseline"]) => {
+                self.tag(Feature::VerticalPosition)
+            }
+            "position" if number_other_than(start, 0) => self.tag(Feature::VerticalPosition),
+            "spacing" if parent == Context::RunProperties => {
+                if number_other_than(start, 0) {
+                    self.tag(Feature::CharacterSpacing);
+                }
+            }
             "spacing" if parent == Context::ParagraphProperties => {
                 if [
                     "before",
@@ -959,9 +1123,14 @@ impl<'c> PartTagger<'c> {
                     self.tag(Feature::LineSpacing);
                 }
             }
-            "w" | "kern" if parent == Context::RunProperties => self.tag(Feature::CharacterSpacing),
+            "w" if parent == Context::RunProperties && number_other_than(start, 100) => {
+                self.tag(Feature::CharacterSpacing)
+            }
+            "kern" if parent == Context::RunProperties && number_other_than(start, 0) => {
+                self.tag(Feature::CharacterSpacing)
+            }
             "bdr" => self.tag(Feature::TextBorders),
-            "em" => self.tag(Feature::EmphasisMarks),
+            "em" if val_other_than(start, &["none"]) => self.tag(Feature::EmphasisMarks),
             "eastAsianLayout" => {
                 self.tag(Feature::EmphasisMarks);
                 if ["combine", "vert"].iter().any(|name| {
@@ -976,57 +1145,72 @@ impl<'c> PartTagger<'c> {
                 self.languages(start);
             }
             "themeFontLang" => self.languages(start),
-            "rtl" | "cs" => self.tag(Feature::RightToLeftRuns),
+            "rtl" | "cs" if switched_on(start) => self.tag(Feature::RightToLeftRuns),
             "hyperlink" => self.tag(Feature::Hyperlinks),
             "ruby" => self.tag(Feature::Ruby),
             // Paragraphs.
             "jc" if parent == Context::ParagraphProperties => {
-                self.tag(Feature::Alignment);
+                if val_other_than(start, &["left", "start"]) {
+                    self.tag(Feature::Alignment);
+                }
                 if val(start).is_some_and(|value| value.contains("Kashida")) {
                     self.tag(Feature::Kashida);
                 }
             }
             "ind" if parent == Context::ParagraphProperties => self.tag(Feature::Indentation),
-            "contextualSpacing" => self.tag(Feature::ParagraphSpacing),
+            "contextualSpacing" if switched_on(start) => self.tag(Feature::ParagraphSpacing),
             "tabs" => {
                 self.tag(Feature::TabStops);
                 return Context::Tabs;
             }
-            "keepNext" | "keepLines" | "pageBreakBefore" | "widowControl" => {
+            "keepNext" | "keepLines" | "pageBreakBefore" | "widowControl" if switched_on(start) => {
                 self.tag(Feature::KeepAndWidowControl)
             }
             "pBdr" => self.tag(Feature::ParagraphBordersAndShading),
-            "outlineLvl" => self.tag(Feature::OutlineLevel),
+            "outlineLvl" => {
+                // Level 9 is body text, the level of a paragraph without one.
+                let level = val(start).and_then(|value| value.trim().parse::<u32>().ok());
+                if level.is_some_and(|level| level < 9) {
+                    self.tag(Feature::OutlineLevel);
+                    if let Some(style) = &mut self.style {
+                        style.heading = true;
+                    }
+                }
+            }
             "framePr" => self.tag(Feature::DropCapsAndFrames),
-            "bidi" if parent == Context::SectionProperties => {
+            "bidi" if parent == Context::SectionProperties && switched_on(start) => {
                 self.tag(Feature::SectionTextDirection)
             }
-            "bidi" => self.tag(Feature::BidirectionalParagraphs),
-            "snapToGrid" | "wordWrap" | "overflowPunct" | "topLinePunct" => {
+            "bidi" if parent != Context::SectionProperties && switched_on(start) => {
+                self.tag(Feature::BidirectionalParagraphs)
+            }
+            // East Asian line breaking is on unless a document switches it off, so these count when they switch it off; only `w:topLinePunct` is off unless switched on.
+            "snapToGrid" | "wordWrap" | "overflowPunct" if !switched_on(start) => {
                 self.tag(Feature::EastAsianLineBreaking)
             }
-            "kinsoku" => {
+            "topLinePunct" if switched_on(start) => self.tag(Feature::EastAsianLineBreaking),
+            "kinsoku" if !switched_on(start) => {
                 self.tag(Feature::EastAsianLineBreaking);
                 self.tag(Feature::Kinsoku);
             }
-            "autoSpaceDE" | "autoSpaceDN" => {
+            "autoSpaceDE" | "autoSpaceDN" if !switched_on(start) => {
                 self.tag(Feature::EastAsianLineBreaking);
                 self.tag(Feature::AsianAutoSpacing);
             }
             "noLineBreaksBefore" | "noLineBreaksAfter" => self.tag(Feature::Kinsoku),
             "textAlignment" => self.tag(Feature::TextAlignmentAndDirection),
-            "textDirection" => {
+            // Horizontal text is `lrTb` in Transitional and `tb` in Strict (where `lr` is vertical text read from the bottom up); it is the direction without the element, so only another direction counts.
+            "textDirection"
+                if val(start).is_some_and(|value| !matches!(value.trim(), "lrTb" | "tb")) =>
+            {
                 match parent {
                     Context::SectionProperties => self.tag(Feature::SectionTextDirection),
                     Context::CellProperties => self.table_tag(Feature::CellTextDirection),
                     _ => self.tag(Feature::TextAlignmentAndDirection),
                 }
-                // Horizontal text is `lrTb` in Transitional and `tb` in Strict, where `lr` is vertical text read from the bottom up.
-                if val(start).is_some_and(|value| !matches!(value.trim(), "lrTb" | "tb")) {
-                    self.tag(Feature::VerticalText);
-                }
+                self.tag(Feature::VerticalText);
             }
-            "suppressLineNumbers" | "suppressAutoHyphens" => {
+            "suppressLineNumbers" | "suppressAutoHyphens" if switched_on(start) => {
                 self.tag(Feature::SuppressLineNumbersAndHyphens)
             }
             "rPr" => {
@@ -1047,7 +1231,11 @@ impl<'c> PartTagger<'c> {
                 self.style = Some(StyleState {
                     heading: false,
                     numbering: kind == Some("numbering"),
+                    numbered: false,
                 });
+                self.style_id = attribute(start, Ns::W, "styleId")
+                    .map(|value| value.decoded().trim().to_owned())
+                    .unwrap_or_default();
                 return Context::Style;
             }
             "name" if parent == Context::Style => {
@@ -1064,19 +1252,23 @@ impl<'c> PartTagger<'c> {
             // Numbering.
             "abstractNum" | "num" | "lvlOverride" => self.tag(Feature::AbstractNumbering),
             "lvl" => return Context::Level,
-            "numFmt" => self.tag(Feature::NumberFormats),
+            // Footnote and endnote properties have a `w:numFmt` too; only a list level's counts.
+            "numFmt" if parent == Context::Level => self.tag(Feature::NumberFormats),
             "lvlText" | "suff" | "lvlJc" | "isLgl" => self.tag(Feature::LevelTextAndSuffix),
             "lvlRestart" | "startOverride" => self.tag(Feature::RestartRules),
             "numPicBullet" | "lvlPicBulletId" => self.tag(Feature::PictureBullets),
             "legacy" => self.tag(Feature::LegacyNumbering),
-            "pStyle" if parent == Context::Level => self.tag(Feature::HeadingNumbering),
+            // A level linked to a style numbers that style's paragraphs; it is heading numbering only if the style is a heading style, which [`Collected::finish`] decides once the styles are known.
+            "pStyle" if parent == Context::Level => {
+                if let Some(style) = val(start) {
+                    self.collected.link_style(&style, false);
+                }
+            }
             "numPr" => {
-                if let Some(style) = self.style {
+                if let Some(style) = &mut self.style {
+                    style.numbered = true;
                     if style.numbering {
                         self.tag(Feature::NumberingStyles);
-                    }
-                    if style.heading {
-                        self.tag(Feature::HeadingNumbering);
                     }
                 }
             }
@@ -1112,10 +1304,11 @@ impl<'c> PartTagger<'c> {
                     self.tag(Feature::Columns);
                 }
             }
-            "vAlign" if parent == Context::SectionProperties => {
+            // Text aligned to the top is the alignment without the element.
+            "vAlign" if parent == Context::SectionProperties && val_other_than(start, &["top"]) => {
                 self.tag(Feature::PageVerticalAlignment)
             }
-            "vAlign" if parent == Context::CellProperties => {
+            "vAlign" if parent == Context::CellProperties && val_other_than(start, &["top"]) => {
                 self.table_tag(Feature::CellTextDirection)
             }
             "pgBorders" => self.tag(Feature::PageBorders),
@@ -1140,7 +1333,7 @@ impl<'c> PartTagger<'c> {
                 }
                 _ => {}
             },
-            "rtlGutter" => self.tag(Feature::SectionTextDirection),
+            "rtlGutter" if switched_on(start) => self.tag(Feature::SectionTextDirection),
             "mirrorMargins" | "bookFoldPrinting" | "bookFoldRevPrinting" | "gutterAtTop" => {
                 if is_on(attribute(start, Ns::W, "val")) {
                     self.tag(Feature::MirrorMarginsAndBookFold);
@@ -1187,7 +1380,7 @@ impl<'c> PartTagger<'c> {
                 self.table_tag(Feature::RowHeightAndHeaderRows)
             }
             "tblpPr" => self.table_tag(Feature::FloatingTables),
-            "bidiVisual" => self.table_tag(Feature::RightToLeftTables),
+            "bidiVisual" if switched_on(start) => self.table_tag(Feature::RightToLeftTables),
             // Fields.
             "fldSimple" => {
                 self.tag(Feature::Fields);
@@ -1226,7 +1419,24 @@ impl<'c> PartTagger<'c> {
             // Drawings and objects, only in the stories (the numbering part's picture bullets hold a `w:pict` too).
             "pict" if self.kind.is_story() => self.tag(Feature::VmlShapes),
             "object" if self.kind.is_story() => self.tag(Feature::OleObjects),
-            "txbxContent" if self.kind.is_story() => self.tag(Feature::TextBoxes),
+            // Strict writes an embedded or linked object's program here rather than on `o:OLEObject`.
+            "objectEmbed" | "objectLink" if self.kind.is_story() => {
+                self.tag(Feature::OleObjects);
+                let program = attribute(start, Ns::W, "progId")
+                    .or_else(|| start.attribute("", "progId"))
+                    .map(|value| value.decoded().into_owned())
+                    .unwrap_or_default();
+                if is_equation_program(&program) {
+                    self.tag(Feature::LegacyEquations);
+                }
+            }
+            "txbxContent" if self.kind.is_story() => {
+                self.tag(Feature::TextBoxes);
+                self.text_boxes.push((self.table_depth, self.cell_depth));
+                self.table_depth = 0;
+                self.cell_depth = 0;
+                return Context::TextBox;
+            }
             "contentPart" if self.kind.is_story() => self.tag(Feature::Ink),
             // Content controls.
             "sdt" => self.tag(Feature::ContentControls),
@@ -1234,10 +1444,14 @@ impl<'c> PartTagger<'c> {
             "dataBinding" => self.tag(Feature::XmlDataBinding),
             // Settings and the font table.
             "compat" => return Context::Compat,
+            // Word's own settings carry its namespace in `w:uri`; another program's setting of the same name is not Word's compatibility mode.
             "compatSetting" if parent == Context::Compat => {
                 let name =
                     attribute(start, Ns::W, "name").map(|value| value.decoded().into_owned());
-                if name.as_deref().map(str::trim) == Some("compatibilityMode") {
+                let uri = attribute(start, Ns::W, "uri").map(|value| value.decoded().into_owned());
+                if name.as_deref().map(str::trim) == Some("compatibilityMode")
+                    && uri.as_deref().map(str::trim) == Some(WORD_SETTINGS_URI)
+                {
                     self.collected.compatibility_mode =
                         val(start).and_then(|value| value.trim().parse().ok());
                 }
@@ -1295,15 +1509,11 @@ impl<'c> PartTagger<'c> {
         if let Some(tag) = attribute(start, Ns::W, "val") {
             self.collected.add_language(&tag.decoded());
         }
-        if let Some(tag) = attribute(start, Ns::W, "eastAsia")
-            && let Some(tag) = self.collected.checked_language(&tag.decoded())
-        {
-            self.collected.east_asian_languages.insert(tag);
+        if let Some(tag) = attribute(start, Ns::W, "eastAsia") {
+            self.collected.hold_language(&tag.decoded(), true);
         }
-        if let Some(tag) = attribute(start, Ns::W, "bidi")
-            && let Some(tag) = self.collected.checked_language(&tag.decoded())
-        {
-            self.collected.complex_script_languages.insert(tag);
+        if let Some(tag) = attribute(start, Ns::W, "bidi") {
+            self.collected.hold_language(&tag.decoded(), false);
         }
     }
 
@@ -1380,7 +1590,7 @@ impl<'c> PartTagger<'c> {
             "INCLUDETEXT" | "INCLUDEPICTURE" | "INCLUDE" | "IMPORT" | "LINK" | "DDE"
             | "DDEAUTO" => Some(Feature::ExternalFields),
             "HYPERLINK" => Some(Feature::Hyperlinks),
-            "EQ" => Some(Feature::CombineCharacters),
+            "EQ" => equation_field(instruction),
             "SYMBOL" => Some(Feature::TextTabsBreaksSymbols),
             _ => None,
         };
@@ -1421,6 +1631,22 @@ impl<'c> PartTagger<'c> {
             TextKind::Pages => self.collected.pages_hint = text.parse().ok(),
             TextKind::None | TextKind::Story | TextKind::Instruction => {}
         }
+    }
+}
+
+/// The feature an `EQ` field shows, by the form Word writes: an enclosed character (`EQ \o\ac(○,字)`, from Enclose Characters) or a phonetic guide (`EQ … \o\ad(\s\up 9(ruby),base)`, from older versions' Phonetic Guide). Every other `EQ` field builds a formula (`\f` fractions, `\r` radicals, `\i` integrals…), which the coverage matrix has no row for, so it counts only as a field.
+fn equation_field(instruction: &str) -> Option<Feature> {
+    let compact: String = instruction
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if compact.contains("\\O\\AD(") && compact.contains("\\S\\UP") {
+        Some(Feature::Ruby)
+    } else if compact.contains("\\O\\AC(") {
+        Some(Feature::CombineCharacters)
+    } else {
+        None
     }
 }
 
@@ -1535,9 +1761,27 @@ impl Handler for PartTagger<'_> {
             Context::AlternateContent => {
                 self.alternates.pop();
             }
-            Context::SectionProperties if self.section_has_references => {
-                self.collected.sections_with_references =
-                    self.collected.sections_with_references.saturating_add(1);
+            // Sections come in document order, so a section without references that follows one with them inherits them.
+            Context::SectionProperties => {
+                if self.section_has_references {
+                    self.collected.references_seen = true;
+                } else if self.collected.references_seen {
+                    self.collected.inherits_references = true;
+                }
+            }
+            Context::TextBox => {
+                (self.table_depth, self.cell_depth) = self.text_boxes.pop().unwrap_or((0, 0));
+            }
+            Context::Style => {
+                if let Some(style) = self.style.take()
+                    && style.heading
+                {
+                    if style.numbered {
+                        self.tag(Feature::HeadingNumbering);
+                    }
+                    let id = std::mem::take(&mut self.style_id);
+                    self.collected.link_style(&id, true);
+                }
             }
             _ => {}
         }
@@ -1546,7 +1790,6 @@ impl Handler for PartTagger<'_> {
                 "t" | "instrText" => self.text = TextKind::None,
                 "tbl" => self.table_depth = self.table_depth.saturating_sub(1),
                 "tc" => self.cell_depth = self.cell_depth.saturating_sub(1),
-                "style" => self.style = None,
                 _ => {}
             },
             Some(Ns::M) if name.local == "t" => self.text = TextKind::None,
@@ -1649,5 +1892,56 @@ mod tests {
     #[test]
     fn on_off_values_follow_the_standard() {
         assert!(is_on(None));
+    }
+
+    #[test]
+    fn language_tags_kept_aside_are_limited_too() {
+        // A crafted package can declare millions of distinct East Asian or complex-script tags; they are held until the text's scripts are known, within the same limit as the recorded ones.
+        let mut collected = Collected::default();
+        for number in 0..150_u32 {
+            let tag = format!(
+                "q{}{}",
+                char::from(b'a' + u8::try_from(number / 26).unwrap()),
+                char::from(b'a' + u8::try_from(number % 26).unwrap())
+            );
+            collected.hold_language(&tag, true);
+            collected.hold_language(&tag, false);
+        }
+        assert_eq!(collected.east_asian_languages.len(), MAX_LANGUAGES);
+        assert_eq!(collected.complex_script_languages.len(), MAX_LANGUAGES);
+        assert!(
+            collected
+                .notes
+                .contains("more language tags than the limit of 100; the list is cut")
+        );
+    }
+
+    #[test]
+    fn language_tags_of_the_simple_shape() {
+        for simple in ["en", "en-US", "zh-Hant-TW", "es-419", "haw", "x-none"] {
+            assert!(is_simple_language(simple), "{simple}");
+        }
+        for other in [
+            "en-US-x-twain",
+            "de-DE-1996",
+            "en-u-ca-gregory",
+            "x-private",
+            "e",
+            "abcd",
+            "en-us",
+        ] {
+            assert!(!is_simple_language(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn styles_linked_to_numbering_are_limited() {
+        let mut collected = Collected::default();
+        for number in 0..(MAX_LINKED_STYLES + 10) {
+            collected.link_style(&format!("Style{number}"), false);
+            collected.link_style(&format!("Heading{number}"), true);
+        }
+        assert_eq!(collected.level_styles.len(), MAX_LINKED_STYLES);
+        assert_eq!(collected.heading_styles.len(), MAX_LINKED_STYLES);
     }
 }

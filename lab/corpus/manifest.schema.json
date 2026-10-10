@@ -5,7 +5,7 @@
       "description": "A document's compatibility settings.",
       "properties": {
         "mode": {
-          "description": "The `compatibilityMode` setting (15 for Word 2013 and later, 14, 12 or 11), or `null` when the document has none.",
+          "description": "Word's `compatibilityMode` setting (15 for Word 2013 and later, 14, 12 or 11), or `null` when the document has none, in which case Word uses mode 12.",
           "format": "uint32",
           "minimum": 0,
           "type": [

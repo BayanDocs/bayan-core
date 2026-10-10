@@ -238,7 +238,7 @@ pub struct Scan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Compatibility {
-    /// The `compatibilityMode` setting (15 for Word 2013 and later, 14, 12 or 11), or `null` when the document has none.
+    /// Word's `compatibilityMode` setting (15 for Word 2013 and later, 14, 12 or 11), or `null` when the document has none, in which case Word uses mode 12.
     pub mode: Option<u32>,
     /// The legacy compatibility options it switches on, by element name, sorted.
     pub options: Vec<String>,

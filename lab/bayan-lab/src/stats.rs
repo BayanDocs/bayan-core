@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::manifest::Manifest;
 use crate::scan::features::{FEATURES, Feature};
+use crate::scan::tagger::DEFAULT_COMPATIBILITY_MODE;
 use crate::scan::{TAGGER_VERSION, is_hidden_character};
 
 /// Document counts of a manifest.
@@ -18,6 +19,8 @@ pub struct Stats {
     pub documents: u64,
     /// Documents that are tagged.
     pub tagged: u64,
+    /// Documents tagged by the current version of the tagging rules.
+    pub tagged_current: u64,
     /// Their total size, in bytes.
     pub total_size: u64,
     /// Documents per tier.
@@ -64,6 +67,9 @@ impl Stats {
                 continue;
             };
             stats.tagged += 1;
+            if scan.tagger == TAGGER_VERSION {
+                stats.tagged_current += 1;
+            }
             bump(
                 &mut stats.applications,
                 scan.application
@@ -89,10 +95,11 @@ impl Stats {
             for language in &scan.languages {
                 bump(&mut stats.languages, language.clone());
             }
-            let mode = scan
-                .compatibility
-                .mode
-                .map_or_else(|| "none".to_owned(), |mode| mode.to_string());
+            // Without a `compatibilityMode` setting, Word uses mode 12.
+            let mode = scan.compatibility.mode.map_or_else(
+                || format!("{DEFAULT_COMPATIBILITY_MODE} (no setting)"),
+                |mode| mode.to_string(),
+            );
             bump(&mut stats.compatibility_modes, mode);
             for option in &scan.compatibility.options {
                 bump(&mut stats.compatibility_options, option.clone());
@@ -104,13 +111,16 @@ impl Stats {
     /// The counts as JSON.
     #[must_use]
     pub fn to_json(&self) -> Value {
-        let features: BTreeMap<&str, u64> = FEATURES
+        // A feature that scanning cannot detect has no count, rather than a count of 0.
+        let features: BTreeMap<&str, Option<u64>> = FEATURES
             .iter()
             .map(|info| {
-                (
-                    info.name,
-                    self.features.get(&info.feature).copied().unwrap_or(0),
-                )
+                let count = info
+                    .feature
+                    .not_detectable()
+                    .is_none()
+                    .then(|| self.features.get(&info.feature).copied().unwrap_or(0));
+                (info.name, count)
             })
             .collect();
         let scripts: BTreeMap<&str, Value> = self
@@ -126,6 +136,7 @@ impl Stats {
         json!({
             "documents": self.documents,
             "tagged": self.tagged,
+            "tagged_by_current_tagger": self.tagged_current,
             "total_size": self.total_size,
             "tagger": TAGGER_VERSION,
             "tiers": self.tiers,
@@ -154,10 +165,11 @@ impl Stats {
         let _ = writeln!(out, "## Corpus\n");
         let _ = writeln!(out, "| | |\n|---|---|");
         let _ = writeln!(out, "| Documents | {} |", self.documents);
+        let _ = writeln!(out, "| Tagged | {} |", self.tagged);
         let _ = writeln!(
             out,
-            "| Tagged (tagger version {TAGGER_VERSION}) | {} |",
-            self.tagged
+            "| Tagged by the current tagger (version {TAGGER_VERSION}) | {} |",
+            self.tagged_current
         );
         let _ = writeln!(out, "| Total size | {} |", size(self.total_size));
         for (tier, count) in &self.tiers {

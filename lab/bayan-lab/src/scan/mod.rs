@@ -25,7 +25,7 @@ use xml::{XmlError, XmlLimits};
 use zip::{Archive, ZipError, ZipLimits};
 
 /// The version of the tagging rules. Raise it whenever a rule changes what a document is tagged with; `corpus verify` then reports the documents tagged by an older version, and `corpus tag` tags them again.
-pub const TAGGER_VERSION: u32 = 1;
+pub const TAGGER_VERSION: u32 = 2;
 
 /// The content type of the main part of a `.docx` document (Transitional and Strict alike).
 const DOCUMENT_CONTENT_TYPE: &str =
@@ -315,10 +315,12 @@ fn tag_relationship(kind: Rel, collected: &mut Collected) {
         Rel::ChartEx => Feature::NewerChartTypes,
         Rel::OleObject => Feature::OleObjects,
         Rel::Diagram => Feature::SmartArt,
-        Rel::Comments | Rel::CommentExtensions => Feature::Comments,
         Rel::Model3d => Feature::Models3d,
         Rel::Unknown => Feature::UnknownPartsAndExtensions,
-        Rel::OfficeDocument
+        // A comments part, its extensions and the people part (the authors of comments or of tracked changes) can exist without a single comment; comments count where `w:comment`, `w:commentReference` or `w15:commentEx` appear.
+        Rel::Comments
+        | Rel::CommentExtensions
+        | Rel::OfficeDocument
         | Rel::Styles
         | Rel::StylesWithEffects
         | Rel::Numbering
