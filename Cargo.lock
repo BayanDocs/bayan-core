@@ -132,6 +132,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bayan-lab"
+version = "0.0.0"
+dependencies = [
+ "miniz_oxide",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "bayan-model"
 version = "0.0.0"
 dependencies = [

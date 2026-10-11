@@ -1,0 +1,289 @@
+# Tagging rules
+
+The tagger (`lab/bayan-lab/src/scan/`) reads a `.docx` package and reports which features of the [coverage matrix](https://github.com/BayanDocs/docs/blob/HEAD/specs/coverage-matrix.md) the document uses, by their exact names in the matrix, together with its fonts, languages, scripts and compatibility settings. The results go into the manifest's `scan` entry ([manifest-schema.md](manifest-schema.md)) and the frequency report. This page says, in plain words, what each tag means; the code in `scan/tagger.rs` and `scan/mod.rs` is the exact definition, and its tests (`lab/bayan-lab/tests/lab/tagging.rs`) pin the behavior described here.
+
+A tag says that the document's markup **uses** a feature, not that the feature changes the document's appearance. A document that turns bold on in a style has the tag "Size, bold, italic" even if no text uses that style. The tags are meant for counting how often features occur in real documents, so that the coverage matrix can be prioritized, and for finding documents that exercise a feature.
+
+A property element counts only where it **switches its property on, or sets a value other than the one that applies without it**. `<w:caps w:val="0"/>`, `<w:u w:val="none"/>`, `<w:em w:val="none"/>`, `<w:vertAlign w:val="baseline"/>`, `<w:position w:val="0"/>`, `<w:jc w:val="left"/>`, `<w:color w:val="auto"/>`, `<w:shd w:val="clear" w:fill="auto"/>` and a horizontal `<w:textDirection w:val="lrTb"/>` use nothing, though programs such as LibreOffice write them into every document. Where a property is on without its element, as East Asian line breaking is (`w:kinsoku`, `w:autoSpaceDE`, `w:autoSpaceDN`, `w:snapToGrid`, `w:wordWrap`, `w:overflowPunct`), the element counts when it switches the property off. A property switched off in a paragraph after a style switched it on is still counted, through the style.
+
+Whenever a rule changes what a document is tagged with, `TAGGER_VERSION` in `scan/mod.rs` rises. `bayan-lab corpus verify` then reports every document tagged by an older version, and `bayan-lab corpus tag` tags them again (it needs the documents, so the store). The versions so far:
+
+| Version | What changed |
+|---|---|
+| 1 | the first rules |
+| 2 | the second review of LAB-001: property elements count only where they switch something on (above); comments count only where there is a comment, not from a comments, comment-extension or people relationship alone; a document without Word's `compatibilityMode` setting is in mode 12; WordArt needs a text warp other than `textNoShape`; an `EQ` field counts by its form; heading numbering needs a level linked to a heading style; "Link to previous" needs an earlier section with references; `w:numFmt` counts only in a list level; a table in a text box is not nested in the table around the text box; `w:sym` names a font; Strict `w:objectEmbed` names its program; language tags are recorded only in their simple shape |
+| 3 | the re-check of the second review: `w:widowControl` counts when it switches widow control off, which applies without it (version 2 counted it when switched on); Word's Combine Characters form of `EQ` (`\o(\s\up …,\s\do …)`) counts like Enclose Characters; only styles named "heading 1" to "heading 9" are heading styles by name (version 2 took any name that starts with "heading") |
+
+## Safety first
+
+The scanner treats every package as hostile ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers), threat model T2 and T19). It reads only the ZIP structure and the XML of the parts listed below; it never decodes images, fonts or embedded objects, never runs anything, and never fetches anything a document refers to outside the package. Every resource is bounded (`Limits::DEFAULT` in `scan/mod.rs`):
+
+| Limit | Value | Why |
+|---|---|---|
+| Package size | 512 MiB | the whole file is held in memory |
+| ZIP entries | 10,000 | Word writes a few dozen |
+| Entry name | 1,024 bytes | |
+| One entry, uncompressed | 256 MiB, checked before decompressing | compression bombs |
+| All entries, uncompressed | 1 GiB, checked before decompressing | |
+| Parts read | 2,000 | relationship chains |
+| XML nesting depth | 1,024 elements | the scanner keeps its own stack, so no input exhausts the call stack |
+| Attributes on one element | 256 | the public corpus never exceeds 76 |
+| Namespace declarations in scope | 256 | the public corpus never exceeds 74 |
+| XML names | 256 bytes | the public corpus never exceeds 37 |
+| Items in `[Content_Types].xml` or one relationships part | 10,000 | |
+| Fonts, languages recorded | 200, 100 | the lists say so in a note when cut |
+| East Asian and complex-script language tags held until the text's scripts are known | 100 each | a crafted package declared 23 million distinct tags |
+| Heading styles, and styles linked to numbering levels | 1,024 each | |
+| Nested fields followed | 64 | |
+| Compatibility options recorded | the 65 that ECMA-376 defines | no names of a document's own choosing |
+
+A package is refused, with an error that names the problem, when it is an OLE compound file (an encrypted document or a binary `.doc`), when its ZIP structure is ambiguous or damaged (it must have one reading only, the one other readers such as Python's `zipfile` and Info-ZIP's `unzip` find: the end-of-central-directory record must end the file and be the last end-record signature in it, and only one record may end it; the central directory must end exactly where the end records begin; a ZIP64 locator may stand before the end record only if that record needs it, with the ZIP64 record, without extensible data, directly before it; local headers must agree with the central directory; entries must not overlap; CRC-32 and sizes must match; names must be relative paths inside the archive, unique even when compared case-insensitively and after percent-decoding; no encryption, no symbolic links, no spanning several disks, only stored and DEFLATE entries), when an XML part is not well-formed or has a document type declaration (so no entity can be declared or expanded), or when a limit is exceeded. The tests in `lab/bayan-lab/tests/lab/hostile_packages.rs` build a crafted file for each case.
+
+## What is read
+
+- `[Content_Types].xml` and the package relationships (`_rels/.rels`). The main part must have the content type of a `.docx` document; templates (`.dotx`) and macro-enabled files (`.docm`, `.dotm`) are refused.
+- The **main document part**, and the parts it relates to: styles, numbering, settings, font table, theme, headers, footers, footnotes, endnotes, comments and comment extensions, and charts. The parts that headers, footers, notes and comments relate to are followed too, each part read once, so relationship cycles end.
+- The **application properties** (`docProps/app.xml`), for the name of the program that saved the document and its page count.
+- The **glossary document** (building blocks) is noted from its relationship but not read: its content is not part of the document.
+
+Relationship targets that leave the package (`TargetMode="External"`), that climb above its root, or that name a missing part are never followed; a missing part is noted.
+
+### Markup Compatibility
+
+Word writes a modern feature together with a fallback for older readers, for example a DrawingML shape with a VML copy, inside `mc:AlternateContent`. The tagger applies Markup Compatibility the way Word does (ECMA-376 Part 3 §10): it takes the first `mc:Choice` whose `Requires` attribute names only prefixes of namespaces it knows (at most 16 of them), or else the `mc:Fallback`, and ignores the other branches. So a modern shape is tagged as a shape, not also as a legacy VML shape, and its text is counted once. Any `mc:AlternateContent` or `mc:Ignorable` tags "Markup Compatibility (AlternateContent, Ignorable)".
+
+An element in a namespace the tagger does not know (`scan/vocabulary.rs` lists the Transitional and Strict namespaces of ECMA-376 and the Microsoft extensions Word writes) tags "Unknown parts and extensions preserved" and is skipped with all its content; so is a relationship of an unknown type.
+
+### Stories
+
+Drawings, objects and equations count only in the document's **stories**: the main document, headers, footers, footnotes, endnotes and comments. The numbering part's picture bullets, for example, hold a `w:pict` that defines a bullet, not a picture in the document. The text of the stories (`w:t`, and `m:t` in equations) is counted by script; deleted text (`w:delText`) and field instructions are not text.
+
+## Features
+
+### Package and document structure
+
+| Feature | Tagged when |
+|---|---|
+| OPC package, content types, relationships | always (every accepted package) |
+| Markup Compatibility (AlternateContent, Ignorable) | `mc:AlternateContent` or an `mc:Ignorable` attribute |
+| Strict OOXML namespace variant | any element in a Strict (ISO/IEC 29500 Strict) namespace |
+| Unknown parts and extensions preserved | an element in an unknown namespace, or a relationship of an unknown type |
+| Core, app and custom properties | a core, extended or custom properties relationship |
+| Custom XML parts | a custom XML relationship |
+| Glossary document (building blocks) | a glossary document relationship |
+| Embedded fonts | a font relationship, or `w:embedRegular`, `w:embedBold`, `w:embedItalic`, `w:embedBoldItalic` in the font table |
+| Digital signatures | a digital signature relationship |
+| VBA project | a VBA project relationship (`.docx` files cannot hold one, so normally never) |
+| Password encryption (Agile) | never: an encrypted document is an OLE compound file, which the scanner refuses without decrypting |
+
+### Characters and runs
+
+| Feature | Tagged when |
+|---|---|
+| Text, tabs, breaks, symbols | `w:t`, `w:br`, `w:cr`, `w:sym`, a `w:tab` in a run, or a `SYMBOL` field |
+| Fonts per script slot and hints | `w:rFonts` |
+| Size, bold, italic (incl. complex-script variants) | `w:sz`, `w:szCs`, or `w:b`, `w:bCs`, `w:i`, `w:iCs` switched on |
+| Underline styles and colors | `w:u` other than `none` |
+| Strike, double strike, caps, small caps, hidden | `w:strike`, `w:dstrike`, `w:caps`, `w:smallCaps`, `w:vanish`, switched on |
+| Color (incl. theme colors, tint, shade) | `w:color` in run properties, other than `auto` or with a theme color |
+| Highlight and shading | `w:highlight` other than `none`, or `w:shd` in run properties that shades (a pattern other than `clear`, or a fill other than `auto`; `nil` never shades) |
+| Superscript, subscript, position | `w:vertAlign` other than `baseline`, `w:position` other than 0 |
+| Character spacing, scaling, kerning threshold | `w:spacing` or `w:kern` in run properties other than 0, or `w:w` other than 100 |
+| Borders around text | `w:bdr` |
+| Emphasis marks, East Asian layout options | `w:em` other than `none`, `w:eastAsianLayout` |
+| Fit text | `w:fitText` |
+| Language tags | `w:lang` |
+| Right-to-left and complex-script flags | `w:rtl`, `w:cs`, switched on |
+| Text effects (glow, shadow, outline, reflection, fill) | `w:outline`, `w:shadow`, `w:emboss`, `w:imprint` switched on, or the Word 2010 effects (`w14:glow`, `w14:shadow`, `w14:textOutline`, `w14:textFill`, `w14:reflection`, `w14:props3d`, `w14:scene3d`) |
+| OpenType features | `w14:ligatures`, `w14:numForm`, `w14:numSpacing`, `w14:stylisticSets`, `w14:cntxtAlts` |
+| Hyperlinks | `w:hyperlink`, a hyperlink relationship, or a `HYPERLINK` field |
+| Ruby (phonetic guide) | `w:ruby`, or an `EQ` field in the form of older versions' phonetic guide (`\o\ad(\s\up …)`) |
+
+### Paragraphs
+
+| Feature | Tagged when |
+|---|---|
+| Alignment (incl. distribute, Thai, kashida variants) | `w:jc` in paragraph properties, other than `left` or `start` |
+| Indentation (left, right, first line, hanging, chars) | `w:ind` in paragraph properties |
+| Spacing before/after, auto spacing, contextual spacing | `w:spacing` in paragraph properties with `before`, `after`, `beforeLines`, `afterLines` or an auto-spacing attribute, or `w:contextualSpacing` switched on |
+| Line spacing (auto, exact, at least) | `w:spacing` in paragraph properties with `line` |
+| Tab stops (all alignments and leaders, bar tabs) | `w:tabs` |
+| Keep with next, keep lines together, page break before, widow control | `w:keepNext`, `w:keepLines` or `w:pageBreakBefore` switched on, or `w:widowControl` switched off (widow control applies unless a document switches it off, ISO/IEC 29500-1 §17.3.1.44) |
+| Paragraph borders and shading (with border merging) | `w:pBdr`, or `w:shd` in paragraph properties |
+| Outline level | `w:outlineLvl` from 0 to 8 (9 is body text) |
+| Drop caps and frames | `w:framePr` |
+| Bidirectional paragraphs | `w:bidi` outside section properties, switched on |
+| Snap to grid, East Asian line-breaking options | `w:snapToGrid`, `w:wordWrap`, `w:overflowPunct`, `w:kinsoku`, `w:autoSpaceDE` or `w:autoSpaceDN` switched off, or `w:topLinePunct` switched on |
+| Text alignment on line, text direction | `w:textAlignment`, or a vertical `w:textDirection` outside sections and cells |
+| Suppress line numbers, suppress auto hyphens | `w:suppressLineNumbers`, `w:suppressAutoHyphens`, switched on |
+| Paragraph mark formatting | run properties inside paragraph properties |
+
+### Styles and themes
+
+| Feature | Tagged when |
+|---|---|
+| Document defaults | `w:docDefaults` |
+| Paragraph, character, linked styles and inheritance | a paragraph or character `w:style` |
+| Table styles with conditional formatting | `w:tblStylePr`, in a document that has a table |
+| Numbering styles | a numbering style with numbering properties (`w:numPr`); Word's built-in "No List" style has none |
+| Latent styles | `w:latentStyles` |
+| Toggle properties semantics | a toggle property (bold, italic, caps, small caps, strike, double strike, outline, shadow, emboss, imprint, hidden) set in a style |
+| Theme fonts and colors | a theme font reference in `w:rFonts`, or a theme color or fill attribute |
+| Style auto-redefinition (honored, but never silently) | `w:autoRedefine` |
+
+Every Word document's styles define the "Normal Table" style with cell margins, so table formatting found only in the styles (cell margins, borders and shading, merges, row heights, floating, right-to-left, cell direction, table styles) counts only if the document has a table.
+
+### Numbering and lists
+
+| Feature | Tagged when |
+|---|---|
+| Abstract numbering and instances, level overrides | `w:abstractNum`, `w:num`, `w:lvlOverride` |
+| Number formats (…) | `w:numFmt` in a list level (footnote and endnote properties have one too) |
+| Level text, suffix, justification, legal numbering | `w:lvlText`, `w:suff`, `w:lvlJc`, `w:isLgl` |
+| Restart rules | `w:lvlRestart`, `w:startOverride` |
+| Picture bullets | `w:numPicBullet`, `w:lvlPicBulletId` |
+| Legacy numbering | `w:legacy` |
+| Heading outline numbering | a numbering level linked (`w:pStyle` in `w:lvl`) to a heading style, or a heading style with numbering properties. A heading style is one named "heading 1" to "heading 9", or whose paragraph properties set an outline level from 0 to 8; levels linked to list styles such as "List Bullet" are lists, not heading numbering |
+
+### Sections and page layout
+
+| Feature | Tagged when |
+|---|---|
+| Page size, orientation, margins, gutter | `w:pgSz`, `w:pgMar` |
+| Section breaks (next page, continuous, even, odd) | the main document has at least two sections |
+| Columns (equal, unequal, separator) and column balancing | `w:cols` with more than one column or a separator, or two `w:col` |
+| Vertical alignment of page | `w:vAlign` in section properties, other than `top` |
+| Page borders (including art borders) | `w:pgBorders` |
+| Line numbering | `w:lnNumType` |
+| Page numbering format and restart | `w:pgNumType` with `fmt`, `start`, `chapStyle` or `chapSep` |
+| Document grid (East Asian) | `w:docGrid` of type `lines`, `linesAndChars` or `snapToChars` |
+| Text direction of section, right-to-left gutter | a vertical `w:textDirection`, or `w:bidi` or `w:rtlGutter` switched on, in section properties |
+| Mirror margins, book fold, gutter at top | `w:mirrorMargins`, `w:bookFoldPrinting`, `w:bookFoldRevPrinting`, `w:gutterAtTop`, switched on |
+
+Section properties count only in the main document, and not inside a tracked section change.
+
+### Headers and footers
+
+| Feature | Tagged when |
+|---|---|
+| Default, first-page, even headers and footers | a header or footer reference, or `w:titlePg` or `w:evenAndOddHeaders` switched on |
+| Link to previous (inheritance across sections) | a section without header and footer references follows one with them, so it inherits them |
+| Header/footer distances and growth into body | a header or footer reference |
+| Watermarks (VML/WordArt in header) | VML WordArt in a header, or a VML shape whose identifier Word gives watermarks (`PowerPlusWaterMarkObject…`, `WordPictureWatermark…`) |
+
+### Tables
+
+| Feature | Tagged when |
+|---|---|
+| Grid, widths, fixed layout | `w:tbl` |
+| Autofit layout algorithm | a table without `w:tblLayout w:type="fixed"` |
+| Horizontal and vertical merges | `w:gridSpan`, `w:vMerge`, `w:hMerge` |
+| Borders (with conflict resolution) and shading | `w:tblBorders`, `w:tcBorders`, or `w:shd` in table or cell properties |
+| Cell margins and spacing | `w:tblCellMar`, `w:tcMar`, `w:tblCellSpacing` |
+| Row height rules, cannot split, header rows | `w:trHeight`, `w:cantSplit`, `w:tblHeader` |
+| Rows splitting across pages | never: it depends on layout, not markup |
+| Nested tables | a table inside a table cell (a table in a text box starts afresh, even if the text box sits in a cell) |
+| Floating tables | `w:tblpPr` |
+| Right-to-left tables | `w:bidiVisual` switched on |
+| Cell text direction, vertical alignment | a vertical `w:textDirection`, or `w:vAlign` other than `top`, in cell properties |
+| Table formulas | a `=` field inside a table cell |
+
+### Fields
+
+A field's instruction (from `w:fldSimple`, or from the `w:instrText` of a complex field, which may be split over several runs) is classified by its first word. Any field tags "Complex and simple fields, nesting".
+
+| Feature | Field types |
+|---|---|
+| Page fields | `PAGE`, `NUMPAGES`, `SECTIONPAGES`, `PAGEREF` |
+| Date and time with picture switches and calendars | `DATE`, `TIME`, `CREATEDATE`, `SAVEDATE`, `PRINTDATE` |
+| Cross-references and sequences | `REF`, `NOTEREF`, `SEQ`, `STYLEREF` |
+| Document information | `AUTHOR`, `TITLE`, `FILENAME`, `DOCPROPERTY`, `DOCVARIABLE`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `LASTSAVEDBY`, `NUMWORDS`, `NUMCHARS`, `FILESIZE`, `INFO`, `TEMPLATE`, `USERNAME`, `USERINITIALS`, `USERADDRESS`, `EDITTIME`, `REVNUM` |
+| Tables of contents and figures | `TOC`, `TC` |
+| Formulas and conditions | `=` (outside tables), `IF`, `COMPARE` |
+| Mail merge fields | `MERGEFIELD`, `NEXT`, `NEXTIF`, `SKIPIF`, `ASK`, `FILLIN`, `MERGEREC`, `MERGESEQ`, `ADDRESSBLOCK`, `GREETINGLINE`, `DATABASE`, or `w:mailMerge` in the settings |
+| Indexes and authorities | `XE`, `INDEX`, `TA`, `TOA` |
+| Citations and bibliography | `CITATION`, `BIBLIOGRAPHY` |
+| Legacy form fields | `FORMTEXT`, `FORMCHECKBOX`, `FORMDROPDOWN`, or `w:ffData` |
+| External and active fields (blocked by default) | `INCLUDETEXT`, `INCLUDEPICTURE`, `INCLUDE`, `IMPORT`, `LINK`, `DDE`, `DDEAUTO` (only counted: nothing is ever fetched or run) |
+| Formatting switches | `\*`, `\#` or `\@` anywhere in the instruction, or `MERGEFORMAT` |
+
+An `EQ` field counts by its form: Word's Enclose Characters writes `EQ \o\ac(○,字)` and its Combine Characters overstrikes a raised and a lowered half, `EQ \o(\s\up 6(…),\s\do 2(…))`; both tag "Combine characters, two lines in one, enclosed characters", and older versions' Phonetic Guide wrote `EQ … \o\ad(\s\up …)`, which tags "Ruby (phonetic guide)". Every other `EQ` field builds a formula (`\f` fractions, `\r` radicals, `\i` integrals and so on); the coverage matrix has no row for such formulas, so they count only as fields. A `HYPERLINK` field tags "Hyperlinks".
+
+### Notes, comments and review
+
+| Feature | Tagged when |
+|---|---|
+| Footnotes and endnotes (…) | `w:footnoteReference`, `w:endnoteReference` |
+| Comments with threads, resolution, people | `w:commentReference`, `w:commentRangeStart`, a `w:comment` in the comments part, or `w15:commentEx`. A comments part without a comment, the comment extensions and the people part (the authors of comments or of tracked changes, [MS-DOCX]) count for nothing on their own |
+| Tracked insertions and deletions | `w:ins`, `w:del` |
+| Tracked moves | `w:moveFrom`, `w:moveTo`, and their range starts |
+| Tracked formatting and property changes | `w:rPrChange`, `w:pPrChange`, `w:tblPrChange`, `w:tcPrChange`, `w:trPrChange`, `w:tblGridChange`, `w:tblPrExChange`, `w:numberingChange`, `w:sectPrChange` |
+| Restrict editing, permissions | `w:documentProtection` with enforcement on, `w:writeProtection`, `w:permStart`, `w:permEnd` |
+| Markup display modes and balloons; Compare and combine documents | never: these are features of the application, not of the file |
+
+### Drawings and objects (stories only)
+
+| Feature | Tagged when |
+|---|---|
+| Inline and anchored pictures | `pic:pic` |
+| Image formats (…) | `a:blip`, an SVG blip, VML `v:imagedata`, or an image relationship |
+| Cropping, recoloring, transparency, basic effects | `a:srcRect` with a non-zero edge, or a color or transparency effect inside `a:blip` |
+| Text wrapping (…) | `wp:wrapSquare`, `wp:wrapTight`, `wp:wrapThrough`, `wp:wrapTopAndBottom`, `wp:wrapNone`, or `w10:wrap` |
+| Positioning relative to page, margin, column, paragraph, line, character | `wp:positionH`, `wp:positionV` |
+| Shapes: preset and custom geometry, fills, lines, arrowheads | `wps:wsp` |
+| Text boxes and linked text boxes | `wps:txbx`, `wps:linkedTxbx`, `w:txbxContent`, or VML `v:textbox` |
+| Groups and drawing canvases | `wpg:wgp`, `wpc:wpc`, or VML `v:group` |
+| Shape effects (shadow, glow, soft edges, 3D) | an effect inside `a:effectLst`, `a:scene3d`, `a:sp3d` |
+| WordArt | `a:prstTxWarp` other than `textNoShape` (Word's "no transform", written into ordinary shapes), or VML `v:textpath` |
+| Legacy VML shapes and pictures | any VML element, or `w:pict` |
+| OLE objects (preview only; never activated) | `w:object`, `o:OLEObject`, `w:objectEmbed` or `w:objectLink` (Strict), or an OLE object relationship |
+| Ink | `w14:contentPart`, `w:contentPart`, or the ink namespaces |
+| 3D models | the 3D model namespace, or a 3D model relationship |
+
+### Equations, charts and diagrams
+
+| Feature | Tagged when |
+|---|---|
+| Equations (OMML) | `m:oMath`, `m:oMathPara` |
+| Legacy equations (…) | an `o:OLEObject`, or in Strict a `w:objectEmbed` or `w:objectLink`, whose program is `Equation.…` or MathType |
+| Charts (…) | `c:chart` in a story, or a chart relationship |
+| Newer chart types (…) | `cx:chart` in a story, or a `chartEx` relationship |
+| 3D charts | `c:bar3DChart`, `c:line3DChart`, `c:pie3DChart`, `c:area3DChart`, `c:surface3DChart` in a chart part |
+| SmartArt (from Word's drawing cache) | `dgm:relIds` in a story, or a diagram relationship |
+
+### Content controls and forms
+
+| Feature | Tagged when |
+|---|---|
+| Rich text, plain text, picture, checkbox, combo box, drop-down, date controls | `w:sdt` |
+| Repeating sections, building block galleries | `w15:repeatingSection`, `w15:repeatingSectionItem`, `w:docPartObj`, `w:docPartList` |
+| XML data binding | `w:dataBinding`, `w15:dataBinding` |
+
+### East Asian and complex scripts
+
+| Feature | Tagged when |
+|---|---|
+| Arabic and Hebrew shaping and bidi | the text has Arabic or Hebrew characters |
+| Kashida justification | a paragraph alignment value with "Kashida" |
+| Kinsoku (line-breaking rules) incl. custom lists | `w:kinsoku` switched off, `w:noLineBreaksBefore`, `w:noLineBreaksAfter` |
+| Auto-spacing between Asian and Latin text and numbers | `w:autoSpaceDE` or `w:autoSpaceDN` switched off |
+| Character grid | `w:docGrid` of type `linesAndChars` or `snapToChars` |
+| Vertical text | a text direction other than left to right, top to bottom (`lrTb`, which Strict spells `tb`; Strict's `lr` is vertical text read from the bottom up) |
+| Combine characters, two lines in one, enclosed characters | `w:eastAsianLayout` with `combine` or `vert`, or an `EQ` field that encloses or combines characters (see Fields) |
+| Indic and Southeast Asian shaping and breaking | the text has characters of an Indic or Southeast Asian script (Devanagari to Malayalam, Sinhala, Thai, Lao, Tibetan, Myanmar, Khmer) |
+
+### Compatibility settings
+
+| Feature | Tagged when |
+|---|---|
+| Compatibility mode 15 (Word 2013+) | Word's `compatibilityMode` 15 or higher |
+| Compatibility modes 14, 12, 11 | Word's `compatibilityMode` 14, 12 or 11, or no such setting: without one, Word uses mode 12 ([MS-DOCX], "compatibilityMode": "This is the default") |
+| Individual legacy compatibility options (dozens) | one of the 65 options that ECMA-376 defines as children of `w:compat` (Part 4, Transitional Migration Features), switched on; the options themselves are listed in `compatibility.options`. Other names are not recorded (a note says so), so a document cannot write words of its own into the manifest. |
+
+Word's own `compatibilityMode` is a `w:compatSetting` with that name and with Word's namespace, `http://schemas.microsoft.com/office/word`, in `w:uri` ([MS-DOCX]); a setting of another program with the same name does not count. The manifest records the setting as the document has it, so `compatibility.mode` is `null` without one, and the frequency report counts such documents as "12 (no setting)".
+
+## Fonts, languages and scripts
+
+- **Fonts:** the names in the font table (`w:font w:name`), in `w:rFonts` (`ascii`, `hAnsi`, `eastAsia`, `cs`), and in symbols (`w:sym w:font`), in DrawingML text and charts (`a:latin`, `a:ea`, `a:cs`, `a:sym`; references to the theme such as `+mn-lt` are not names), plus the theme's fonts for the slots that `w:rFonts` refers to (`minorHAnsi` and so on). Names are trimmed; empty names are ignored, and names with control characters or invisible characters that could reorder or hide text (bidirectional controls, zero-width characters, soft hyphens, line and paragraph separators, variation selectors, Unicode tag characters, fillers; `is_hidden_character` in `scan/mod.rs` lists them) are left out with a note. The same characters are refused in the program name and in provenance paths, and replaced by `?` in messages and reports.
+- **Languages:** `w:val` of `w:lang` and `w:themeFontLang`, put in canonical case. Their `w:eastAsia` and `w:bidi` tags count only if the text holds East Asian or complex-script characters respectively, because Word declares them in nearly every document whatever its text; until the text is known they are held aside, at most 100 of each. Only tags of the shape real documents use are recorded: a language of two or three letters, optionally a script and a region (`en-US`, `zh-Hant-TW`, `es-419`), or Word's `x-none` (no proofing language). A tag that is not well-formed, or that has variants, extensions or private-use parts (`en-US-x-twain`), is left out with a note, because those parts can carry any short text a document chooses.
+- **Scripts:** each character of the stories' text is assigned a script by its Unicode block (`scan/scripts.rs`, 35 scripts); characters that all scripts share, such as digits, punctuation, spaces and symbols, are not counted.
