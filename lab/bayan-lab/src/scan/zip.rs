@@ -1,6 +1,6 @@
 //! A minimal, strict reader for the ZIP archives that hold OPC packages (ECMA-376 Part 2 §8; PKWARE's APPNOTE 6.3).
 //!
-//! **Marked for replacement** by `bayan-opc` (CORE-005), the engine's hardened package layer, once it exists. Until then the Fidelity Lab needs its own reader, and this one reads only what scanning needs: the central directory, stored and DEFLATE entries, and ZIP64 sizes.
+//! **Marked for replacement** by `bayan-opc` (CORE-005), the engine's hardened package layer, which was merged after this reader was written. Until the scanner moves onto it, the Fidelity Lab uses this reader, which reads only what scanning needs: the central directory, stored and DEFLATE entries, and ZIP64 sizes.
 //!
 //! Every archive is hostile until proven otherwise, so the reader is strict where a lenient reader could be tricked:
 //!

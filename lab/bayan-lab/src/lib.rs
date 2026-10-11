@@ -11,7 +11,7 @@
 //! - [`stats`]: frequencies by feature, font, script, language and compatibility mode, as text, Markdown or JSON.
 //! - [`cli`]: the `bayan-lab corpus …` commands that tie them together.
 //!
-//! **Status:** LAB-001. The scanner's ZIP and XML readers are minimal and marked for replacement by `bayan-opc` (CORE-005) and `bayan-xml` (CORE-006) once those exist.
+//! **Status:** LAB-001. The scanner's ZIP, package and XML readers are minimal stand-ins, written before `bayan-opc` (CORE-005) was merged, and marked for replacement by `bayan-opc` and, once CORE-006 has built it, `bayan-xml`.
 //!
 //! ## Rules this crate keeps
 //!
