@@ -368,7 +368,7 @@ pub const PROBES: [Probe; 30] = [
     },
     Probe {
         id: "chinese-mixed",
-        checks: "Chinese with English words and digits, in a CFF font with Latin fallback",
+        checks: "Chinese with English words and digits, which Noto Sans SC, a CFF font, sets with its own Latin glyphs",
         text: "这份文档包含中文、English words 和数字 2026，用于测试中英文混合排版的行宽与断行。",
         rtl: false,
         fonts: &[CHINESE, SANS],
