@@ -10,7 +10,7 @@ use unicode_bidi::{BidiInfo, Level};
 
 use crate::fonts::FontBook;
 use crate::itemize::{Run, itemize};
-use crate::layout::{Layout, Paragraph, lay_out};
+use crate::layout::{Layout, lay_out};
 use crate::probes::Probe;
 use crate::raster::{BLU_PER_PIXEL, MARGIN, Scene, glyph_paths};
 
@@ -41,7 +41,7 @@ impl Workload {
         let data = CodePointMapData::<BidiClass>::new();
         let mut prepared = Vec::with_capacity(probes.len());
         for &probe in probes {
-            let fonts = font_indices(book, probe)?;
+            let fonts = probe.font_indices(book)?;
             let base = if probe.rtl {
                 Level::rtl()
             } else {
@@ -100,7 +100,9 @@ impl Workload {
         for prepared in &self.prepared {
             lines += lay_out(
                 book,
-                &paragraph(prepared.probe, &prepared.fonts, prepared.probe.measure()),
+                &prepared
+                    .probe
+                    .paragraph(&prepared.fonts, prepared.probe.measure()),
             )?
             .lines
             .len();
@@ -136,8 +138,8 @@ pub fn viewport(
             return Err("a viewport needs at least one probe".to_owned());
         }
         for &probe in probes {
-            let fonts = font_indices(book, probe)?;
-            let layout = lay_out(book, &paragraph(probe, &fonts, measure))?;
+            let fonts = probe.font_indices(book)?;
+            let layout = lay_out(book, &probe.paragraph(&fonts, measure))?;
             paths.extend(glyph_paths(book, &layout, margin, top)?);
             top = top
                 .checked_add(layout.height)
@@ -156,31 +158,6 @@ pub fn viewport(
         },
         layouts,
     ))
-}
-
-/// The indices in `book` of a probe's fonts.
-fn font_indices(book: &FontBook, probe: &Probe) -> Result<Vec<usize>, String> {
-    probe
-        .fonts
-        .iter()
-        .map(|&file| {
-            book.index(file)
-                .ok_or_else(|| format!("{}: the font {file} was not loaded", probe.id))
-        })
-        .collect()
-}
-
-/// The paragraph of `probe` at the given measure.
-fn paragraph<'a>(probe: &'a Probe, fonts: &'a [usize], measure: bayan_units::Blu) -> Paragraph<'a> {
-    Paragraph {
-        text: probe.text,
-        rtl: probe.rtl,
-        fonts,
-        size: probe.size(),
-        measure,
-        language: probe.language,
-        features: probe.features,
-    }
 }
 
 #[cfg(test)]

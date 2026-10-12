@@ -2,9 +2,6 @@
 // font files to the module, runs the probe set and the viewport, writes every file the native runner writes, and times
 // the measurements with the host's clock (the module itself reads no clock). Plain JavaScript without dependencies.
 
-/** The rasterizers that the viewport measurement times, as the module names them. */
-export const RASTERIZERS = ["reference", "gamma2", "vello_u8_detected", "vello_u8_fallback", "vello_f32_fallback"];
-
 /**
  * Runs the spike with the module `glue` (wasm-bindgen's glue, already initialized) and writes its files through
  * `write(path, bytesOrText)`: `results.json`, `layout/<probe>.json`, `png/<probe>-<rendering>.png` and, with every font,
@@ -21,7 +18,7 @@ export async function runSpike({ glue, memory, readFont, write, environment, com
     }
     // The measurements come first, while the module holds only its fonts: WebAssembly memory only grows, and the
     // results run below needs more, two of the viewport's images at a time and the PNG files of the output it is on.
-    const bench = committed ? null : measure(pipeline, environment, memory, now);
+    const bench = committed ? null : measure(pipeline, glue.Pipeline.rasterizers().split(","), environment, memory, now);
     // One output at a time, a probe's or the viewport's, as the native runner writes them: the module keeps only the
     // files of the output it made last.
     pipeline.startRun(environment, committed);
@@ -69,8 +66,8 @@ function median(values) {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-/** The measurements of AC-3, in the format the native runner writes too. */
-function measure(pipeline, environment, memory, now) {
+/** The measurements of AC-3, in the format the native runner writes too, timing the viewport with each of `rasterizers`. */
+function measure(pipeline, rasterizers, environment, memory, now) {
   // WebAssembly memory only grows, so its size after each phase is the most that the run so far has needed: heap,
   // stack and the module's data (ICU4X's segmentation data among them) together.
   const memoryBytes = { fonts: memory().buffer.byteLength };
@@ -79,7 +76,7 @@ function measure(pipeline, environment, memory, now) {
   const layout = rounds(() => pipeline.layoutRound(), now);
   memoryBytes.layout = memory().buffer.byteLength;
   const viewport = {};
-  for (const rasterizer of RASTERIZERS) {
+  for (const rasterizer of rasterizers) {
     const runs = [];
     let sha256 = "";
     for (let run = 0; run < 5; run += 1) {

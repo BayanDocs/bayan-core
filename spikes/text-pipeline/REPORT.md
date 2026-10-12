@@ -43,7 +43,7 @@
 | `tests/determinism.rs` | The gate's check (§3.3). |
 | `.github/workflows/text-pipeline.yml` | CI in eleven environments and the comparison job (§3.2). |
 
-The crate has 69 tests (68 unit tests and the determinism test), which the gate runs on the host and in WebAssembly like every other crate's.
+The crate has 71 tests (70 unit tests and the determinism test), which the gate runs on the host and in WebAssembly like every other crate's.
 
 ### 2.1 The pipeline, step by step
 

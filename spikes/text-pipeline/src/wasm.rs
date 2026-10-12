@@ -6,7 +6,7 @@ use crate::bench::{VIEWPORT_HEIGHT, VIEWPORT_WIDTH, Workload, viewport};
 use crate::fonts::FontBook;
 use crate::hash::hex;
 use crate::probes::{PROBES, Probe};
-use crate::raster::{Blending, Image, Scene, Vello, render_reference, render_vello};
+use crate::raster::{Image, RASTERIZERS, Scene, render_named};
 use crate::run::{ProbeResult, Results, ViewportResult, run_probe, run_viewport};
 
 /// The files of the output that [`Pipeline::step`] made last, a probe's or the viewport's, kept until the host has fetched them or the next step replaces them.
@@ -219,7 +219,13 @@ impl Pipeline {
         workload.lay_out(&self.book)
     }
 
-    /// Renders the viewport with `rasterizer` (`reference`, `gamma2`, or a vello_cpu configuration such as `vello_u8_detected`) and returns its raster hash.
+    /// The names of the rasterizers that [`Pipeline::render_viewport`] knows, in the order the measurements list them, separated by commas.
+    #[must_use]
+    pub fn rasterizers() -> String {
+        RASTERIZERS.join(",")
+    }
+
+    /// Renders the viewport with `rasterizer`, one of [`Pipeline::rasterizers`], and returns its raster hash.
     ///
     /// # Errors
     ///
@@ -227,18 +233,7 @@ impl Pipeline {
     #[wasm_bindgen(js_name = renderViewport)]
     pub fn render_viewport(&self, rasterizer: &str) -> Result<String, String> {
         let (_, scene) = self.bench.as_ref().ok_or("call prepareBench first")?;
-        let image = match rasterizer {
-            "reference" => render_reference(scene, Blending::Linear)?,
-            "gamma2" => render_reference(scene, Blending::Gamma2)?,
-            name => {
-                let configuration = Vello::ALL
-                    .into_iter()
-                    .find(|configuration| configuration.name() == name)
-                    .ok_or_else(|| format!("no rasterizer {name}"))?;
-                render_vello(scene, configuration)?.0
-            }
-        };
-        Ok(hex(&image.sha256()))
+        Ok(hex(&render_named(scene, rasterizer)?.sha256()))
     }
 }
 

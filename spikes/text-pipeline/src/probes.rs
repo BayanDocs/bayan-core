@@ -4,6 +4,8 @@
 
 use bayan_units::Blu;
 
+use crate::fonts::FontBook;
+use crate::layout::Paragraph;
 use crate::shape::Features;
 
 /// Liberation Sans 2.1.5, metric-compatible with Arial.
@@ -83,6 +85,35 @@ impl Probe {
         self.fonts
             .iter()
             .all(|&font| font == HEBREW || font == THAI)
+    }
+
+    /// The indices in `book` of the probe's fonts, first choice first.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the probe and the font if one of its fonts is not in the book.
+    pub fn font_indices(&self, book: &FontBook) -> Result<Vec<usize>, String> {
+        self.fonts
+            .iter()
+            .map(|&file| {
+                book.index(file)
+                    .ok_or_else(|| format!("{}: the font {file} was not loaded", self.id))
+            })
+            .collect()
+    }
+
+    /// The probe's paragraph, with the fonts `fonts` (from [`Probe::font_indices`]) and lines `measure` wide.
+    #[must_use]
+    pub fn paragraph<'a>(&'a self, fonts: &'a [usize], measure: Blu) -> Paragraph<'a> {
+        Paragraph {
+            text: self.text,
+            rtl: self.rtl,
+            fonts,
+            size: self.size(),
+            measure,
+            language: self.language,
+            features: self.features,
+        }
     }
 }
 
@@ -458,6 +489,35 @@ mod tests {
                 probe.id
             );
         }
+    }
+
+    #[test]
+    fn finds_its_fonts_in_a_book_and_makes_its_paragraph() {
+        let book = crate::fonts::tests::committed_book();
+        let probe = PROBES
+            .iter()
+            .find(|probe| probe.id == "thai-marks")
+            .unwrap();
+        let fonts = probe.font_indices(&book).unwrap();
+        assert_eq!(fonts, [book.index(THAI).unwrap()]);
+        let paragraph = probe.paragraph(&fonts, Blu::INCH);
+        assert_eq!(
+            (paragraph.text, paragraph.rtl, paragraph.fonts),
+            (probe.text, probe.rtl, fonts.as_slice())
+        );
+        assert_eq!(
+            (paragraph.size, paragraph.measure, paragraph.language),
+            (probe.size(), Blu::INCH, probe.language)
+        );
+        assert_eq!(paragraph.features, probe.features);
+        let latin = PROBES
+            .iter()
+            .find(|probe| probe.id == "latin-sans-kerning")
+            .unwrap();
+        assert_eq!(
+            latin.font_indices(&book).unwrap_err(),
+            "latin-sans-kerning: the font LiberationSans-Regular.ttf was not loaded"
+        );
     }
 
     #[test]

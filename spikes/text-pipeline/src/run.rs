@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::fonts::FontBook;
 use crate::hash::{hex, sha256};
-use crate::layout::{Layout, Paragraph, lay_out};
+use crate::layout::{Layout, lay_out};
 use crate::probes::Probe;
 use crate::raster::{
     Blending, Difference, Image, Vello, compare, render_reference, render_vello, scene,
@@ -179,27 +179,9 @@ fn render_all(scene: &crate::raster::Scene, keep: &mut Keep<'_>) -> Result<Rende
 ///
 /// A message if a font of the probe is missing from the book, or if layout fails.
 pub fn lay_out_probe(book: &FontBook, probe: &Probe) -> Result<Layout, String> {
-    let fonts = probe
-        .fonts
-        .iter()
-        .map(|&file| {
-            book.index(file)
-                .ok_or_else(|| format!("{}: the font {file} was not loaded", probe.id))
-        })
-        .collect::<Result<Vec<usize>, String>>()?;
-    lay_out(
-        book,
-        &Paragraph {
-            text: probe.text,
-            rtl: probe.rtl,
-            fonts: &fonts,
-            size: probe.size(),
-            measure: probe.measure(),
-            language: probe.language,
-            features: probe.features,
-        },
-    )
-    .map_err(|error| format!("{}: {error}", probe.id))
+    let fonts = probe.font_indices(book)?;
+    lay_out(book, &probe.paragraph(&fonts, probe.measure()))
+        .map_err(|error| format!("{}: {error}", probe.id))
 }
 
 /// Lays out and rasterizes `probe` with the fonts of `book`, and hands each of its images to `keep` as soon as it is drawn ([`Keep`]).

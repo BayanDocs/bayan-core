@@ -426,6 +426,34 @@ pub fn render_vello(scene: &Scene, configuration: Vello) -> Result<(Image, Strin
     ))
 }
 
+/// The renderings by name, as the measurements and the image files name them: the reference, tiny-skia with gamma-2 blending, and each vello_cpu configuration ([`Vello::name`]).
+pub const RASTERIZERS: [&str; 5] = [
+    "reference",
+    "gamma2",
+    "vello_u8_detected",
+    "vello_u8_fallback",
+    "vello_f32_fallback",
+];
+
+/// Renders `scene` with the rasterizer `name`, one of [`RASTERIZERS`].
+///
+/// # Errors
+///
+/// A message if there is no rasterizer of that name, or rendering fails.
+pub fn render_named(scene: &Scene, name: &str) -> Result<Image, String> {
+    match name {
+        "reference" => render_reference(scene, Blending::Linear),
+        "gamma2" => render_reference(scene, Blending::Gamma2),
+        name => {
+            let configuration = Vello::ALL
+                .into_iter()
+                .find(|configuration| configuration.name() == name)
+                .ok_or_else(|| format!("no rasterizer {name}"))?;
+            Ok(render_vello(scene, configuration)?.0)
+        }
+    }
+}
+
 /// How two images of the same size differ, channel by channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Difference {
@@ -515,6 +543,36 @@ mod tests {
             .filter(|pixel| pixel[0] != 0 && pixel[0] != 255)
             .count();
         u64::try_from(grey * 1000 / (image.rgba.len() / 4)).unwrap()
+    }
+
+    #[test]
+    fn renders_with_the_rasterizer_it_is_named() {
+        let scene = hebrew_scene();
+        assert_eq!(
+            RASTERIZERS[..2],
+            ["reference", "gamma2"],
+            "the reference first, as the measurements and results list them"
+        );
+        assert_eq!(
+            render_named(&scene, "reference").unwrap(),
+            render_reference(&scene, Blending::Linear).unwrap()
+        );
+        assert_eq!(
+            render_named(&scene, "gamma2").unwrap(),
+            render_reference(&scene, Blending::Gamma2).unwrap()
+        );
+        assert_eq!(RASTERIZERS.len(), 2 + Vello::ALL.len());
+        for (name, configuration) in RASTERIZERS[2..].iter().zip(Vello::ALL) {
+            assert_eq!(*name, configuration.name());
+            assert_eq!(
+                render_named(&scene, name).unwrap(),
+                render_vello(&scene, configuration).unwrap().0
+            );
+        }
+        assert_eq!(
+            render_named(&scene, "skia").unwrap_err(),
+            "no rasterizer skia"
+        );
     }
 
     #[test]

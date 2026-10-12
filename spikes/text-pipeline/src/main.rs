@@ -17,7 +17,7 @@ use text_pipeline::fonts::FontBook;
 use text_pipeline::hash::hex;
 use text_pipeline::manifest::pinned_fonts;
 use text_pipeline::probes::{PROBES, Probe};
-use text_pipeline::raster::{Blending, Vello, render_reference, render_vello};
+use text_pipeline::raster::{RASTERIZERS, render_named};
 use text_pipeline::run::{Results, run_probe, run_viewport};
 
 fn main() -> ExitCode {
@@ -174,15 +174,6 @@ fn run(options: &Options) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-/// The rasterizers the viewport measurement times, as the WebAssembly runners name them (js/harness.mjs).
-const RASTERIZERS: [&str; 5] = [
-    "reference",
-    "gamma2",
-    "vello_u8_detected",
-    "vello_u8_fallback",
-    "vello_f32_fallback",
-];
-
 /// Runs `round` until at least two seconds have passed (after one round to warm up), as js/harness.mjs does, and returns the rounds and the milliseconds.
 fn rounds(mut round: impl FnMut() -> Result<usize, String>) -> Result<(u32, f64), String> {
     round()?;
@@ -222,17 +213,7 @@ fn bench(options: &Options) -> Result<(), String> {
         let mut sha256 = String::new();
         for _ in 0..5 {
             let start = Instant::now();
-            let image = match name {
-                "reference" => render_reference(&scene, Blending::Linear)?,
-                "gamma2" => render_reference(&scene, Blending::Gamma2)?,
-                _ => {
-                    let configuration = Vello::ALL
-                        .into_iter()
-                        .find(|configuration| configuration.name() == name)
-                        .ok_or_else(|| format!("no rasterizer {name}"))?;
-                    render_vello(&scene, configuration)?.0
-                }
-            };
+            let image = render_named(&scene, name)?;
             runs.push(start.elapsed().as_secs_f64() * 1000.0);
             sha256 = hex(&image.sha256());
         }
