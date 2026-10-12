@@ -78,15 +78,16 @@ impl From<Difference> for DifferenceResult {
     }
 }
 
-/// Everything one probe produced: its result, its layout JSON and its images, each with a name for its file.
+/// What one probe produced besides its images, which [`run_probe`] hands over as it makes them.
 pub struct ProbeOutput {
     /// The hashes and counts.
     pub result: ProbeResult,
     /// The layout JSON.
     pub layout_json: Vec<u8>,
-    /// The images: `reference`, `gamma2` and one per vello_cpu configuration.
-    pub images: Vec<(String, Image)>,
 }
+
+/// Receives each image of a scene as soon as it is drawn, with its name (`reference`, `gamma2` and then each [`Vello::name`], in that order), to write it out before the next one is drawn: at the size of the viewport each image is 31.6 MiB. An error stops the run and is returned.
+pub type Keep<'a> = dyn FnMut(&str, &Image) -> Result<(), String> + 'a;
 
 /// What the viewport of the rasterization measurement produced on this platform: a large scene whose last paragraph is cut off at the image's bottom edge, which takes tiny-skia's edge clipping through its curve intersections.
 #[derive(Clone, Debug, Serialize)]
@@ -109,64 +110,67 @@ pub struct ViewportResult {
     pub vello: Vec<VelloResult>,
 }
 
-/// Lays out and rasterizes a viewport of `width` × `height` pixels from `probes` (the results use the measurement's, [`crate::bench::VIEWPORT_WIDTH`] × [`crate::bench::VIEWPORT_HEIGHT`]), and returns its result and its images, named as [`run_probe`] names them.
+/// Lays out and rasterizes a viewport of `width` × `height` pixels from `probes` (the results use the measurement's, [`crate::bench::VIEWPORT_WIDTH`] × [`crate::bench::VIEWPORT_HEIGHT`]), hands each of its images to `keep` as [`run_probe`] does, and returns its result.
 ///
 /// # Errors
 ///
-/// A message if a font is missing, or if layout or rasterization fails.
+/// A message if a font is missing, if layout or rasterization fails, or what `keep` returns.
 pub fn run_viewport(
     book: &FontBook,
     probes: &[&'static Probe],
     width: u32,
     height: u32,
-) -> Result<(ViewportResult, Vec<(String, Image)>), String> {
+    keep: &mut Keep<'_>,
+) -> Result<ViewportResult, String> {
     let (scene, layouts) = crate::bench::viewport(book, probes, width, height)?;
     let mut json = Vec::new();
     for layout in &layouts {
         json.extend(layout.to_json()?);
     }
-    let renderings = render_all(&scene)?;
-    Ok((
-        ViewportResult {
-            width: scene.width,
-            height: scene.height,
-            paragraphs: layouts.len(),
-            glyphs: scene.paths.len(),
-            layouts_sha256: hex(&sha256(&json)),
-            reference_sha256: hex(&renderings.images[0].1.sha256()),
-            gamma2_sha256: hex(&renderings.images[1].1.sha256()),
-            vello: renderings.vello,
-        },
-        renderings.images,
-    ))
+    let renderings = render_all(&scene, keep)?;
+    Ok(ViewportResult {
+        width: scene.width,
+        height: scene.height,
+        paragraphs: layouts.len(),
+        glyphs: scene.paths.len(),
+        layouts_sha256: hex(&sha256(&json)),
+        reference_sha256: renderings.reference_sha256,
+        gamma2_sha256: renderings.gamma2_sha256,
+        vello: renderings.vello,
+    })
 }
 
-/// Every rendering of a scene: the images, and vello_cpu's results.
+/// The raster hashes of every rendering of a scene, and vello_cpu's results.
 struct Renderings {
-    images: Vec<(String, Image)>,
+    reference_sha256: String,
+    gamma2_sha256: String,
     vello: Vec<VelloResult>,
 }
 
-/// Renders `scene` as the reference, with gamma-2 blending, and with every vello_cpu configuration, comparing those with the reference.
-fn render_all(scene: &crate::raster::Scene) -> Result<Renderings, String> {
+/// Renders `scene` as the reference, with gamma-2 blending, and with every vello_cpu configuration, comparing those with the reference, and hands each image to `keep` as soon as it is drawn. Only the reference stays in memory until the comparisons are done, so at most two images exist at a time.
+fn render_all(scene: &crate::raster::Scene, keep: &mut Keep<'_>) -> Result<Renderings, String> {
     let reference = render_reference(scene, Blending::Linear)?;
+    keep("reference", &reference)?;
     let gamma2 = render_reference(scene, Blending::Gamma2)?;
+    keep("gamma2", &gamma2)?;
+    let gamma2_sha256 = hex(&gamma2.sha256());
+    drop(gamma2);
     let mut vello = Vec::with_capacity(Vello::ALL.len());
-    let mut images = vec![
-        ("reference".to_owned(), reference),
-        ("gamma2".to_owned(), gamma2),
-    ];
     for configuration in Vello::ALL {
         let (image, level) = render_vello(scene, configuration)?;
+        keep(configuration.name(), &image)?;
         vello.push(VelloResult {
             configuration: configuration.name().to_owned(),
             level,
             sha256: hex(&image.sha256()),
-            difference: compare(&images[0].1, &image)?.into(),
+            difference: compare(&reference, &image)?.into(),
         });
-        images.push((configuration.name().to_owned(), image));
     }
-    Ok(Renderings { images, vello })
+    Ok(Renderings {
+        reference_sha256: hex(&reference.sha256()),
+        gamma2_sha256,
+        vello,
+    })
 }
 
 /// Lays out `probe` with the fonts of `book`.
@@ -198,12 +202,16 @@ pub fn lay_out_probe(book: &FontBook, probe: &Probe) -> Result<Layout, String> {
     .map_err(|error| format!("{}: {error}", probe.id))
 }
 
-/// Lays out and rasterizes `probe` with the fonts of `book`.
+/// Lays out and rasterizes `probe` with the fonts of `book`, and hands each of its images to `keep` as soon as it is drawn ([`Keep`]).
 ///
 /// # Errors
 ///
-/// A message if a font of the probe is missing from the book, or if layout or rasterization fails.
-pub fn run_probe(book: &FontBook, probe: &Probe) -> Result<ProbeOutput, String> {
+/// A message if a font of the probe is missing from the book, if layout or rasterization fails, or what `keep` returns.
+pub fn run_probe(
+    book: &FontBook,
+    probe: &Probe,
+    keep: &mut Keep<'_>,
+) -> Result<ProbeOutput, String> {
     let layout = lay_out_probe(book, probe)?;
     let layout_json = layout.to_json()?;
     let glyphs = || {
@@ -214,7 +222,7 @@ pub fn run_probe(book: &FontBook, probe: &Probe) -> Result<ProbeOutput, String> 
             .flat_map(|run| &run.glyphs)
     };
     let scene = scene(book, &layout).map_err(|error| format!("{}: {error}", probe.id))?;
-    let Renderings { images, vello } = render_all(&scene)?;
+    let renderings = render_all(&scene, keep)?;
     Ok(ProbeOutput {
         result: ProbeResult {
             id: probe.id.to_owned(),
@@ -224,12 +232,11 @@ pub fn run_probe(book: &FontBook, probe: &Probe) -> Result<ProbeOutput, String> 
             layout_sha256: hex(&sha256(&layout_json)),
             width: scene.width,
             height: scene.height,
-            reference_sha256: hex(&images[0].1.sha256()),
-            gamma2_sha256: hex(&images[1].1.sha256()),
-            vello,
+            reference_sha256: renderings.reference_sha256,
+            gamma2_sha256: renderings.gamma2_sha256,
+            vello: renderings.vello,
         },
         layout_json,
-        images,
     })
 }
 
@@ -324,18 +331,19 @@ mod tests {
     fn runs_a_probe_into_hashes_and_images() {
         let book = committed_book();
         for probe in committed_probes() {
-            let output = run_probe(&book, probe).unwrap();
+            let mut images: Vec<(String, Image)> = Vec::new();
+            let output = run_probe(&book, probe, &mut |name, image| {
+                images.push((name.to_owned(), image.clone()));
+                Ok(())
+            })
+            .unwrap();
             let result = &output.result;
             assert_eq!(result.id, probe.id);
             assert!(result.lines >= 2, "{}: {} lines", probe.id, result.lines);
             assert!(result.glyphs > 20, "{}", probe.id);
             assert_eq!(result.missing_glyphs, 0, "{}", probe.id);
             assert_eq!(result.layout_sha256, hex(&sha256(&output.layout_json)));
-            let names: Vec<&str> = output
-                .images
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect();
+            let names: Vec<&str> = images.iter().map(|(name, _)| name.as_str()).collect();
             assert_eq!(
                 names,
                 [
@@ -346,10 +354,10 @@ mod tests {
                     "vello_f32_fallback"
                 ]
             );
-            assert_eq!(result.reference_sha256, hex(&output.images[0].1.sha256()));
-            assert_eq!(result.gamma2_sha256, hex(&output.images[1].1.sha256()));
+            assert_eq!(result.reference_sha256, hex(&images[0].1.sha256()));
+            assert_eq!(result.gamma2_sha256, hex(&images[1].1.sha256()));
             assert_eq!(result.vello.len(), 3);
-            for (vello, (_, image)) in result.vello.iter().zip(&output.images[2..]) {
+            for (vello, (_, image)) in result.vello.iter().zip(&images[2..]) {
                 assert_eq!(vello.sha256, hex(&image.sha256()));
                 assert_eq!(
                     vello.difference.pixels,
@@ -360,11 +368,27 @@ mod tests {
     }
 
     #[test]
+    fn stops_at_the_first_image_it_cannot_keep() {
+        let book = committed_book();
+        let mut kept = Vec::new();
+        let problem = run_probe(&book, committed_probes()[0], &mut |name, _| {
+            if kept.len() == 1 {
+                return Err(format!("cannot write {name}"));
+            }
+            kept.push(name.to_owned());
+            Ok(())
+        })
+        .err();
+        assert_eq!(problem.as_deref(), Some("cannot write gamma2"));
+        assert_eq!(kept, ["reference"]);
+    }
+
+    #[test]
     fn summarizes_a_run_in_two_hashes() {
         let book = committed_book();
         let probes: Vec<ProbeResult> = committed_probes()
             .into_iter()
-            .map(|probe| run_probe(&book, probe).unwrap().result)
+            .map(|probe| run_probe(&book, probe, &mut |_, _| Ok(())).unwrap().result)
             .collect();
         let results = Results::new("test", &book, probes.clone(), None);
         assert_eq!(results.format, FORMAT);
@@ -396,7 +420,12 @@ mod viewport_tests {
     fn hashes_the_viewport_and_its_renderings() {
         let book = committed_book();
         let probes: Vec<&'static Probe> = PROBES.iter().filter(|probe| probe.committed()).collect();
-        let (result, images) = run_viewport(&book, &probes, 640, 900).unwrap();
+        let mut images: Vec<(String, Image)> = Vec::new();
+        let result = run_viewport(&book, &probes, 640, 900, &mut |name, image| {
+            images.push((name.to_owned(), image.clone()));
+            Ok(())
+        })
+        .unwrap();
         assert_eq!((result.width, result.height), (640, 900));
         assert!(result.paragraphs > probes.len(), "{}", result.paragraphs);
         let (_, layouts) = crate::bench::viewport(&book, &probes, 640, 900).unwrap();

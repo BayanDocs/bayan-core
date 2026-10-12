@@ -43,7 +43,7 @@
 | `tests/determinism.rs` | The gate's check (§3.3). |
 | `.github/workflows/text-pipeline.yml` | CI in eleven environments and the comparison job (§3.2). |
 
-The crate has 65 tests (64 unit tests and the determinism test), which the gate runs on the host and in WebAssembly like every other crate's.
+The crate has 69 tests (68 unit tests and the determinism test), which the gate runs on the host and in WebAssembly like every other crate's.
 
 ### 2.1 The pipeline, step by step
 
@@ -271,7 +271,7 @@ Peak memory after each phase of the measurement, in MiB: natively the process's 
 | Native, Linux x86-64 | 17.2 | 22.1 | 53.9 | 89.8 |
 | WebAssembly (all eight runs) | 17.2 | 20.3 | 51.9 | 115.3 |
 
-The nine font files take 14.0 MiB, 12.3 MiB of it the two CJK fonts; the layout itself needs a few MiB; one 3840 × 2160 RGBA image is 31.6 MiB, which explains the step to the reference raster (a tiled renderer holds a few tiles instead). vello_cpu keeps its own buffers besides the image.
+The nine font files take 14.0 MiB, 12.3 MiB of it the two CJK fonts; the layout itself needs a few MiB; one 3840 × 2160 RGBA image is 31.6 MiB, which explains the step to the reference raster (a tiled renderer holds a few tiles instead). vello_cpu keeps its own buffers besides the image. The results run after the measurements needs more, because it also compares and writes the images: each runner gets every image as soon as it is drawn and writes it out as a PNG file, so besides the reference only the image being written, and the PNG encoder's copy of its rows, exist at a time. Measured locally in Node.js, the module without SIMD then grows to 178.7 MiB in the whole run; the first version, which kept every image of the run until the end, reached 289.6 MiB.
 
 ## 8. Dependencies
 

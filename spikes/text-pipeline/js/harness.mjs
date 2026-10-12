@@ -20,22 +20,22 @@ export async function runSpike({ glue, memory, readFont, write, environment, com
       }
     }
     // The measurements come first, while the module holds only its fonts: WebAssembly memory only grows, and the
-    // results run below keeps every image it made until the files are written.
+    // results run below needs more, two of the viewport's images at a time and the PNG files of the output it is on.
     const bench = committed ? null : measure(pipeline, environment, memory, now);
-    const text = pipeline.run(environment, committed);
-    await write("results.json", text);
-    const count = pipeline.outputCount();
-    for (let index = 0; index < count; index += 1) {
-      const id = pipeline.outputId(index);
-      const layout = pipeline.layoutJson(index);
+    // One output at a time, a probe's or the viewport's, as the native runner writes them: the module keeps only the
+    // files of the output it made last.
+    pipeline.startRun(environment, committed);
+    for (let id = pipeline.step(); id !== undefined; id = pipeline.step()) {
+      const layout = pipeline.layoutJson();
       if (layout.length > 0) {
         await write(`layout/${id}.json`, layout);
       }
-      for (const name of pipeline.imageNames(index).split(",")) {
-        await write(`png/${id}-${name}.png`, pipeline.png(index, name));
+      for (const name of pipeline.imageNames().split(",")) {
+        await write(`png/${id}-${name}.png`, pipeline.takePng(name));
       }
     }
-    pipeline.clearOutputs();
+    const text = pipeline.results();
+    await write("results.json", text);
     const results = JSON.parse(text);
     if (bench) {
       // The measurement draws the same scene as the results file's viewport, so the hashes must agree.

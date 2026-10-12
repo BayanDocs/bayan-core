@@ -7,13 +7,25 @@ use crate::fonts::FontBook;
 use crate::hash::hex;
 use crate::probes::{PROBES, Probe};
 use crate::raster::{Blending, Image, Scene, Vello, render_reference, render_vello};
-use crate::run::{Results, run_probe, run_viewport};
+use crate::run::{ProbeResult, Results, ViewportResult, run_probe, run_viewport};
 
-/// One probe's (or the viewport's) files, kept for the host to write out.
+/// The files of the output that [`Pipeline::step`] made last, a probe's or the viewport's, kept until the host has fetched them or the next step replaces them.
+#[derive(Default)]
 struct Output {
-    id: String,
     layout_json: Vec<u8>,
-    images: Vec<(String, Image)>,
+    /// Each image as a PNG file, encoded as soon as it was drawn, so that no raw image outlives its encoding (`crate::run::Keep`).
+    pngs: Vec<(String, Vec<u8>)>,
+}
+
+/// A run that [`Pipeline::start_run`] started.
+struct Run {
+    environment: String,
+    /// The probes still to run, in reverse order.
+    probes: Vec<&'static Probe>,
+    /// Whether the viewport is still to run, after the probes.
+    viewport: bool,
+    results: Vec<ProbeResult>,
+    viewport_result: Option<ViewportResult>,
 }
 
 /// The text pipeline, with its fonts.
@@ -21,7 +33,8 @@ struct Output {
 #[derive(Default)]
 pub struct Pipeline {
     book: FontBook,
-    outputs: Vec<Output>,
+    run: Option<Run>,
+    output: Output,
     bench: Option<(Workload, Scene)>,
 }
 
@@ -58,99 +71,115 @@ impl Pipeline {
         self.book.add(file, data).map(|_| ())
     }
 
-    /// Runs the probes (only those whose fonts are committed, if `committed`) and, with every font, the viewport; keeps their files for [`Pipeline::layout_json`] and [`Pipeline::png`]; and returns the results file of the environment `environment`.
+    /// Starts a run of the probes (only those whose fonts are committed, if `committed`) and, with every font, the viewport, for the results file of the environment `environment`. [`Pipeline::step`] then makes their outputs one at a time, as the native runner does, and [`Pipeline::results`] returns the results file.
+    #[wasm_bindgen(js_name = startRun)]
+    pub fn start_run(&mut self, environment: &str, committed: bool) {
+        self.output = Output::default();
+        self.run = Some(Run {
+            environment: environment.to_owned(),
+            probes: PROBES
+                .iter()
+                .filter(|probe| !committed || probe.committed())
+                .rev()
+                .collect(),
+            viewport: !committed,
+            results: Vec::new(),
+            viewport_result: None,
+        });
+    }
+
+    /// Makes the next output of the run, the next probe's or, after the last probe, the viewport's, and keeps its files for [`Pipeline::layout_json`] and [`Pipeline::take_png`] in place of the previous output's. Returns the output's name (a probe's, or `viewport`), or nothing once every output is made.
     ///
     /// # Errors
     ///
-    /// Throws a message if a font is missing or a probe fails.
-    pub fn run(&mut self, environment: &str, committed: bool) -> Result<String, String> {
-        self.outputs.clear();
-        let mut results = Vec::new();
-        for probe in PROBES
-            .iter()
-            .filter(|probe| !committed || probe.committed())
-        {
-            let output = run_probe(&self.book, probe)?;
-            self.outputs.push(Output {
-                id: probe.id.to_owned(),
-                layout_json: output.layout_json,
-                images: output.images,
-            });
-            results.push(output.result);
-        }
-        let viewport = if committed {
-            None
-        } else {
-            let probes: Vec<&'static Probe> = PROBES.iter().collect();
-            let (result, images) =
-                run_viewport(&self.book, &probes, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)?;
-            self.outputs.push(Output {
-                id: "viewport".to_owned(),
-                layout_json: Vec::new(),
-                images,
-            });
-            Some(result)
+    /// Throws a message if no run was started, a font is missing, or a probe fails.
+    pub fn step(&mut self) -> Result<Option<String>, String> {
+        let run = self.run.as_mut().ok_or("call startRun first")?;
+        // The previous output is freed before the next one is drawn.
+        self.output = Output::default();
+        let mut pngs = Vec::new();
+        let mut keep = |name: &str, image: &Image| {
+            pngs.push((name.to_owned(), image.png()?));
+            Ok(())
         };
-        let json = Results::new(environment, &self.book, results, viewport).to_json()?;
+        let id = if let Some(probe) = run.probes.pop() {
+            let output = run_probe(&self.book, probe, &mut keep)?;
+            run.results.push(output.result);
+            self.output.layout_json = output.layout_json;
+            probe.id
+        } else if run.viewport {
+            run.viewport = false;
+            let probes: Vec<&'static Probe> = PROBES.iter().collect();
+            run.viewport_result = Some(run_viewport(
+                &self.book,
+                &probes,
+                VIEWPORT_WIDTH,
+                VIEWPORT_HEIGHT,
+                &mut keep,
+            )?);
+            "viewport"
+        } else {
+            return Ok(None);
+        };
+        self.output.pngs = pngs;
+        Ok(Some(id.to_owned()))
+    }
+
+    /// The results file of the run, once [`Pipeline::step`] has made every output; it ends the run.
+    ///
+    /// # Errors
+    ///
+    /// Throws a message if no run was started, or outputs are still to be made.
+    pub fn results(&mut self) -> Result<String, String> {
+        let run = self.run.as_ref().ok_or("call startRun first")?;
+        if !run.probes.is_empty() || run.viewport {
+            return Err("the run is not complete: call step until it returns nothing".to_owned());
+        }
+        let run = self.run.take().ok_or("call startRun first")?;
+        self.output = Output::default();
+        let json = Results::new(
+            &run.environment,
+            &self.book,
+            run.results,
+            run.viewport_result,
+        )
+        .to_json()?;
         String::from_utf8(json).map_err(|error| error.to_string())
     }
 
-    /// The number of outputs the last [`Pipeline::run`] kept: one per probe, and the viewport last.
-    #[wasm_bindgen(js_name = outputCount)]
-    #[must_use]
-    pub fn output_count(&self) -> usize {
-        self.outputs.len()
-    }
-
-    /// The name of output `index`: a probe's, or `viewport`.
-    #[wasm_bindgen(js_name = outputId)]
-    #[must_use]
-    pub fn output_id(&self, index: usize) -> Option<String> {
-        self.outputs.get(index).map(|output| output.id.clone())
-    }
-
-    /// The layout JSON of output `index` (empty for the viewport).
+    /// The layout JSON of the last output (empty for the viewport).
     #[wasm_bindgen(js_name = layoutJson)]
     #[must_use]
-    pub fn layout_json(&self, index: usize) -> Option<Vec<u8>> {
-        self.outputs
-            .get(index)
-            .map(|output| output.layout_json.clone())
+    pub fn layout_json(&self) -> Vec<u8> {
+        self.output.layout_json.clone()
     }
 
-    /// The names of the images of output `index`, separated by commas.
+    /// The names of the images of the last output that have not been taken yet, separated by commas.
     #[wasm_bindgen(js_name = imageNames)]
     #[must_use]
-    pub fn image_names(&self, index: usize) -> Option<String> {
-        self.outputs.get(index).map(|output| {
-            output
-                .images
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<&str>>()
-                .join(",")
-        })
+    pub fn image_names(&self) -> String {
+        self.output
+            .pngs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<&str>>()
+            .join(",")
     }
 
-    /// The image `name` of output `index` as a PNG file.
+    /// The image `name` of the last output as a PNG file, handed over once: the module keeps no copy.
     ///
     /// # Errors
     ///
-    /// Throws a message if there is no such image.
-    pub fn png(&self, index: usize, name: &str) -> Result<Vec<u8>, String> {
-        let output = self.outputs.get(index).ok_or("no such output")?;
-        let (_, image) = output
-            .images
+    /// Throws a message if the last output has no such image, or it was taken already.
+    #[wasm_bindgen(js_name = takePng)]
+    pub fn take_png(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let index = self
+            .output
+            .pngs
             .iter()
-            .find(|(image, _)| image == name)
-            .ok_or_else(|| format!("{} has no image {name}", output.id))?;
-        image.png()
-    }
-
-    /// Frees the outputs of the last run.
-    #[wasm_bindgen(js_name = clearOutputs)]
-    pub fn clear_outputs(&mut self) {
-        self.outputs.clear();
+            .position(|(image, _)| image == name)
+            .ok_or_else(|| format!("the last output has no image {name} left"))?;
+        Ok(self.output.pngs.remove(index).1)
     }
 
     /// Prepares the measurements with every probe (every font must have been added) and returns the number of characters one round of [`Pipeline::shape_round`] or [`Pipeline::layout_round`] processes.
@@ -210,5 +239,65 @@ impl Pipeline {
             }
         };
         Ok(hex(&image.sha256()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fonts::tests::committed_book;
+    use crate::run::run_probe;
+
+    fn pipeline() -> Pipeline {
+        Pipeline {
+            book: committed_book(),
+            ..Pipeline::default()
+        }
+    }
+
+    #[test]
+    fn hands_the_outputs_of_a_run_over_one_at_a_time() {
+        let mut pipeline = pipeline();
+        pipeline.start_run("test", true);
+        let mut ids = Vec::new();
+        while let Some(id) = pipeline.step().unwrap() {
+            assert_eq!(
+                pipeline.image_names(),
+                "reference,gamma2,vello_u8_detected,vello_u8_fallback,vello_f32_fallback"
+            );
+            let png = pipeline.take_png("reference").unwrap();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{id}");
+            // Handed over once: the module keeps no copy.
+            assert!(pipeline.take_png("reference").is_err());
+            assert!(pipeline.image_names().starts_with("gamma2,"));
+            assert!(!pipeline.layout_json().is_empty());
+            ids.push(id);
+        }
+        let committed: Vec<&'static Probe> =
+            PROBES.iter().filter(|probe| probe.committed()).collect();
+        let committed_ids: Vec<&str> = committed.iter().map(|probe| probe.id).collect();
+        assert_eq!(ids, committed_ids);
+        // The same results file as the native runner's.
+        let book = committed_book();
+        let probes = committed
+            .iter()
+            .map(|probe| run_probe(&book, probe, &mut |_, _| Ok(())).unwrap().result)
+            .collect();
+        let expected = Results::new("test", &book, probes, None).to_json().unwrap();
+        assert_eq!(pipeline.results().unwrap().as_bytes(), expected);
+        // The run is over: the next one starts with startRun.
+        assert!(pipeline.step().is_err());
+        assert!(pipeline.results().is_err());
+    }
+
+    #[test]
+    fn gives_the_results_only_when_the_run_is_complete() {
+        let mut pipeline = pipeline();
+        assert!(pipeline.results().is_err());
+        pipeline.start_run("test", true);
+        assert!(pipeline.step().unwrap().is_some());
+        assert!(pipeline.results().is_err());
+        // Still running: the remaining probes follow.
+        assert!(pipeline.step().unwrap().is_some());
     }
 }

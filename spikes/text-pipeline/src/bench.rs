@@ -208,7 +208,12 @@ mod tests {
         );
         let lines: usize = probes
             .iter()
-            .map(|probe| crate::run::run_probe(&book, probe).unwrap().result.lines)
+            .map(|probe| {
+                crate::run::run_probe(&book, probe, &mut |_, _| Ok(()))
+                    .unwrap()
+                    .result
+                    .lines
+            })
             .sum();
         assert_eq!(workload.lay_out(&book).unwrap(), lines);
     }

@@ -112,17 +112,16 @@ fn run(options: &Options) -> Result<(), String> {
         .iter()
         .filter(|probe| !options.committed || probe.committed())
     {
-        let output = run_probe(&book, probe)?;
+        let output = run_probe(&book, probe, &mut |name, image| {
+            write(
+                &pngs.join(format!("{}-{name}.png", probe.id)),
+                &image.png()?,
+            )
+        })?;
         write(
             &layouts.join(format!("{}.json", probe.id)),
             &output.layout_json,
         )?;
-        for (name, image) in &output.images {
-            write(
-                &pngs.join(format!("{}-{name}.png", probe.id)),
-                &image.png()?,
-            )?;
-        }
         let result = output.result;
         writeln!(
             stdout,
@@ -146,10 +145,13 @@ fn run(options: &Options) -> Result<(), String> {
         None
     } else {
         let probes: Vec<&'static Probe> = PROBES.iter().collect();
-        let (viewport, images) = run_viewport(&book, &probes, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)?;
-        for (name, image) in &images {
-            write(&pngs.join(format!("viewport-{name}.png")), &image.png()?)?;
-        }
+        let viewport = run_viewport(
+            &book,
+            &probes,
+            VIEWPORT_WIDTH,
+            VIEWPORT_HEIGHT,
+            &mut |name, image| write(&pngs.join(format!("viewport-{name}.png")), &image.png()?),
+        )?;
         writeln!(
             stdout,
             "{:<28} layouts {}  reference {}  {} paragraphs, {} glyphs",
