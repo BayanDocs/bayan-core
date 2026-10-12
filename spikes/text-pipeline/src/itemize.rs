@@ -42,12 +42,14 @@ pub fn resolve_scripts(text: &str) -> Vec<Script> {
                 .filter(|&s| !matches!(s, Script::Common | Script::Inherited | Script::Unknown));
             let first = extensions.next();
             match last_letter {
+                // Before the first letter: left open, for the backward pass below to give it that letter's script.
+                None => None,
                 Some(last)
                     if first.is_none() || first == Some(last) || extensions.any(|s| s == last) =>
                 {
                     Some(last)
                 }
-                _ => first,
+                Some(_) => first,
             }
         } else {
             last_letter = Some(script);
@@ -176,6 +178,18 @@ mod tests {
     #[test]
     fn characters_before_the_first_letter_take_its_script() {
         assert_eq!(resolve_scripts("«مرحبا»"), [Script::Arabic; 7]);
+        // U+3001 IDEOGRAPHIC COMMA and U+300C LEFT CORNER BRACKET are Common, with the extensions Bopomofo, Hangul, Han, Hiragana, Katakana and Yi: before the first letter they take that letter's script too, not their first extension.
+        assert_eq!(resolve_scripts("、漢字"), [Script::Han; 3]);
+        assert_eq!(resolve_scripts("「日本」"), [Script::Han; 4]);
+    }
+
+    #[test]
+    fn an_opening_bracket_joins_the_run_of_the_text_it_opens() {
+        let text = "「日本語」と書く。";
+        let runs = itemize(text, &levels(text, false), 1, &|_, _| true);
+        assert_eq!(runs[0].script, Script::Han);
+        assert_eq!(runs[0].start, 0);
+        assert!(runs[0].end > "「".len(), "{runs:?}");
     }
 
     #[test]
