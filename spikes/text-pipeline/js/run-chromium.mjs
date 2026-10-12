@@ -133,16 +133,36 @@ const keep = (chunk) => {
 browser.stdout.on("data", keep);
 browser.stderr.on("data", keep);
 browser.on("exit", (code, signal) => finish({ ok: false, message: `the browser exited early (${signal ?? code})` }));
+// `close` comes once the browser has exited and every process it started that shares its output pipes has exited too.
+const closed = new Promise((resolve) => browser.once("close", resolve));
 console.log(`${environment}: ${chrome} is running the spike from ${url}`);
 
-const minutes = 20;
+/** Ends the browser (SIGTERM, then SIGKILL after five seconds) and waits, at most ten seconds, until its processes are gone: they write into the profile folder until they exit. */
+async function stopBrowser() {
+  if (browser.exitCode === null && browser.signalCode === null) {
+    browser.kill("SIGTERM");
+  }
+  const force = setTimeout(() => browser.kill("SIGKILL"), 5000);
+  let giveUp;
+  await Promise.race([closed, new Promise((resolve) => (giveUp = setTimeout(resolve, 10000)))]);
+  clearTimeout(force);
+  clearTimeout(giveUp);
+}
+
+// A run takes well under a minute; two runs must fit in the CI job's 30 minutes with their downloads.
+const minutes = 10;
 const timer = setTimeout(() => finish({ ok: false, message: `no result after ${minutes} minutes` }), minutes * 60 * 1000);
 const outcome = await finished;
 clearTimeout(timer);
 browser.removeAllListeners("exit");
-browser.kill();
+await stopBrowser();
 server.close();
-rmSync(profile, { recursive: true, force: true });
+try {
+  rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+} catch (error) {
+  // A browser profile left in the temporary folder does not change the run's results.
+  console.error(`${environment}: could not delete the browser profile ${profile}: ${error.message}`);
+}
 if (outcome.ok) {
   console.log(`${environment}: layouts ${outcome.layouts}  references ${outcome.references}`);
 } else {
