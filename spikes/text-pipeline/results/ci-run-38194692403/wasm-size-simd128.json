@@ -1,0 +1,105 @@
+{
+  "format": "bayan-core CORE-003 text-pipeline WebAssembly size v1",
+  "module": "text_pipeline_bg.wasm",
+  "raw_with_custom_sections": 4841002,
+  "shipped": {
+    "raw": 4392755,
+    "gzip": 1723574,
+    "brotli": 1342227
+  },
+  "custom_sections": [
+    {
+      "name": "name",
+      "bytes": 447957
+    },
+    {
+      "name": "producers",
+      "bytes": 124
+    },
+    {
+      "name": "target_features",
+      "bytes": 157
+    }
+  ],
+  "named_functions": 3097,
+  "functions": 3095,
+  "libraries": [
+    {
+      "library": "vello_cpu and its crates (kurbo, peniko, fearless_simd, …)",
+      "functions": 625,
+      "bytes": 515191,
+      "gzip": 144445,
+      "brotli": 111488
+    },
+    {
+      "library": "tiny-skia (reference rasterizer)",
+      "functions": 257,
+      "bytes": 173572,
+      "gzip": 57668,
+      "brotli": 44435
+    },
+    {
+      "library": "harfrust (shaping)",
+      "functions": 494,
+      "bytes": 546432,
+      "gzip": 174201,
+      "brotli": 129619
+    },
+    {
+      "library": "read-fonts and skrifa (font parsing, outlines)",
+      "functions": 992,
+      "bytes": 684522,
+      "gzip": 183110,
+      "brotli": 139657
+    },
+    {
+      "library": "ICU4X (segmentation, properties, collections)",
+      "functions": 67,
+      "bytes": 49495,
+      "gzip": 20162,
+      "brotli": 16794
+    },
+    {
+      "library": "unicode-bidi",
+      "functions": 16,
+      "bytes": 12652,
+      "gzip": 5767,
+      "brotli": 5185
+    },
+    {
+      "library": "the spike, bayan-units and serde_json",
+      "functions": 130,
+      "bytes": 86526,
+      "gzip": 31789,
+      "brotli": 27054
+    },
+    {
+      "library": "DEFLATE (miniz_oxide) and SHA-256 (sha2)",
+      "functions": 10,
+      "bytes": 22133,
+      "gzip": 9669,
+      "brotli": 8439
+    },
+    {
+      "library": "Rust standard library (core, alloc, std), wasm-bindgen and small helpers",
+      "functions": 432,
+      "bytes": 113735,
+      "gzip": 38034,
+      "brotli": 32415
+    },
+    {
+      "library": "unnamed or other",
+      "functions": 72,
+      "bytes": 18746,
+      "gzip": 8235,
+      "brotli": 7248
+    },
+    {
+      "library": "data segments (ICU4X's compiled data, tables, strings)",
+      "functions": 0,
+      "bytes": 2157977,
+      "gzip": 1002559,
+      "brotli": 822357
+    }
+  ]
+}
