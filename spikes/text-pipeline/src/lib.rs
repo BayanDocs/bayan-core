@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bench;
 pub mod fonts;
 pub mod hash;
 pub mod itemize;
@@ -13,6 +14,9 @@ pub mod layout;
 pub mod linebreak;
 pub mod manifest;
 pub mod png;
+pub mod probes;
 pub mod raster;
+pub mod run;
 pub mod segment;
 pub mod shape;
+pub mod wasm;

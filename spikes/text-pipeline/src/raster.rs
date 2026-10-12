@@ -103,6 +103,24 @@ pub fn scene(book: &FontBook, layout: &Layout) -> Result<Scene, String> {
     let height = pixels(layout.height)?
         .checked_add(2 * MARGIN)
         .ok_or("the image would be too high")?;
+    Ok(Scene {
+        width,
+        height,
+        paths: glyph_paths(book, layout, margin.saturating_sub(left), margin)?,
+    })
+}
+
+/// The outline of every glyph of `layout` in device pixels, one path per glyph in drawing order, with the paragraph's top left corner `x` and `y` BLU from the image's top left corner.
+///
+/// # Errors
+///
+/// A message if a font of the layout is not in `book` or is another file, or if skrifa cannot draw a glyph.
+pub fn glyph_paths(
+    book: &FontBook,
+    layout: &Layout,
+    x: i64,
+    y: i64,
+) -> Result<Vec<Vec<Command>>, String> {
     let fonts = layout
         .fonts
         .iter()
@@ -161,22 +179,18 @@ pub fn scene(book: &FontBook, layout: &Layout) -> Result<Scene, String> {
                         entry.insert(pen.commands)
                     }
                 };
-                let x = exact(margin.saturating_sub(left).saturating_add(glyph.x))?;
-                let y = exact(margin.saturating_add(glyph.y))?;
+                let origin_x = exact(x.saturating_add(glyph.x))?;
+                let origin_y = exact(y.saturating_add(glyph.y))?;
                 paths.push(
                     outline
                         .iter()
-                        .map(|&command| place(command, x, y, scale))
+                        .map(|&command| place(command, origin_x, origin_y, scale))
                         .collect(),
                 );
             }
         }
     }
-    Ok(Scene {
-        width,
-        height,
-        paths,
-    })
+    Ok(paths)
 }
 
 /// A length in BLU as a whole number of device pixels, rounded up.
