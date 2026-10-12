@@ -1,0 +1,161 @@
+{
+  "format": "bayan-core CORE-003 text-pipeline results v1",
+  "probes": [
+    {
+      "id": "latin-sans-kerning",
+      "layout_sha256": "33a86813b6e700f7ececd623f0e961d6bae6a1eb6cc2de91090155be6dce4876",
+      "reference_sha256": "73a4f3d2f9d714f4ad19259d93304812c0f5f4c508be20dd16f3bb68bb0e991e"
+    },
+    {
+      "id": "latin-sans-no-kerning",
+      "layout_sha256": "3745fbe84e3ab5703e3cd43f4961529ad6d00f850fcb0c5ea802848f0fa7cb2a",
+      "reference_sha256": "fab8d6e7c4ea18335433d9cb18bcb85d3c64d83e65491e286b73dec99b3fc64a"
+    },
+    {
+      "id": "latin-serif-kerning",
+      "layout_sha256": "fc867febb37a2a2b66af050acff1b6e209751c0976b0dbaadfec52bbf328b159",
+      "reference_sha256": "78ff7cb347942c88589e256fd21107c38deeffa83ed94ade8da33f1be1e07308"
+    },
+    {
+      "id": "latin-serif-no-kerning",
+      "layout_sha256": "1429c070ecf60363d5da25ef576a317bc9acf3b3d49bb110f1ff638b7343b4c0",
+      "reference_sha256": "870798b9069f49f4e53cd5e98a9e3012ad921eb7fbe79bc040de066731f043bf"
+    },
+    {
+      "id": "latin-carlito",
+      "layout_sha256": "aa09c138e8cad047d46c99916e0fbfbef2d0f1174a555fc9ab34c4702bbd2d20",
+      "reference_sha256": "70f10c54ad70d457a6a0c1b946254ed2df2b85db809d46f99bf06ed091f39fa8"
+    },
+    {
+      "id": "latin-carlito-ligatures",
+      "layout_sha256": "b86de9442e590dcd3d9dd4183231cde0869369f385e77e159262a69b639cf57c",
+      "reference_sha256": "9927e7cbb00dd4c4f0c2e27e48edbe7050a5ec4df55d8ecdb86be257ef99ab03"
+    },
+    {
+      "id": "latin-carlito-plain",
+      "layout_sha256": "fb6fac4171c671be6721aa0fe66aa8c4669dc0428f4668eee1271a5c84376212",
+      "reference_sha256": "eeea828f6e8771a569ed3d05d5bd478bf624139b70bb7bd3d13bd982726cccb6"
+    },
+    {
+      "id": "latin-punctuation-numbers",
+      "layout_sha256": "868facd2a2b19ce0ccab94ed1f56fc425cca1a69dce0d18c21ce9f3a7c376b0e",
+      "reference_sha256": "7fe7d33d4bc1e7d620d8bc0f165c57b08b693d033f518e8ff038d51725daf470"
+    },
+    {
+      "id": "latin-diacritics",
+      "layout_sha256": "a430e7a05ba80c96ed820d39db0ab36c148a13de0fe64e9fc67c57583ef702e3",
+      "reference_sha256": "74ea257d084efe8e857f42cec3e200af856b67a01cb93401260188ba0ce2d6a2"
+    },
+    {
+      "id": "latin-long-word",
+      "layout_sha256": "dafb9255cc5809869397b4bb403e22e1ee13f7c78ce15f4e3d7018e54f406063",
+      "reference_sha256": "f41e36078926c172bef941b3aebdf5c75b0cddddbd6fefca36c5b6a77ecf001c"
+    },
+    {
+      "id": "latin-break-classes",
+      "layout_sha256": "020af652b134c3a5927c9e686134e13c952c73956cdbbe445b5f23c087cb6ce8",
+      "reference_sha256": "002ddfa9627802d923303142d5c7282830d5292156aa182253d7146f84fa9591"
+    },
+    {
+      "id": "arabic-marks",
+      "layout_sha256": "6e800b1a4be3f85eb3e370cb55bb8d876f44a8851c52c032fa0c3a47f568d4eb",
+      "reference_sha256": "2e78ebb6bf1a245999cfe99594bd0ddd7a554baf22f95e7002644d7ba72e3672"
+    },
+    {
+      "id": "arabic-joining",
+      "layout_sha256": "223f141ed1aef6610f5b0feb8e5e3937abfcc9d0c1b7babe085cad0538851d05",
+      "reference_sha256": "684a174622fd6255e01fe429317f184ec70902da3a1a9f0a724f84d5deb6190c"
+    },
+    {
+      "id": "arabic-numbers-latin",
+      "layout_sha256": "82e861b60d21d973e861e8e28218da290572767274e93c87e4e802a63270573f",
+      "reference_sha256": "5a22a2b2ee03757ba37275a49c42386e43f69a1e4d912129e851d949405a17f5"
+    },
+    {
+      "id": "arabic-lam-alef",
+      "layout_sha256": "34e00993839d65c080d0938352e1e65a36ffe8593cb720c08cfed159cbe2a076",
+      "reference_sha256": "3f792015bd320348c41e6558eed696c6351d7d4642ac0b8d3a66c7b7e18e6ac8"
+    },
+    {
+      "id": "hebrew-numbers-latin",
+      "layout_sha256": "853c5ee0db081db6149934ce1c97d2a7a8d1b28e332e29b599ead1bb61ef5dc9",
+      "reference_sha256": "30a37a770daaeff3fe269d0b00344b74b11a61bc645167e66a1af0fcb5292ac7"
+    },
+    {
+      "id": "hebrew-points",
+      "layout_sha256": "5af2b2cd136c886a0c0710d551c368735b1416ee88a2b0fe9f6b1ee3bef83e4e",
+      "reference_sha256": "b4fb2d9a09dc7c63debd63b5feabf6c10aa254a6038f35454ccf0a04b4cbefcc"
+    },
+    {
+      "id": "hebrew-brackets",
+      "layout_sha256": "12bd7aef65c704d12728a4425c0d30f2fcf07bd6bb2f8096f4e8cbfe1e16d2f9",
+      "reference_sha256": "ffbebc2858932999d456adf2af78827cd62e89c94f37c4529fec3b3dff2f0424"
+    },
+    {
+      "id": "devanagari-conjuncts",
+      "layout_sha256": "d62fa339be22200c11413ced43b4d0316d70066f459e79a608cfec404a1b1cb5",
+      "reference_sha256": "bf0b4409b0ed45f5b0017d82a67b3ffb68a25ba3c9092b5b6750e199bac23ec3"
+    },
+    {
+      "id": "devanagari-reph",
+      "layout_sha256": "1a17cb84e4a91bdc47cb14ce72244920c1b3c65a23dd1370c1cfd6bd761c3c44",
+      "reference_sha256": "bc9bc27339d80e411eaa4d3ef034ec6dd72f7adc88b3ed032e7b3f81b6d01bf9"
+    },
+    {
+      "id": "devanagari-numbers",
+      "layout_sha256": "d6783bfead864626adbda2ad30a640cff1ea594fb98786cc06599f6311abce61",
+      "reference_sha256": "76fd56c450d0c386b32a1463a751e9b1ca7b4584af8c5d54edefd46fb4f9b2a5"
+    },
+    {
+      "id": "thai-dictionary",
+      "layout_sha256": "982f40c099197e64c22981b1d57c95dab5a7122b239038fb10290e72b100fc13",
+      "reference_sha256": "d61251a1f1358bb4fe4e24420916ddc6c3e14f84ccc4e92f29f7cb06f886fd41"
+    },
+    {
+      "id": "thai-marks",
+      "layout_sha256": "4f60bb68ae73b2adf8001f8e306b665a30d7964ffc102d14606e84276c5c1bdc",
+      "reference_sha256": "80cf20068c0263630bc4301f1741148e352cf60a67e2c6d2e8ba4ebaa437a722"
+    },
+    {
+      "id": "thai-mixed",
+      "layout_sha256": "1c6de65f9e84345a363dba3967e6114bee31bb4b4e50463b396f218e78e2901a",
+      "reference_sha256": "1f079ac6e4ddb85c819082d2300ecf08ab6696e7b5a74f4dfb81514f68fd4a4a"
+    },
+    {
+      "id": "chinese-punctuation",
+      "layout_sha256": "d6fb8818639b1ed79ff8f0fab9abb2abbdba909b22d6640570862ffb72fbfe94",
+      "reference_sha256": "2a2d028e5323fdb72f01e8f858e6d4e2376316c5bc15b5aa2e47c7876e7d7df0"
+    },
+    {
+      "id": "chinese-mixed",
+      "layout_sha256": "737a11ef1f722ad1f4db0890d62de85cee9f563d783ca584a6ac04c72c2b0281",
+      "reference_sha256": "f236e6a0ab39e2c3f5bd5383bc9e8866b4794bfaee06fa01ae913126b5172ad1"
+    },
+    {
+      "id": "japanese-kana-kanji",
+      "layout_sha256": "03466a9f2448646d450eedda47c814513e8a52524d4004fb4df20884570f0778",
+      "reference_sha256": "e65e8b5d866c3977f961edae7bad6da8fd8e6f71e1f71f1cc707bef879f5acf9"
+    },
+    {
+      "id": "japanese-katakana",
+      "layout_sha256": "7659f5d2f232d47be8e783019eb1db6c83785496923f7341712c6dcbc68d4623",
+      "reference_sha256": "82007671c97224b717503db6e0b7b005d4b8c87089ff7533af683267f85a2470"
+    },
+    {
+      "id": "mixed-ltr-with-rtl",
+      "layout_sha256": "1ab3f51bdeec3141c104394a892a225943d2ba80f86886fd253319d877a31b6d",
+      "reference_sha256": "c168a51691347e81cce8633da88a7aeb38f6241080c48bb297e1ea9fa175b888"
+    },
+    {
+      "id": "mixed-rtl-with-ltr",
+      "layout_sha256": "3f71b472f424db8a26de8fa7105d931cf34917cbc7928e842a3b5e4accc84082",
+      "reference_sha256": "1ad4c87dc9a9f0d563489a1750167ad5f7fd563994c61e7188f7df6c9362a090"
+    }
+  ],
+  "viewport": {
+    "width": 3840,
+    "height": 2160,
+    "layouts_sha256": "5c6407f3c91a5d33fed46c06343d3d2dab14fe3707b283944107303bd36d99d4",
+    "reference_sha256": "4bc6b158b56998e32cfc43befd0d52b74557e71fed8daf44c3bf316ceebbc3a3"
+  }
+}

@@ -19,7 +19,7 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 /// The WebAssembly target the tests run on. The engine's own target, wasm32-unknown-unknown, offers no standard way to run Rust's test harness, so the tests are built for WASI (wasm32-wasip1) and run in Node.js, as ADR-0025 §1 foresees for the determinism checks. Both targets compile the code to the same WebAssembly instructions with the same arithmetic; WASI adds only the operating-system interface the test harness needs to print its results and report how it ended. `rust-toolchain.toml` lists the target, so rustup installs it.
 const WASM_TEST_TARGET: &str = "wasm32-wasip1";
 
-/// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; the Node.js driver in `.github/workflows/artifacts.yml` uses it too, and a test keeps all four equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
+/// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; the Node.js driver in `.github/workflows/artifacts.yml` and the text pipeline spike's runners in `.github/workflows/text-pipeline.yml` use it too, and a test keeps all five equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
 pub const NODE_VERSION: &str = "24.21.0";
 
 /// Crates that run natively only and are therefore not built for WebAssembly, with the reason. Every other workspace member must build for WebAssembly, so a new crate is covered without anyone having to remember it.
@@ -111,10 +111,16 @@ const SUPPLY_CHAIN_CHECKS: &[Check] = &[
 ];
 
 /// Hook for determinism checks (ADR-0004, ADR-0025 §1): checks that the same input produces identical layout and pixel hashes on every platform plug in here, from CORE-002 and CORE-003 onward.
-const DETERMINISM_CHECKS: &[Check] = &[(
-    "bayan-units: the fixed test vector of the deterministic math (CORE-002) gives the committed fingerprints on the host and in WebAssembly",
-    math_fingerprints,
-)];
+const DETERMINISM_CHECKS: &[Check] = &[
+    (
+        "bayan-units: the fixed test vector of the deterministic math (CORE-002) gives the committed fingerprints on the host and in WebAssembly",
+        math_fingerprints,
+    ),
+    (
+        "text-pipeline spike: the probes whose fonts are committed (CORE-003) give the expected layout and reference raster hashes on the host and in WebAssembly",
+        text_pipeline_hashes,
+    ),
+];
 
 /// One step of the gate.
 pub struct Step {
@@ -364,14 +370,26 @@ fn test(root: &Path) -> Result<(), String> {
 
 /// Runs the fixed test vector of bayan-units' deterministic math on the host and in WebAssembly, showing the fingerprints each run prints. The tests compare them with the fingerprints committed in `crates/bayan-units/tests/determinism.rs`, so both passing means both produced exactly those bits. CI runs the gate on Linux x86-64, Windows x86-64 and macOS arm64, which makes four platforms (CORE-002, acceptance criterion 4).
 fn math_fingerprints(root: &Path) -> Result<(), String> {
-    let vector = ["--package", "bayan-units", "--test", "determinism"];
+    host_and_wasm_test(root, &["--package", "bayan-units", "--test", "determinism"])
+}
+
+/// Lays out and rasterizes, in reference mode, the probes of the CORE-003 text pipeline spike whose fonts are committed, on the host and in WebAssembly, showing the hashes each run prints. The test compares them with `spikes/text-pipeline/results/expected.json`, which `.github/workflows/text-pipeline.yml` compares every probe with in eleven environments (CORE-003, acceptance criteria 1 and 2).
+fn text_pipeline_hashes(root: &Path) -> Result<(), String> {
+    host_and_wasm_test(
+        root,
+        &["--package", "text-pipeline", "--test", "determinism"],
+    )
+}
+
+/// Runs the test target `test` (`--package <name> --test <name>`) on the host and in WebAssembly, showing what it prints.
+fn host_and_wasm_test(root: &Path, test: &[&str]) -> Result<(), String> {
     process::run(
         cargo(root)
             .arg("test")
-            .args(vector)
+            .args(test)
             .args(["--locked", "--", "--show-output"]),
     )?;
-    process::run(cargo(root).args(wasm_test_args(root, &vector, &[])?))
+    process::run(cargo(root).args(wasm_test_args(root, test, &[])?))
 }
 
 fn wasm32(root: &Path) -> Result<(), String> {
@@ -914,6 +932,13 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
             "the artifacts workflow's Node.js driver must use Node.js {NODE_VERSION}"
+        );
+        let text_pipeline = include_str!("../../.github/workflows/text-pipeline.yml");
+        assert!(
+            text_pipeline
+                .lines()
+                .any(|line| line.trim() == format!("NODE_VERSION: {NODE_VERSION}")),
+            "the text pipeline spike's workflow must use Node.js {NODE_VERSION}"
         );
         let script = include_str!("../../scripts/dev-setup.sh");
         assert!(

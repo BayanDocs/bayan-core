@@ -1,0 +1,83 @@
+{
+  "characters": 2951,
+  "environment": "linux-x86_64",
+  "format": "bayan-core CORE-003 text-pipeline measurements v1",
+  "layout": {
+    "characters_per_second": 1434406.8766608357,
+    "ms": 2001.7493270000002,
+    "rounds": 973
+  },
+  "memory_bytes": {
+    "fonts": 18034688,
+    "gamma2": 56561664,
+    "layout": 23183360,
+    "reference": 56561664,
+    "vello_f32_fallback": 94199808,
+    "vello_u8_detected": 94199808,
+    "vello_u8_fallback": 94199808
+  },
+  "shaping": {
+    "characters_per_second": 2656963.707822779,
+    "ms": 2000.3099720000002,
+    "rounds": 1801
+  },
+  "viewport": {
+    "rasterizers": {
+      "gamma2": {
+        "median_ms": 79.184217,
+        "runs_ms": [
+          80.691973,
+          79.58815299999999,
+          79.082058,
+          78.989766,
+          79.184217
+        ],
+        "sha256": "c9b72e65cd523c8b5a71599deb1ccd513ef3f27a473862f7a3d49e996b85c6b9"
+      },
+      "reference": {
+        "median_ms": 52.315478,
+        "runs_ms": [
+          52.468612,
+          52.083577,
+          52.140434,
+          52.315478,
+          52.500803
+        ],
+        "sha256": "4bc6b158b56998e32cfc43befd0d52b74557e71fed8daf44c3bf316ceebbc3a3"
+      },
+      "vello_f32_fallback": {
+        "median_ms": 61.187360000000005,
+        "runs_ms": [
+          61.129472,
+          61.187360000000005,
+          61.335133,
+          61.258452,
+          61.172151
+        ],
+        "sha256": "a60dd27a30380ec1b04a4f670a8114678b01d59fa38f27b69c42babeb0874764"
+      },
+      "vello_u8_detected": {
+        "median_ms": 31.567014999999998,
+        "runs_ms": [
+          29.542160000000003,
+          29.968661,
+          31.776534,
+          31.567014999999998,
+          31.900883999999998
+        ],
+        "sha256": "4c243fd6408307077e4a5191dca2f4ddd44d4715a033438bbfac6750ae31c8f0"
+      },
+      "vello_u8_fallback": {
+        "median_ms": 39.720406,
+        "runs_ms": [
+          39.720406,
+          39.831643,
+          39.441209,
+          39.750653,
+          39.468058
+        ],
+        "sha256": "cb4a8104263baf99947728830c400fa8b73ecbc8c7c521c4530cbe016ab00a50"
+      }
+    }
+  }
+}

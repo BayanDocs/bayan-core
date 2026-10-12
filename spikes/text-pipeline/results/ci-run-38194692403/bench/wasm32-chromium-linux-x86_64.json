@@ -1,0 +1,83 @@
+{
+  "format": "bayan-core CORE-003 text-pipeline measurements v1",
+  "environment": "wasm32-chromium-linux-x86_64",
+  "characters": 2951,
+  "shaping": {
+    "rounds": 1556,
+    "ms": 2000.2999999999956,
+    "characters_per_second": 2295533.6699495125
+  },
+  "layout": {
+    "rounds": 822,
+    "ms": 2001.300000000003,
+    "characters_per_second": 1212073.1524509052
+  },
+  "viewport": {
+    "rasterizers": {
+      "reference": {
+        "median_ms": 194,
+        "runs_ms": [
+          208.5,
+          194,
+          193.89999999999418,
+          194,
+          193.20000000000437
+        ],
+        "sha256": "4bc6b158b56998e32cfc43befd0d52b74557e71fed8daf44c3bf316ceebbc3a3"
+      },
+      "gamma2": {
+        "median_ms": 230,
+        "runs_ms": [
+          236.59999999999854,
+          230,
+          230,
+          229.70000000000437,
+          229.5
+        ],
+        "sha256": "c9b72e65cd523c8b5a71599deb1ccd513ef3f27a473862f7a3d49e996b85c6b9"
+      },
+      "vello_u8_detected": {
+        "median_ms": 173.3000000000029,
+        "runs_ms": [
+          189.39999999999418,
+          173.3000000000029,
+          178.3000000000029,
+          173.09999999999854,
+          172.59999999999854
+        ],
+        "sha256": "cb4a8104263baf99947728830c400fa8b73ecbc8c7c521c4530cbe016ab00a50"
+      },
+      "vello_u8_fallback": {
+        "median_ms": 173.09999999999854,
+        "runs_ms": [
+          173.09999999999854,
+          172.5,
+          172.90000000000146,
+          174.40000000000146,
+          183.29999999999563
+        ],
+        "sha256": "cb4a8104263baf99947728830c400fa8b73ecbc8c7c521c4530cbe016ab00a50"
+      },
+      "vello_f32_fallback": {
+        "median_ms": 231.3000000000029,
+        "runs_ms": [
+          234.60000000000582,
+          230.59999999999854,
+          238.40000000000146,
+          231.29999999999563,
+          231.3000000000029
+        ],
+        "sha256": "a60dd27a30380ec1b04a4f670a8114678b01d59fa38f27b69c42babeb0874764"
+      }
+    }
+  },
+  "memory_bytes": {
+    "fonts": 18022400,
+    "layout": 21233664,
+    "reference": 54460416,
+    "gamma2": 54460416,
+    "vello_u8_detected": 120913920,
+    "vello_u8_fallback": 120913920,
+    "vello_f32_fallback": 120913920
+  }
+}

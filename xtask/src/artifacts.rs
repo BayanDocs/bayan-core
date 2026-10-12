@@ -925,27 +925,30 @@ mod tests {
     }
 
     #[test]
-    fn the_workflow_installs_the_pinned_wasm_bindgen() {
+    fn the_workflows_install_the_pinned_wasm_bindgen() {
         let root = crate::workspace_root();
         let locked = locked_version(&root, "wasm-bindgen").unwrap();
-        let workflow = read(&root.join(".github").join("workflows").join("artifacts.yml")).unwrap();
-        let version = workflow
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("WASM_BINDGEN_VERSION: "))
-            .unwrap();
-        assert_eq!(version, locked);
-        // The Linux x86-64 archive that CI downloads has the checksum that scripts/dev-setup.sh pins for it.
-        let in_workflow = workflow
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("sha256="))
-            .unwrap();
         let linux = format!("wasm-bindgen-{locked}-x86_64-unknown-linux-musl");
         let pinned = dev_setup_archives()
             .into_iter()
             .find(|(name, _)| *name == linux)
             .map(|(_, sha256)| sha256)
             .unwrap();
-        assert_eq!(in_workflow, pinned);
+        // The engine's artifacts, and the CORE-003 text pipeline spike's WebAssembly runners.
+        for file in ["artifacts.yml", "text-pipeline.yml"] {
+            let workflow = read(&root.join(".github").join("workflows").join(file)).unwrap();
+            let version = workflow
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("WASM_BINDGEN_VERSION: "))
+                .unwrap();
+            assert_eq!(version, locked, "{file}");
+            // The Linux x86-64 archive that CI downloads has the checksum that scripts/dev-setup.sh pins for it.
+            let in_workflow = workflow
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("sha256="))
+                .unwrap();
+            assert_eq!(in_workflow, pinned, "{file}");
+        }
     }
 
     #[test]

@@ -1,0 +1,83 @@
+{
+  "characters": 2951,
+  "environment": "macos-arm64",
+  "format": "bayan-core CORE-003 text-pipeline measurements v1",
+  "layout": {
+    "characters_per_second": 1669566.4174449788,
+    "ms": 2000.8380410000002,
+    "rounds": 1132
+  },
+  "memory_bytes": {
+    "fonts": null,
+    "gamma2": null,
+    "layout": null,
+    "reference": null,
+    "vello_f32_fallback": null,
+    "vello_u8_detected": null,
+    "vello_u8_fallback": null
+  },
+  "shaping": {
+    "characters_per_second": 3709600.137602432,
+    "ms": 2000.691375,
+    "rounds": 2515
+  },
+  "viewport": {
+    "rasterizers": {
+      "gamma2": {
+        "median_ms": 46.112333,
+        "runs_ms": [
+          46.112333,
+          45.244417,
+          53.785166000000004,
+          53.519917,
+          45.887707999999996
+        ],
+        "sha256": "c9b72e65cd523c8b5a71599deb1ccd513ef3f27a473862f7a3d49e996b85c6b9"
+      },
+      "reference": {
+        "median_ms": 38.51425,
+        "runs_ms": [
+          43.302292,
+          38.80725,
+          38.464834,
+          38.390333,
+          38.51425
+        ],
+        "sha256": "4bc6b158b56998e32cfc43befd0d52b74557e71fed8daf44c3bf316ceebbc3a3"
+      },
+      "vello_f32_fallback": {
+        "median_ms": 23.570625,
+        "runs_ms": [
+          24.079916,
+          23.570625,
+          23.629958,
+          22.653916,
+          22.599208
+        ],
+        "sha256": "a60dd27a30380ec1b04a4f670a8114678b01d59fa38f27b69c42babeb0874764"
+      },
+      "vello_u8_detected": {
+        "median_ms": 13.351833000000001,
+        "runs_ms": [
+          16.325416,
+          13.351833000000001,
+          13.36975,
+          12.595042000000001,
+          12.500083
+        ],
+        "sha256": "4c243fd6408307077e4a5191dca2f4ddd44d4715a033438bbfac6750ae31c8f0"
+      },
+      "vello_u8_fallback": {
+        "median_ms": 16.617167,
+        "runs_ms": [
+          16.794375,
+          16.746916,
+          16.600792,
+          16.57625,
+          16.617167
+        ],
+        "sha256": "cb4a8104263baf99947728830c400fa8b73ecbc8c7c521c4530cbe016ab00a50"
+      }
+    }
+  }
+}

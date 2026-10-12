@@ -1,0 +1,434 @@
+# Runs the CORE-003 text pipeline spike (spikes/text-pipeline) in five kinds of environment and checks that every one produces the same
+# layout and the same reference raster, bit for bit (ADR-0004, ADR-0005; the validation of ADR-0009 and ADR-0011):
+# - natively, built for Linux x86-64, Windows x86-64 and macOS arm64;
+# - compiled to WebAssembly (wasm32-unknown-unknown) twice, without and with the simd128 instructions, and run in Node.js on the same three
+#   systems;
+# - the same two modules in headless Chromium (Chrome for Testing's headless shell), in a module Web Worker, where the web app runs the engine.
+# The comparison job fails when a probe's layout hash or reference raster hash, or the viewport's, differs from the committed expectation
+# (spikes/text-pipeline/results/expected.json) in any environment, and writes every probe's hashes, the measurements and the module's size
+# into its job summary (spikes/text-pipeline/REPORT.md explains them). Each environment's results, layouts and images are uploaded.
+# It runs only when something it depends on changes, and weekly; it is not a required check (a check that a path filter skips would block
+# merging forever, docs/scripts/github-settings.py). The gate runs the probes whose fonts are committed on every pull request
+# (spikes/text-pipeline/tests/determinism.rs, the gate's determinism step).
+# Workflow rules (ADR-0017), as in artifacts.yml: actions pinned to full commit SHAs with the version in a comment, minimal permissions, no
+# credentials kept after checkout, a timeout on every job, tools and fonts downloaded at pinned versions and checked against SHA-256
+# checksums, and no cache.
+name: text-pipeline
+
+on:
+  pull_request:
+    paths:
+      - spikes/text-pipeline/**
+      - crates/bayan-units/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - scripts/ci-checksums.sh
+      - .github/workflows/text-pipeline.yml
+  push:
+    branches: [main]
+    paths:
+      - spikes/text-pipeline/**
+      - crates/bayan-units/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - scripts/ci-checksums.sh
+      - .github/workflows/text-pipeline.yml
+  schedule:
+    - cron: "47 3 * * 4"
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    # Explicitly bash on every system, which also sets pipefail: a failing program before a pipe fails its step.
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation helps only when one machine rebuilds again and again, which these jobs never do.
+  CARGO_INCREMENTAL: 0
+  # Node.js for the WebAssembly runners: the same version and checksums as artifacts.yml (released 2026-09-07; the checksums come from
+  # nodejs.org's signed SHASUMS256.txt). Must equal NODE_VERSION in xtask/src/verify.rs (a test checks this). Change them only in the
+  # monthly dependency session.
+  NODE_VERSION: 24.21.0
+  # wasm-bindgen's command-line tool, which writes the module's JavaScript glue (released 2026-09-25). Must equal the wasm-bindgen crate in
+  # Cargo.lock and WASM_BINDGEN_VERSION in scripts/dev-setup.sh, with the same checksum (an xtask test checks this, as for artifacts.yml).
+  WASM_BINDGEN_VERSION: 0.2.129
+  # Chrome for Testing's headless shell for Linux x86-64 (released 2026-08-25), the same build and checksum as bayan-server's and bayan-web's
+  # scripts/dev-setup.sh: hashed from storage.googleapis.com and confirmed identical on npmmirror, a mirror run by another organization.
+  CHROME_VERSION: 153.0.8010.12
+  CHROME_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
+
+jobs:
+  native:
+    name: Native (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the repository
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install
+          rustc --version
+
+      - name: Fetch the fonts (pinned SHA-256 checksums in spikes/text-pipeline/fonts/manifest.txt)
+        run: spikes/text-pipeline/fonts/fetch.sh
+
+      - name: Build the native runner
+        run: cargo build --package text-pipeline --release --locked
+
+      - name: Run the probes and the viewport
+        run: target/release/text-pipeline run --fonts target/text-pipeline/fonts --out "target/text-pipeline/out/$PLATFORM" --environment "$PLATFORM"
+
+      - name: Measure shaping, layout, rasterization and memory
+        run: target/release/text-pipeline bench --fonts target/text-pipeline/fonts --out "target/text-pipeline/out/$PLATFORM/bench.json" --environment "$PLATFORM"
+
+      - name: Upload the results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: text-pipeline-results-${{ matrix.platform }}
+          path: target/text-pipeline/out
+          if-no-files-found: error
+          retention-days: 14
+
+  wasm:
+    name: WebAssembly modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install
+          rustc --version
+
+      - name: Install wasm-bindgen (pinned release archive, SHA-256 checked)
+        run: |
+          # The project's release archive for Linux x86-64; the checksum matches the .sha256sum file published with it.
+          name="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
+          sha256=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$name.tar.gz" \
+            "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$name.tar.gz"
+          actual=$(sha256sum "$name.tar.gz")
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::wasm-bindgen checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          tar -xzf "$name.tar.gz" "$name/wasm-bindgen"
+          # Install next to cargo (rustup's bin directory), which is already on PATH.
+          cp "$name/wasm-bindgen" "$(dirname "$(command -v cargo)")/"
+          wasm-bindgen --version
+
+      - name: Build the module without and with simd128
+        run: |
+          # The library as a cdylib, the crate type of a WebAssembly module, and wasm-bindgen's glue for browsers and Node.js. The default
+          # module uses no SIMD instructions; the simd128 one lets the compiler and fearless_simd (vello_cpu) use WebAssembly's 128-bit SIMD,
+          # which every engine computes identically (relaxed SIMD, whose results are implementation-defined, stays off; REPORT.md).
+          cargo rustc --package text-pipeline --lib --release --locked --target wasm32-unknown-unknown --crate-type cdylib
+          wasm-bindgen --target web --out-dir target/text-pipeline/wasm/default target/wasm32-unknown-unknown/release/text_pipeline.wasm
+          CARGO_TARGET_DIR=target/simd128 RUSTFLAGS="-C target-feature=+simd128" \
+            cargo rustc --package text-pipeline --lib --release --locked --target wasm32-unknown-unknown --crate-type cdylib
+          wasm-bindgen --target web --out-dir target/text-pipeline/wasm/simd128 target/simd128/wasm32-unknown-unknown/release/text_pipeline.wasm
+
+      - name: Write the checksums
+        run: scripts/ci-checksums.sh target/text-pipeline/wasm
+
+      - name: Upload the modules
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: text-pipeline-wasm
+          path: target/text-pipeline/wasm
+          if-no-files-found: error
+          retention-days: 14
+
+  node:
+    name: WebAssembly in Node.js (${{ matrix.platform }})
+    needs: wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the repository
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js (pinned version, SHA-256 checked)
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;;
+            macOS-ARM64) archive=node-v$NODE_VERSION-darwin-arm64.tar.xz sha256=6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe ;;
+            Windows-X64) archive=node-v$NODE_VERSION-win-x64.zip sha256=158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541 ;;
+            *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://nodejs.org/dist/v$NODE_VERSION/$archive"
+          if command -v sha256sum > /dev/null; then actual=$(sha256sum "$archive"); else actual=$(shasum -a 256 "$archive"); fi
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::Node.js checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          case "$archive" in
+            *.zip)
+              if command -v unzip > /dev/null; then unzip -q "$archive"; else 7z x -y "$archive" > /dev/null; fi
+              node="$PWD/${archive%.zip}/node.exe"
+              ;;
+            *)
+              tar -xJf "$archive"
+              node="$PWD/${archive%.tar.xz}/bin/node"
+              ;;
+          esac
+          "$node" --version
+          echo "NODE=$node" >> "$GITHUB_ENV"
+
+      - name: Fetch the fonts (pinned SHA-256 checksums in spikes/text-pipeline/fonts/manifest.txt)
+        run: spikes/text-pipeline/fonts/fetch.sh
+
+      - name: Download the modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: text-pipeline-wasm
+          path: wasm
+
+      - name: Check the modules' checksums
+        run: scripts/ci-checksums.sh --check wasm
+
+      - name: Run the probes, the viewport and the measurements, without and with simd128
+        run: |
+          for variant in default simd128; do
+            if [ "$variant" = default ]; then environment="wasm32-node-$PLATFORM"; else environment="wasm32-simd128-node-$PLATFORM"; fi
+            "$NODE" spikes/text-pipeline/js/run-node.mjs "wasm/$variant" target/text-pipeline/fonts "target/text-pipeline/out/$environment" "$environment"
+          done
+
+      - name: Upload the results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: text-pipeline-results-node-${{ matrix.platform }}
+          path: target/text-pipeline/out
+          if-no-files-found: error
+          retention-days: 14
+
+  chromium:
+    name: WebAssembly in headless Chromium
+    needs: wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js (pinned version, SHA-256 checked)
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;;
+            *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://nodejs.org/dist/v$NODE_VERSION/$archive"
+          actual=$(sha256sum "$archive")
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::Node.js checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          tar -xJf "$archive"
+          node="$PWD/${archive%.tar.xz}/bin/node"
+          "$node" --version
+          echo "NODE=$node" >> "$GITHUB_ENV"
+
+      - name: Install Chrome for Testing's headless shell (pinned version, SHA-256 checked)
+        run: |
+          archive="chrome-headless-shell-linux64.zip"
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/$archive"
+          actual=$(sha256sum "$archive")
+          actual=${actual%% *}
+          if [ "$actual" != "$CHROME_SHA256" ]; then
+            echo "::error::headless shell checksum mismatch: expected $CHROME_SHA256, got $actual"
+            exit 1
+          fi
+          unzip -q "$archive"
+          chrome="$PWD/chrome-headless-shell-linux64/chrome-headless-shell"
+          "$chrome" --version
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
+      - name: Fetch the fonts (pinned SHA-256 checksums in spikes/text-pipeline/fonts/manifest.txt)
+        run: spikes/text-pipeline/fonts/fetch.sh
+
+      - name: Download the modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: text-pipeline-wasm
+          path: wasm
+
+      - name: Check the modules' checksums
+        run: scripts/ci-checksums.sh --check wasm
+
+      - name: Run the probes, the viewport and the measurements in a Web Worker, without and with simd128
+        run: |
+          for variant in default simd128; do
+            if [ "$variant" = default ]; then environment=wasm32-chromium-linux-x86_64; else environment=wasm32-simd128-chromium-linux-x86_64; fi
+            "$NODE" spikes/text-pipeline/js/run-chromium.mjs "$CHROME" "wasm/$variant" target/text-pipeline/fonts "target/text-pipeline/out/$environment" "$environment"
+          done
+
+      - name: Upload the results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: text-pipeline-results-chromium
+          path: target/text-pipeline/out
+          if-no-files-found: error
+          retention-days: 14
+
+  compare:
+    name: Same layout and reference raster everywhere
+    needs: [native, wasm, node, chromium]
+    # Runs even when an environment's job failed or was skipped, and then fails itself: a skipped check would count as passing.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the repository, for the comparison scripts and the committed expectation
+    steps:
+      - name: Check that every job passed
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          WASM_RESULT: ${{ needs.wasm.result }}
+          NODE_RESULT: ${{ needs.node.result }}
+          CHROMIUM_RESULT: ${{ needs.chromium.result }}
+        run: |
+          if [ "$NATIVE_RESULT" != success ] || [ "$WASM_RESULT" != success ] || [ "$NODE_RESULT" != success ] || [ "$CHROMIUM_RESULT" != success ]; then
+            echo "::error::every environment's job must pass: native '$NATIVE_RESULT', WebAssembly build '$WASM_RESULT', Node.js '$NODE_RESULT', Chromium '$CHROMIUM_RESULT'"
+            exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js (pinned version, SHA-256 checked)
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;;
+            *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://nodejs.org/dist/v$NODE_VERSION/$archive"
+          actual=$(sha256sum "$archive")
+          actual=${actual%% *}
+          if [ "$actual" != "$sha256" ]; then
+            echo "::error::Node.js checksum mismatch: expected $sha256, got $actual"
+            exit 1
+          fi
+          tar -xJf "$archive"
+          node="$PWD/${archive%.tar.xz}/bin/node"
+          "$node" --version
+          echo "NODE=$node" >> "$GITHUB_ENV"
+
+      - name: Download the results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: text-pipeline-results-*
+          path: results
+          merge-multiple: true
+
+      - name: Download the modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: text-pipeline-wasm
+          path: wasm
+
+      - name: Measure the modules' size
+        run: |
+          scripts/ci-checksums.sh --check wasm
+          for variant in default simd128; do
+            "$NODE" spikes/text-pipeline/js/wasm-size.mjs "wasm/$variant/text_pipeline_bg.wasm" > "results/wasm-size-$variant.json"
+          done
+
+      - name: Summarize the measurements
+        run: |
+          "$NODE" spikes/text-pipeline/js/summary.mjs results/*/bench.json \
+            --size default=results/wasm-size-default.json --size simd128=results/wasm-size-simd128.json --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare every environment's hashes with the expectation and with each other
+        run: |
+          # Three native runs, six in Node.js (two modules on three systems) and two in Chromium.
+          shopt -s nullglob
+          files=(results/*/results.json)
+          if [ "${#files[@]}" -ne 11 ]; then
+            echo "::error::expected 11 results files, found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
+          "$NODE" spikes/text-pipeline/js/compare.mjs spikes/text-pipeline/results/expected.json "${files[@]}" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: text-pipeline-summary
+          path: |
+            results/*/results.json
+            results/*/bench.json
+            results/wasm-size-*.json
+          # Also after a failed comparison, for the report; after a failed environment there may be nothing to upload.
+          if-no-files-found: warn
+          retention-days: 30
