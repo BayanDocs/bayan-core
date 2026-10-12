@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
-members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge", "lab/bayan-lab"]
+members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge", "spikes/text-pipeline", "lab/bayan-lab"]
 # fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
 exclude = ["fuzz"]
 
@@ -48,6 +48,23 @@ automerge = "=0.12.0"
 miniz_oxide = "=0.9.1"
 # Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-09-18; MIT.
 cfb = "=0.15.0"
+# The text stack of ADR-0009 and the rasterizers of ADR-0011, which the CORE-003 spike (spikes/text-pipeline) validates; only that spike uses them. The font crates are built with `libm` instead of `std`, so that every transcendental function they call (`hypot` for scaled component offsets in TrueType composite glyphs) comes from the pure-Rust libm crate rather than each platform's math library (ADR-0005 §4); spikes/text-pipeline/REPORT.md §4 explains each choice.
+# Shaping: HarfBuzz 14.5.1 ported to Rust, `#![forbid(unsafe_code)]`, output in integer font units. Without `std` it needs spin (a lock for its caches) and core_maths. Published 2026-10-04; MIT.
+harfrust = { version = "=0.14.0", default-features = false, features = ["libm"] }
+# Glyph outlines (TrueType and CFF), drawn unhinted (ADR-0011 §4); the same read-fonts parser as harfrust, so one font parser serves shaping and rendering (ADR-0009 §1). `#![forbid(unsafe_code)]`. Published 2026-10-03; MIT OR Apache-2.0.
+skrifa = { version = "=0.48.0", default-features = false, features = ["libm"] }
+# Line break opportunities (UAX #14) with the dictionary models for Thai, Lao, Khmer and Burmese, and grapheme clusters, from compiled data. Without `auto` and `lstm`, so the LSTM models, which run floating-point inference, are not even compiled (ADR-0009 §2). Published 2026-08-13; Unicode-3.0.
+icu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+# Unicode properties from compiled data: Script and Script_Extensions for itemization, and Bidi_Class, which `unicode_bidi` hands to the unicode-bidi crate (ADR-0009 §3). Published 2026-08-13; Unicode-3.0.
+icu_properties = { version = "=2.3.0", default-features = false, features = ["compiled_data", "unicode_bidi"] }
+# The Unicode Bidirectional Algorithm, with ICU4X's data instead of its own tables (no `hardcoded-data`; ADR-0009 §3). Published 2024-12-16; MIT OR Apache-2.0.
+unicode-bidi = { version = "=0.3.18", default-features = false, features = ["std"] }
+# The reference rasterizer (ADR-0011 §2) in its reference mode: without `simd`, so every target runs the same portable code, and with `no-std-float`, so its geometry takes acos, cos and powf from libm (ADR-0005 §4). Published 2026-02-02; BSD-3-Clause.
+tiny-skia = { version = "=0.12.0", default-features = false, features = ["no-std-float"] }
+# The interactive rasterizer that ADR-0011 §3 asks CORE-003 to evaluate, with its u8 (speed) and f32 (quality) pipelines, and libm instead of the platform's math library. Published 2026-10-02; Apache-2.0 OR MIT.
+vello_cpu = { version = "=0.3.0", default-features = false, features = ["libm", "u8_pipeline", "f32_pipeline"] }
+# vello_cpu's SIMD layer, named here only to switch on the scalar `Fallback` level (`force_support_fallback`), so that the spike can compare vello_cpu with and without SIMD, and run-time detection of the best level on x86 (`std`). The version vello_cpu 0.3.0 requires. Published 2026-08-11; Apache-2.0 OR MIT.
+fearless_simd = { version = "=0.7.0", default-features = false, features = ["std", "force_support_fallback"] }
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.

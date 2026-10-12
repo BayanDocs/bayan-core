@@ -1,0 +1,28 @@
+[package]
+name = "text-pipeline"
+description = "CORE-003 spike: a deterministic text pipeline (itemization, segmentation, shaping, line breaking, bidi reordering, layout JSON) and its reference raster, compared across platforms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bayan-units = { path = "../../crates/bayan-units" }
+fearless_simd.workspace = true
+harfrust.workspace = true
+icu_properties.workspace = true
+icu_segmenter.workspace = true
+miniz_oxide.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+skrifa.workspace = true
+tiny-skia.workspace = true
+unicode-bidi.workspace = true
+vello_cpu.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

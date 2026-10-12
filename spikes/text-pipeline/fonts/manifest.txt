@@ -1,0 +1,24 @@
+# The fonts of the CORE-003 probe set: what fetch.sh downloads and checks, and what the spike accepts. The spike refuses a font file whose SHA-256 is not the one written here (ADR-0010 §3: every font is identified by the SHA-256 of its file).
+#
+# One entry per line, fields separated by single spaces:
+#   archive <file> <sha256> <bytes> <url> [<mirror> ...]   a download that holds fonts; the mirrors are tried in order when the first URL fails
+#   font <file> <sha256> <bytes> <source>                  <source> is a URL, <archive>:<member> (a file inside an archive above), or `committed` (a copy in this folder)
+# Every download is checked against its SHA-256 before anything is read from it, and every font again after it is extracted. Every font is licensed under the SIL Open Font License 1.1, which ADR-0017 §8 allows for fonts. Pins change only in the monthly dependency session, and every version must have been published at least 24 hours before it is pinned (ADR-0017).
+
+# Liberation Sans and Liberation Serif 2.1.5 (metric-compatible with Arial and Times New Roman; ADR-0010), released 2021-09-30 as liberation-fonts-ttf-2.1.5.tar.gz. The upstream URL is the release's attachment on GitHub; the second is Gentoo's distfiles mirror, which serves the same file and which BayanDocs cloud sessions can reach. The tarball's SHA-256 equals the one Homebrew records for the upstream file (Casks/font/font-l/font-liberation.rb, checked 2026-10-12).
+archive liberation-fonts-ttf-2.1.5.tar.gz 7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0 2385008 https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz https://distfiles.gentoo.org/distfiles/e1/liberation-fonts-ttf-2.1.5.tar.gz
+font LiberationSans-Regular.ttf 76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8 410712 liberation-fonts-ttf-2.1.5.tar.gz:liberation-fonts-ttf-2.1.5/LiberationSans-Regular.ttf
+font LiberationSerif-Regular.ttf 058ea80864aef09a23f45cbec2bb5400bc3dfbdea01c3f10538a21fcb497fb74 393576 liberation-fonts-ttf-2.1.5.tar.gz:liberation-fonts-ttf-2.1.5/LiberationSerif-Regular.ttf
+
+# Carlito 1.104 (metric-compatible with Calibri; ADR-0010), from the Google Fonts repository at commit bd8f81dd (2026-10-09), where it was added on 2023-03-10 from googlefonts/carlito at commit 3a810cab. OFL-1.1 with the Reserved Font Name "Carlito", which matters only for modified versions; the spike never modifies a font.
+font Carlito-Regular.ttf f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595 628032 https://raw.githubusercontent.com/google/fonts/bd8f81ddb5c74d5c8897b36ad88b440266245103/ofl/carlito/Carlito-Regular.ttf
+
+# Noto Naskh Arabic 2.021, Noto Sans Devanagari 2.007, Noto Sans Hebrew 3.001 and Noto Sans Thai 2.002, the unhinted static fonts (glyph outlines are drawn unhinted; ADR-0011 §4) from the Noto project's published builds, notofonts.github.io at commit 578d18e1 (2026-10-09). The Devanagari file last changed on 2026-09-10, the others on or before 2026-08-16. The two smallest, Hebrew (16 KB) and Thai (21 KB), are also committed in this folder, so that the probes that use only them run in the verification gate without a download (REUSE.toml records their license).
+font NotoNaskhArabic-Regular.ttf c34fdbd98af4dbc45ca192a23d2eeb77032add83086f5fe32957d23b3f36b221 158580 https://raw.githubusercontent.com/notofonts/notofonts.github.io/578d18e1cfce41c8cc93d0a0f514cac3a1affb2e/fonts/NotoNaskhArabic/unhinted/ttf/NotoNaskhArabic-Regular.ttf
+font NotoSansDevanagari-Regular.ttf 9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd 184228 https://raw.githubusercontent.com/notofonts/notofonts.github.io/578d18e1cfce41c8cc93d0a0f514cac3a1affb2e/fonts/NotoSansDevanagari/unhinted/ttf/NotoSansDevanagari-Regular.ttf
+font NotoSansHebrew-Regular.ttf 04272f5600d0ec816d31d0df73b23aa8d3501ea359ebe820da31c11ffcf00853 16836 committed
+font NotoSansThai-Regular.ttf d4303fe9c63ebb72759ca8b6d2040c8ae81689f7d08d7b91c656154382b49313 20960 committed
+
+# The Noto CJK subset: Noto Sans SC and Noto Sans JP 2.004, the region-specific subset OpenType/CFF fonts of Simplified Chinese and Japanese (cubic outlines, unlike the TrueType fonts above), from notofonts/noto-cjk at commit f8d15753 (2024-09-19). 8.3 MB and 4.5 MB.
+font NotoSansSC-Regular.otf faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9 8331336 https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf
+font NotoSansJP-Regular.otf dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073 4533028 https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf
