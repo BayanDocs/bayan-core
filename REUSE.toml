@@ -40,6 +40,17 @@ path = "crates/bayan-opc/tests/fixtures/python-docx/*.docx"
 SPDX-FileCopyrightText = "2013 Steve Canny"
 SPDX-License-Identifier = "MIT"
 
+# Two small fonts of the Noto project, copied unchanged for the text pipeline spike (work package CORE-003), so that the probes that use them run in the verification gate without downloads. Their source and SHA-256 are in spikes/text-pipeline/fonts/manifest.txt; the spike's other fonts are downloaded by fetch.sh and never committed. Each font also carries its copyright notice and license in its own name table, as the OFL asks.
+[[annotations]]
+path = "spikes/text-pipeline/fonts/NotoSansHebrew-Regular.ttf"
+SPDX-FileCopyrightText = "2024 The Noto Project Authors (https://github.com/notofonts/hebrew)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "spikes/text-pipeline/fonts/NotoSansThai-Regular.ttf"
+SPDX-FileCopyrightText = "2022 The Noto Project Authors (https://github.com/notofonts/thai)"
+SPDX-License-Identifier = "OFL-1.1"
+
 # The Code of Conduct is the Contributor Covenant 2.1, copied from https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md with only its contact placeholder filled in (work package X-001). The Contributor Covenant project released version 2.1 under CC BY 4.0.
 [[annotations]]
 path = "CODE_OF_CONDUCT.md"
