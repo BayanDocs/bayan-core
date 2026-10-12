@@ -34,7 +34,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Room for the slowest case: after Cargo.lock changes no cache matches, so the gate builds much of the workspace again (about 16 minutes on Windows since CORE-003), and a push to main then also uploads a new build cache. A run that hangs is still stopped.
+    timeout-minutes: 40
     permissions:
       contents: read
     defaults:
