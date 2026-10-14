@@ -17,11 +17,19 @@
 
 mod chars;
 mod error;
+mod event;
 mod limits;
+mod markup;
 mod namespace;
+mod reader;
 mod source;
 
 pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
+pub use event::{
+    Attribute, Attributes, CData, Comment, EndTag, Event, Name, ProcessingInstruction, Space,
+    StartTag, Text,
+};
 pub use limits::Limits;
 pub use namespace::{KnownNamespace, KnownUri, Namespace, NamespaceName};
+pub use reader::Reader;
 pub use source::{Declaration, Encoding, Source};

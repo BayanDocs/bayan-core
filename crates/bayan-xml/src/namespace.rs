@@ -842,6 +842,11 @@ impl<'r> Namespace<'r> {
         }
     }
 
+    /// The namespace for `uri`, already looked up.
+    pub(crate) fn with_known(uri: &'r str, known: Option<KnownUri>) -> Namespace<'r> {
+        Namespace { uri, known }
+    }
+
     /// The namespace name, exactly as declared (with references resolved).
     pub fn uri(&self) -> &'r str {
         self.uri

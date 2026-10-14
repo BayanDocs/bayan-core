@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn knows_xml_white_space() {
-        for byte in [b' ', b'\t', b'\r', b'\n'] {
+        for byte in *b" \t\r\n" {
             assert!(is_space(byte));
         }
         for byte in [b'\x0B', b'\x0C', b'a', 0xA0] {

@@ -1,7 +1,5 @@
 //! Decoding a part into text: byte order marks, UTF-8 and UTF-16, characters XML does not allow, the size limit and the XML declaration.
 
-#![cfg(test)]
-
 use bayan_xml::{Encoding, ErrorKind, Limits, Source};
 
 fn utf16(text: &str, little_endian: bool) -> Vec<u8> {
