@@ -333,7 +333,7 @@ impl<'a> Reader<'a> {
         node
     }
 
-    /// Reads the element whose start tag is the current event to its end, and returns it as a fragment, with its context. Afterwards the current event is the element's end tag, and reading continues after it. Everything inside is checked as usual.
+    /// Reads the element whose start tag is the current event to its end, and returns it as a fragment, with its context and the bindings of the context that it uses. Afterwards the current event is the element's end tag, and reading continues after it. Everything inside is checked as usual, and nothing is read twice: capturing takes the time reading the element takes.
     ///
     /// # Errors
     ///
@@ -952,8 +952,12 @@ impl<'a> Reader<'a> {
                 owned |= raw.contains('\r');
             }
         }
+        let start = self.pieces.first().map_or(0, |(_, span)| span.start);
+        let end = self.pieces.last().map_or(start, |(_, span)| span.end);
         if owned {
+            // Decoding never makes text longer, so the run's own length is all the copy can need.
             self.text_buffer.clear();
+            self.text_buffer.reserve_exact(end - start);
             for (reference, span) in &self.pieces {
                 let raw = self.slice(span);
                 if *reference {
@@ -965,8 +969,6 @@ impl<'a> Reader<'a> {
                 }
             }
         }
-        let start = self.pieces.first().map_or(0, |(_, span)| span.start);
-        let end = self.pieces.last().map_or(start, |(_, span)| span.end);
         let space = self
             .elements
             .last()
