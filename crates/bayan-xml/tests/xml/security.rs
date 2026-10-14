@@ -177,22 +177,20 @@ fn references_cannot_amplify_input() {
     }
 }
 
-/// The shortest of five runs of `work`.
-fn fastest(mut work: impl FnMut()) -> Duration {
-    (0..5)
-        .map(|_| {
-            let start = Instant::now();
-            work();
-            start.elapsed()
-        })
-        .min()
-        .unwrap_or_default()
-}
-
-/// Checks that `slow` takes at most `factor` times as long as `fast`, with a millisecond of slack for timer noise.
-fn assert_within(slow: Duration, fast: Duration, factor: u32, what: &str) {
+/// Checks that `crafted` takes at most four times as long as `ordinary`, which does the same amount of work on ordinary input, where work that grows faster than its input would make it take eight times as long or more. Each runs seven times, alternately, so that the load of the machine affects both alike, and the shortest runs are compared, with a millisecond of slack for the timer.
+fn assert_linear(what: &str, mut crafted: impl FnMut(), mut ordinary: impl FnMut()) {
+    let mut slow = Duration::MAX;
+    let mut fast = Duration::MAX;
+    for _ in 0..7 {
+        let start = Instant::now();
+        crafted();
+        slow = slow.min(start.elapsed());
+        let start = Instant::now();
+        ordinary();
+        fast = fast.min(start.elapsed());
+    }
     assert!(
-        slow <= fast * factor + Duration::from_millis(1),
+        slow <= fast * 4 + Duration::from_millis(1),
         "{what}: {slow:?} against {fast:?}"
     );
 }
@@ -252,11 +250,10 @@ fn write_all(fragments: &[Fragment<'_>]) {
 fn stays_linear_with_many_bindings_in_scope() {
     let crowded = captured(&many_bindings(4_000, 2_000));
     let sparse = captured(&many_bindings(4, 2_000));
-    assert_within(
-        fastest(|| write_all(&crowded)),
-        fastest(|| write_all(&sparse)),
-        8,
+    assert_linear(
         "writing fragments",
+        || write_all(&crowded),
+        || write_all(&sparse),
     );
 }
 
@@ -277,9 +274,9 @@ fn stays_linear_with_many_attributes() {
         text.push_str("</root>");
         text
     };
-    // The same number of attributes in 16 times fewer tags.
+    // The same number of attributes in 64 times fewer tags.
     let long = tags(32, 128);
-    let short = tags(512, 8);
+    let short = tags(2_048, 2);
     let read = |text: &str| {
         let text = text.to_owned();
         move || {
@@ -289,8 +286,8 @@ fn stays_linear_with_many_attributes() {
             while reader.next_event().unwrap().is_some() {}
         }
     };
-    assert_within(fastest(read(&long)), fastest(read(&short)), 4, "reading");
-    // The writer takes start tags of any length: the same number of declarations and attributes in 128 times fewer tags.
+    assert_linear("reading", read(&long), read(&short));
+    // The writer takes start tags of any length: the same number of declarations and attributes in 512 times fewer tags.
     let names = |attributes: usize| -> Vec<(String, String)> {
         (0..attributes)
             .map(|index| (format!("p{index}"), format!("urn:p{index}")))
@@ -313,13 +310,8 @@ fn stays_linear_with_many_attributes() {
         writer.finish().unwrap();
     };
     let long = names(2_048);
-    let short = names(16);
-    assert_within(
-        fastest(|| write(4, &long)),
-        fastest(|| write(512, &short)),
-        4,
-        "writing",
-    );
+    let short = names(4);
+    assert_linear("writing", || write(4, &long), || write(2_048, &short));
 }
 
 // Capturing and writing elements deep in a document costs no more than near its root: here each uses two bindings from outside, one declared by the root and one by its parent.
@@ -362,11 +354,10 @@ fn stays_linear_with_deep_nesting() {
             writer.finish().unwrap();
         }
     };
-    assert_within(
-        fastest(capture_all(&deep)),
-        fastest(capture_all(&shallow)),
-        4,
+    assert_linear(
         "capturing deep elements",
+        capture_all(&deep),
+        capture_all(&shallow),
     );
 }
 
@@ -404,11 +395,10 @@ fn stays_linear_with_long_compatibility_lists() {
         text
     };
     // The same number of entries in 16 times fewer lists.
-    assert_within(
-        fastest(process(&lists(64, 240))),
-        fastest(process(&lists(1_024, 15))),
-        4,
+    assert_linear(
         "long lists",
+        process(&lists(64, 240)),
+        process(&lists(1_024, 15)),
     );
 }
 
@@ -425,11 +415,10 @@ fn stays_linear_with_nested_alternate_content() {
         format!("<root xmlns:mc='{MC}'>{}</root>", inner.repeat(repeat))
     };
     // About the same size: one alternate content nested 120 deep, or 15 nested 8 deep.
-    assert_within(
-        fastest(process(&nested(120, 1))),
-        fastest(process(&nested(8, 15))),
-        4,
+    assert_linear(
         "nested alternate content",
+        process(&nested(120, 1)),
+        process(&nested(8, 15)),
     );
 }
 
@@ -442,11 +431,12 @@ fn stays_linear_with_many_ignored_elements() {
             "<i:x><y/></i:x>".repeat(count)
         )
     };
-    // Eight times as many take at most sixteen times as long.
-    assert_within(
-        fastest(process(&ignored(16_000))),
-        fastest(process(&ignored(2_000))),
-        16,
-        "ignored elements",
-    );
+    // One document with eight times as many, against eight documents.
+    let few_text = ignored(2_000);
+    let mut few = process(&few_text);
+    assert_linear("ignored elements", process(&ignored(16_000)), || {
+        for _ in 0..8 {
+            few();
+        }
+    });
 }

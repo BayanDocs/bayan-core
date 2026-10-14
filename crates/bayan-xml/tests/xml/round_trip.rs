@@ -91,8 +91,8 @@ fn fragments_at(bytes: &[u8], depth: usize) -> Vec<Fragment<'static>> {
 #[test]
 fn reads_every_part_of_the_documents() {
     let parts = all_parts();
-    // 5 documents with 11 to 15 XML parts each, and the samples.
-    assert!(parts.len() >= 55, "only {} parts", parts.len());
+    // The 5 documents have 16, 12, 12, 19 and 11 XML parts, and there are 2 samples.
+    assert_eq!(parts.len(), 72);
     for (name, _) in &parts {
         assert!(name.ends_with(".xml") || name.ends_with(".rels"), "{name}");
     }
