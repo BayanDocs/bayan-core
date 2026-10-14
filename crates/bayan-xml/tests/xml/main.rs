@@ -11,6 +11,7 @@ mod fragments;
 mod markup_compatibility;
 mod namespaces;
 mod round_trip;
+mod security;
 mod source;
 mod wellformed;
 mod writer;
