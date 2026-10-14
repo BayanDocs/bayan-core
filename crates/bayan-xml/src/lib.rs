@@ -1,10 +1,8 @@
 //! # bayan-xml
 //!
-//! Streaming XML with Markup Compatibility processing and lossless preservation.
+//! Streaming XML with Markup Compatibility processing and lossless preservation (work package [CORE-006]).
 //!
-//! This crate will provide a namespace-aware streaming XML reader that rejects document type declarations and external entities and enforces limits; Markup Compatibility processing (`mc:AlternateContent`, `mc:Ignorable`, ECMA-376 Part 3); lossless capture of fragments BayanDocs does not understand, so they can be written back unchanged; and a deterministic writer with namespace management.
-//!
-//! **Status:** an empty skeleton created by CORE-001. Its implementation arrives with work package [CORE-006].
+//! **Status:** in progress.
 //!
 //! ## Layer
 //!
@@ -16,3 +14,12 @@
 //! [architecture]: https://github.com/BayanDocs/docs/blob/HEAD/plan/03-architecture.md#4-inside-bayan-core
 
 #![forbid(unsafe_code)]
+
+mod chars;
+mod error;
+mod limits;
+mod source;
+
+pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
+pub use limits::Limits;
+pub use source::{Declaration, Encoding, Source};

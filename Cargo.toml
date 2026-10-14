@@ -48,6 +48,8 @@ automerge = "=0.12.0"
 miniz_oxide = "=0.9.1"
 # Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-09-18; MIT.
 cfb = "=0.15.0"
+# The tokenizer under bayan-xml (CORE-006): it splits a part's text into tags, text, references, comments, CDATA sections and processing instructions, with exact byte positions, from a borrowed slice without copying. bayan-xml checks everything inside those pieces itself, because quick-xml accepts much that XML forbids. `#![forbid(unsafe_code)]`; its only required dependency is memchr, already here. 0.41 fixed two denial-of-service advisories (RUSTSEC-2026-0194, RUSTSEC-2026-0195). No features. Published 2026-08-22; MIT.
+quick-xml = { version = "=0.42.0", default-features = false }
 # The text stack of ADR-0009 and the rasterizers of ADR-0011, which the CORE-003 spike (spikes/text-pipeline) validates; only that spike uses them. The font crates are built with `libm` instead of `std`, so that every transcendental function they call (`hypot` for the offsets of transformed components in TrueType composite glyphs, `sin_cos` and `tan` for variable composite glyphs, `sin`, `cos` and `tan` for colour-glyph transforms) comes from the pure-Rust libm crate rather than each platform's math library (ADR-0005 §4); spikes/text-pipeline/REPORT.md §4 explains each choice.
 # Shaping: HarfBuzz 14.5.1 ported to Rust, `#![forbid(unsafe_code)]`, output in integer font units. Without `std` it needs spin (a lock for its caches) and core_maths. Published 2026-10-04; MIT.
 harfrust = { version = "=0.14.0", default-features = false, features = ["libm"] }
