@@ -17,6 +17,7 @@
 
 mod canonical;
 mod chars;
+mod compat;
 mod error;
 mod escape;
 mod event;
@@ -29,6 +30,10 @@ mod source;
 mod writer;
 
 pub use canonical::canonicalize;
+pub use compat::{
+    AlternateContent, AttributeKind, IgnoredElement, McConfig, McEvent, McReader, McStartTag,
+    Selection,
+};
 pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
 pub use event::{
     Attribute, Attributes, CData, Comment, EndTag, Event, Name, ProcessingInstruction, Space,

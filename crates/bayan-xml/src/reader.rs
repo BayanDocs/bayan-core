@@ -440,6 +440,34 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The element and the attributes of the current start tag, if the current event is one.
+    pub(crate) fn start_data(&self) -> Option<(&ElementData<'a>, &[AttributeData<'a>])> {
+        match &self.current {
+            Current::Start(element) => Some((element, &self.attributes)),
+            _ => None,
+        }
+    }
+
+    /// The identifier of the namespace that `prefix` is bound to where the reader is, if any.
+    pub(crate) fn namespace_id_of(&self, prefix: &str) -> Option<NamespaceId> {
+        self.scope.resolve(prefix)?.namespace
+    }
+
+    /// The namespace with identifier `id`.
+    pub(crate) fn namespace(&self, id: NamespaceId) -> Option<crate::Namespace<'_>> {
+        self.namespaces.get(id)
+    }
+
+    /// The text of the document at `span`.
+    pub(crate) fn slice_of(&self, span: &Range<usize>) -> &'a str {
+        self.slice(span)
+    }
+
+    /// Where the reader is in the text.
+    pub(crate) fn offset(&self) -> usize {
+        self.position()
+    }
+
     /// The namespace name that `prefix` (`""` for the default namespace) is bound to where the reader is (at a start tag, with the element's own declarations), or `None` if it is not bound to one.
     pub(crate) fn namespace_of(&self, prefix: &str) -> Option<&str> {
         let id = self.scope.resolve(prefix)?.namespace?;

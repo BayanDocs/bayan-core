@@ -8,6 +8,7 @@ mod canonical;
 mod common;
 mod documents;
 mod fragments;
+mod markup_compatibility;
 mod namespaces;
 mod round_trip;
 mod source;
