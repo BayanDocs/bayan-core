@@ -25,6 +25,7 @@ mod markup;
 mod namespace;
 mod reader;
 mod source;
+mod writer;
 
 pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
 pub use event::{
@@ -36,3 +37,4 @@ pub use limits::Limits;
 pub use namespace::{KnownNamespace, KnownUri, Namespace, NamespaceName};
 pub use reader::Reader;
 pub use source::{Declaration, Encoding, Source};
+pub use writer::{QName, Writer};

@@ -9,3 +9,4 @@ mod fragments;
 mod namespaces;
 mod source;
 mod wellformed;
+mod writer;
