@@ -18,8 +18,10 @@
 mod chars;
 mod error;
 mod limits;
+mod namespace;
 mod source;
 
 pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
 pub use limits::Limits;
+pub use namespace::{KnownNamespace, KnownUri, Namespace, NamespaceName};
 pub use source::{Declaration, Encoding, Source};
