@@ -111,7 +111,7 @@ enum Phase {
 /// - **Escaping:** `&`, `<` and `>` in text; `&`, `<`, `>` and `"` in attribute values, which are always in double quotes; and the characters that reading would change otherwise as character references (carriage return in text, tab, line feed and carriage return in attribute values). Characters that XML cannot represent at all are refused.
 /// - **Empty elements** are written as `<a/>`.
 /// - **`xml:space`:** [`Writer::text_element`] adds `xml:space="preserve"` when the text needs it.
-/// - **Fragments** are written verbatim ([`Writer::fragment`]).
+/// - **Fragments** ([`Writer::fragment`]) are written byte for byte where the bindings they use and their white space mode hold, and anywhere else with only the declarations they need added.
 ///
 /// Each call checks its own arguments and changes nothing when it refuses them. The checks that need a whole start tag (conflicting prefixes, duplicate attributes, undeclared prefixes in Markup Compatibility attributes) run when the tag is written, which is when anything else is written after it; after such an error the writer should be dropped.
 ///
