@@ -31,10 +31,10 @@ fn writes_the_documented_form() {
     assert_eq!(
         canonical(text),
         concat!(
-            "{0} urn:w\n{1} http://schemas.openxmlformats.org/markup-compatibility/2006\n{2} urn:x\n",
             "<!-- c --><?pi data?>",
             "<{0}doc a=\"1&#x9;\" b=\"2\" {1}Ignorable=\"{2}\">a &amp; &lt;b&gt;\n<{2}e></{2}e><?p?></{0}doc>",
-            "<!--after-->"
+            "<!--after-->",
+            "\n{0} urn:w\n{1} http://schemas.openxmlformats.org/markup-compatibility/2006\n{2} urn:x"
         )
     );
 }

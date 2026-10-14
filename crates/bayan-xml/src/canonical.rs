@@ -13,7 +13,7 @@ use crate::{Error, Limits, Reader, Source};
 ///
 /// It ignores how a document is written: its encoding and XML declaration, prefixes and namespace declarations, the order of attributes and their quotes, references, CDATA sections, empty-element tags, line ends (which reading normalizes), white space outside the root element, and `xml:space` attributes that do not change the white space mode in force. Prefixes in attribute values are resolved where Markup Compatibility (ECMA-376 Part 3) and XML Schema give them a meaning: the lists of `mc:Ignorable`, `mc:MustUnderstand`, `mc:ProcessContent`, `mc:PreserveElements` and `mc:PreserveAttributes`, the list of `Requires` on `mc:Choice`, and the qualified name of `xsi:type`. Other qualified names in attribute values or text are compared as written, as in Exclusive XML Canonicalization.
 ///
-/// The form starts with the namespace names, numbered in order of first use, one per line (`{0} http://…`), followed by the content: every name in a namespace written `{number}local`, every element with a start tag and an end tag, the attributes of each start tag sorted by namespace name and then local name, and text and attribute values escaped as in Canonical XML. It is meant for comparisons, not for reading, and it is at most a few times larger than the document.
+/// The form is the content, with every name in a namespace written `{number}local`, every element with a start tag and an end tag, the attributes of each start tag sorted by namespace name and then local name, and text and attribute values escaped as in Canonical XML, followed by the namespace names, numbered in order of first use, each on a line of its own (`{0} http://…`). It is meant for comparisons, not for reading, and it is at most a few times larger than the document; building it takes at most about twice its own size in memory.
 ///
 /// # Errors
 ///
@@ -230,17 +230,16 @@ impl Form {
         }
     }
 
-    /// The header of numbered namespaces followed by the content.
+    /// The content followed by the numbered namespace names, appended to it rather than put before it, so that the content is never copied.
     fn finish(self) -> String {
-        let mut form = String::new();
+        let mut form = self.body;
         for (number, uri) in self.names.iter().enumerate() {
+            form.push('\n');
             form.push('{');
             form.push_str(&number.to_string());
             form.push_str("} ");
             escape::attribute(uri, &mut form);
-            form.push('\n');
         }
-        form.push_str(&self.body);
         form
     }
 }
