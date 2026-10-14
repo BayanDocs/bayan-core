@@ -17,7 +17,9 @@
 
 mod chars;
 mod error;
+mod escape;
 mod event;
+mod fragment;
 mod limits;
 mod markup;
 mod namespace;
@@ -29,6 +31,7 @@ pub use event::{
     Attribute, Attributes, CData, Comment, EndTag, Event, Name, ProcessingInstruction, Space,
     StartTag, Text,
 };
+pub use fragment::{Context, Fragment};
 pub use limits::Limits;
 pub use namespace::{KnownNamespace, KnownUri, Namespace, NamespaceName};
 pub use reader::Reader;

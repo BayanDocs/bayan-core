@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 mod common;
+mod fragments;
 mod namespaces;
 mod source;
 mod wellformed;

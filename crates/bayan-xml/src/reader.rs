@@ -1,18 +1,22 @@
 //! The reader: a streaming, namespace-aware reader of XML 1.0 that refuses what XML forbids and what could exhaust resources.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use quick_xml::errors::{Error as TokenError, IllFormedError, SyntaxError};
 use quick_xml::events::Event as Token;
 
-use crate::chars::{is_name, is_space};
+use crate::chars::{find_invalid_char, is_name, is_ncname, is_space, split_qname};
 use crate::event::{
     AttributeData, CData, Comment, ElementData, EndTag, Event, NamespaceId, NamespaceTable,
     ProcessingInstruction, Space, StartTag, Text,
 };
+use crate::fragment::{Context, ContextNode, Fragment};
 use crate::markup;
+use crate::namespace::KnownNamespace;
 use crate::{Error, ErrorKind, Limits, Source};
 
 /// The namespace of the `xml` prefix, bound in every document.
@@ -92,6 +96,8 @@ struct Frame<'a> {
     element: ElementData<'a>,
     /// The length of the scope before the element's own declarations.
     bindings: usize,
+    /// The context inside the element, made the first time it is asked for.
+    context: OnceCell<Option<Arc<ContextNode>>>,
 }
 
 /// Where the reader is in the document.
@@ -160,6 +166,8 @@ pub struct Reader<'a> {
     text_buffer: String,
     end_of_empty_element: bool,
     initial_space: Space,
+    /// The context the root element is in.
+    base: Option<Arc<ContextNode>>,
 }
 
 impl<'a> Reader<'a> {
@@ -200,6 +208,235 @@ impl<'a> Reader<'a> {
             text_buffer: String::new(),
             end_of_empty_element: false,
             initial_space: Space::Default,
+            base: None,
+        }
+    }
+
+    /// A reader of `source`, a fragment of a document, read in `context`: its bindings and white space mode apply to the root element, as they did where the fragment came from.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidNamespaceDeclaration`] if a binding of the context breaks the rules of Namespaces in XML (a prefix that is not an NCName, the `xmlns` prefix, the `xml` prefix bound elsewhere, a reserved namespace name, a prefix bound to an empty name, or a name with a character XML does not allow), [`ErrorKind::NameTooLong`] for a prefix longer than [`Limits::max_name_length`], [`ErrorKind::TooManyNamespaces`] beyond [`Limits::max_namespaces`]; all at offset 0.
+    pub fn with_context(
+        source: &'a Source<'_>,
+        limits: &Limits,
+        context: &Context,
+    ) -> Result<Reader<'a>, Error> {
+        let mut reader = Reader::new(source, limits);
+        let invalid = Error::new(0, ErrorKind::InvalidNamespaceDeclaration);
+        for (prefix, uri) in context.bindings() {
+            if prefix.len() > limits.max_name_length {
+                return Err(Error::new(0, ErrorKind::NameTooLong));
+            }
+            if find_invalid_char(uri).is_some() {
+                return Err(invalid);
+            }
+            let reserved = uri == XML_NAMESPACE || uri == XMLNS_NAMESPACE;
+            let namespace = match prefix {
+                "xml" if uri == XML_NAMESPACE => continue,
+                "" if uri.is_empty() => None,
+                "" if !reserved => Some(reader.intern(Cow::Owned(uri.to_owned()), 0)?),
+                _ if is_ncname(prefix)
+                    && prefix != "xml"
+                    && prefix != "xmlns"
+                    && !uri.is_empty()
+                    && !reserved =>
+                {
+                    Some(reader.intern(Cow::Owned(uri.to_owned()), 0)?)
+                }
+                _ => return Err(invalid),
+            };
+            reader
+                .scope
+                .push(Cow::Owned(prefix.to_owned()), namespace, 0);
+        }
+        reader.initial_space = context.space;
+        reader.base.clone_from(&context.node);
+        Ok(reader)
+    }
+
+    /// The namespace bindings and white space mode in which the current event is: for a start tag, those of the place where its element is (without its own declarations); for anything else, those inside the innermost open element.
+    pub fn context(&self) -> Context {
+        let inside = match self.current {
+            Current::Start(_) => self.elements.len().checked_sub(2),
+            _ => self.elements.len().checked_sub(1),
+        };
+        let space = inside
+            .and_then(|index| self.elements.get(index))
+            .map_or(self.initial_space, |frame| frame.element.space);
+        Context {
+            node: self.context_inside(inside),
+            space,
+        }
+    }
+
+    /// The chain of declarations in scope inside the open element at `index` (`None` for outside the root), made once for each element and shared.
+    fn context_inside(&self, index: Option<usize>) -> Option<Arc<ContextNode>> {
+        let Some(index) = index else {
+            return self.base.clone();
+        };
+        if let Some(node) = self
+            .elements
+            .get(index)
+            .and_then(|frame| frame.context.get())
+        {
+            return node.clone();
+        }
+        let mut first = index;
+        while first > 0
+            && self
+                .elements
+                .get(first - 1)
+                .is_some_and(|frame| frame.context.get().is_none())
+        {
+            first -= 1;
+        }
+        let mut node = match first.checked_sub(1) {
+            None => self.base.clone(),
+            Some(parent) => self
+                .elements
+                .get(parent)
+                .and_then(|frame| frame.context.get())
+                .cloned()
+                .flatten(),
+        };
+        for position in first..=index {
+            let Some(frame) = self.elements.get(position) else {
+                break;
+            };
+            let end = self
+                .elements
+                .get(position + 1)
+                .map_or(self.scope.len(), |next| next.bindings);
+            let own = self
+                .scope
+                .bindings()
+                .get(frame.bindings..end)
+                .unwrap_or_default();
+            if !own.is_empty() {
+                node = Some(Arc::new(ContextNode {
+                    parent: node,
+                    bindings: own
+                        .iter()
+                        .map(|binding| {
+                            let uri = binding
+                                .namespace
+                                .and_then(|id| self.namespaces.get(id))
+                                .map_or("", |namespace| namespace.uri());
+                            (Box::from(binding.prefix.as_ref()), Box::from(uri))
+                        })
+                        .collect(),
+                }));
+            }
+            let _ = frame.context.set(node.clone());
+        }
+        node
+    }
+
+    /// Reads the element whose start tag is the current event to its end, and returns it as a fragment, with its context. Afterwards the current event is the element's end tag, and reading continues after it. Everything inside is checked as usual.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::NotAtStartTag`] if the current event is not a start tag; otherwise the first problem found inside the element.
+    pub fn capture(&mut self) -> Result<Fragment<'a>, Error> {
+        let Current::Start(element) = &self.current else {
+            return Err(Error::new(self.position(), ErrorKind::NotAtStartTag));
+        };
+        let start = element.span.start;
+        let depth = element.depth;
+        let name_end = 1 + element.qname.len();
+        let context = self.context();
+        loop {
+            if !self.advance()? {
+                return Err(Error::new(self.text.len(), ErrorKind::UnexpectedEnd));
+            }
+            if let Current::End(element, span) = &self.current
+                && element.depth == depth
+            {
+                return Ok(Fragment {
+                    text: Cow::Borrowed(self.slice(&(start..span.end))),
+                    context,
+                    name_end,
+                });
+            }
+        }
+    }
+
+    /// For [`Fragment::analyse`]: if the current event is a start tag, adds to `needed` the bindings of the initial context that it uses, and returns whether it is the root element and sets `xml:space`.
+    pub(crate) fn note_uses(&self, needed: &mut BTreeMap<String, String>) -> Option<bool> {
+        let Current::Start(element) = &self.current else {
+            return None;
+        };
+        self.note_prefix(element.prefix, needed);
+        let compatibility = KnownNamespace::MarkupCompatibility.uri();
+        let instance = KnownNamespace::XmlSchemaInstance.uri();
+        let choice = element.local == "Choice"
+            && element
+                .namespace
+                .and_then(|id| self.namespaces.get(id))
+                .is_some_and(|namespace| namespace.uri() == compatibility);
+        let mut sets_space = false;
+        for attribute in &self.attributes {
+            if attribute.declaration {
+                continue;
+            }
+            if !attribute.prefix.is_empty() {
+                self.note_prefix(attribute.prefix, needed);
+            }
+            let uri = attribute
+                .namespace
+                .and_then(|id| self.namespaces.get(id))
+                .map(|namespace| namespace.uri());
+            let tokens = attribute.value.split_ascii_whitespace();
+            match (uri, attribute.local) {
+                (Some(uri), "Ignorable" | "MustUnderstand") if uri == compatibility => {
+                    tokens.for_each(|prefix| self.note_prefix(prefix, needed));
+                }
+                (None, "Requires") if choice => {
+                    tokens.for_each(|prefix| self.note_prefix(prefix, needed));
+                }
+                (Some(uri), "ProcessContent" | "PreserveElements" | "PreserveAttributes")
+                    if uri == compatibility =>
+                {
+                    for token in tokens {
+                        if let Some((prefix, _)) = token.split_once(':') {
+                            self.note_prefix(prefix, needed);
+                        }
+                    }
+                }
+                (Some(uri), "type") if uri == instance => {
+                    if let Some((prefix, _)) =
+                        split_qname(attribute.value.trim_matches(|c| c == ' '))
+                    {
+                        self.note_prefix(prefix, needed);
+                    }
+                }
+                (Some(uri), "space") if uri == XML_NAMESPACE => sets_space = true,
+                _ => {}
+            }
+        }
+        Some(sets_space && element.depth == 1)
+    }
+
+    /// Adds `prefix` to `needed` if it is bound by the initial context (or, for `""`, if no default namespace is declared inside the fragment).
+    fn note_prefix(&self, prefix: &str, needed: &mut BTreeMap<String, String>) {
+        if prefix == "xml" {
+            return;
+        }
+        match self.scope.resolve(prefix) {
+            None if prefix.is_empty() => {
+                needed.entry(String::new()).or_default();
+            }
+            Some(binding) if binding.depth == 0 => {
+                let uri = binding
+                    .namespace
+                    .and_then(|id| self.namespaces.get(id))
+                    .map_or("", |namespace| namespace.uri());
+                needed
+                    .entry(prefix.to_owned())
+                    .or_insert_with(|| uri.to_owned());
+            }
+            _ => {}
         }
     }
 
@@ -506,6 +743,7 @@ impl<'a> Reader<'a> {
         self.elements.push(Frame {
             element: element.clone(),
             bindings,
+            context: OnceCell::new(),
         });
         self.phase = Phase::InRoot;
         self.current = Current::Start(element);

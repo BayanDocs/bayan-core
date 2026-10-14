@@ -835,6 +835,7 @@ pub struct Namespace<'r> {
 
 impl<'r> Namespace<'r> {
     /// The namespace for `uri`, looked up in the table.
+    #[cfg(test)]
     pub(crate) fn new(uri: &'r str) -> Namespace<'r> {
         Namespace {
             uri,
