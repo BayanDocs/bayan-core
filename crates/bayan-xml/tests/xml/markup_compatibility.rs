@@ -3,8 +3,9 @@
 //! The scenarios use their own names (`urn:t:…` namespaces, shapes instead of circles) but the structure, configurations and outcomes of the examples they cite. A scenario's input is processed with a configuration; the output document is what the events say is left (written with the writer, compared in canonical form), and the lossless events must recreate the input.
 
 use bayan_xml::{
-    AttributeKind, CompatibilityError, Error, ErrorKind, KnownNamespace, Limits, McConfig, McEvent,
-    McReader, NamespaceName, QName, Selection, Source, Writer, canonicalize,
+    AttributeKind, CompatibilityError, Error, ErrorKind, Fragment, KnownNamespace, Limits,
+    McConfig, McEvent, McReader, NamespaceName, QName, Reader, Selection, Source, Writer,
+    canonicalize,
 };
 
 use crate::common::first_difference;
@@ -215,7 +216,7 @@ fn recreate(text: &str, config: &McConfig) -> String {
             McEvent::AlternateContentEnd(content) => {
                 alternate -= 1;
                 if alternate == 0 {
-                    writer.fragment(content.fragment(), &limits).unwrap();
+                    writer.fragment(content.fragment()).unwrap();
                 }
             }
             _ if alternate > 0 => {}
@@ -229,7 +230,7 @@ fn recreate(text: &str, config: &McConfig) -> String {
             McEvent::ProcessingInstruction(pi) => writer
                 .processing_instruction(pi.target(), pi.data())
                 .unwrap(),
-            McEvent::Ignored(ignored) => writer.fragment(ignored.fragment(), &limits).unwrap(),
+            McEvent::Ignored(ignored) => writer.fragment(ignored.fragment()).unwrap(),
         }
     }
     writer.finish().unwrap()
@@ -1263,6 +1264,9 @@ fn reads_every_part_of_real_documents() {
     }
 }
 
+// Alternate content whose fragment needs bindings that only its own start tag uses (j), that only what is inside an ignored child uses (k), and not the bindings declared inside it (the inner p).
+const ALTERNATE_USES: &str = "<root xmlns='urn:t:base' xmlns:mc='MC' xmlns:i='urn:t:i' xmlns:x='urn:t:x' xmlns:k='urn:t:k' xmlns:n1='urn:t:n1' xmlns:p='urn:t:outer' xmlns:j='urn:t:j' mc:Ignorable='x i'><mc:AlternateContent mc:Ignorable='j' j:flag=''><x:future><k:deep/></x:future><mc:Choice Requires='n1'><wrap xmlns:p='urn:t:inner'><i:ign><p:x/></i:ign></wrap></mc:Choice><mc:Fallback><p:y/></mc:Fallback></mc:AlternateContent></root>";
+
 /// Every scenario of this file, with its configurations.
 fn scenarios() -> Vec<(String, McConfig)> {
     let mut all = Vec::new();
@@ -1273,6 +1277,7 @@ fn scenarios() -> Vec<(String, McConfig)> {
         NESTED_ALTERNATE,
         SECTION_9_4,
         SECTION_9_2,
+        ALTERNATE_USES,
     ];
     let configs: [&[&str]; 5] = [
         &[],
@@ -1323,6 +1328,78 @@ fn lossless_capture_recreates_the_input() {
             "{name}"
         );
     }
+}
+
+/// The fragments of every ignored element and alternate content that processing `text` with `config` reports.
+fn reported_fragments(text: &str, config: &McConfig) -> Vec<Fragment<'static>> {
+    let limits = Limits::default();
+    let source = Source::new(text.as_bytes(), &limits).unwrap();
+    let mut reader = McReader::new(&source, &limits, config);
+    let mut fragments = Vec::new();
+    while let Some(event) = reader.next_event().unwrap() {
+        match event {
+            McEvent::Ignored(ignored) => fragments.push(ignored.into_fragment().into_owned()),
+            McEvent::AlternateContentEnd(alternate) => {
+                fragments.push(alternate.into_fragment().into_owned());
+            }
+            _ => {}
+        }
+    }
+    fragments
+}
+
+// What processing reports whole carries the namespaces it needs, also from alternatives that were not selected and elements that were ignored inside it.
+#[test]
+fn reported_fragments_keep_their_meaning_in_a_new_context() {
+    let limits = Limits::default();
+    let mut checked = 0;
+    for (name, text, config) in scenarios()
+        .into_iter()
+        .map(|(text, config)| ("scenario".to_owned(), text, config))
+        .chain([
+            (
+                "word-shapes.xml".to_owned(),
+                sample("word-shapes.xml"),
+                ooxml(),
+            ),
+            (
+                "word-shapes.xml".to_owned(),
+                sample("word-shapes.xml"),
+                ooxml().understand(KnownNamespace::Wps),
+            ),
+        ])
+    {
+        for (index, fragment) in reported_fragments(&text, &config).iter().enumerate() {
+            let before = canonical(&fragment.to_standalone());
+            let mut writer = Writer::new();
+            writer
+                .start(QName::new(Some("urn:hostile"), "hostile", "root"))
+                .unwrap();
+            for prefix in [
+                "", "mc", "w", "wp", "wps", "wpg", "a", "v", "o", "w14", "wp14", "n1", "n2", "n3",
+                "p", "q", "v2", "v3", "mc2", "i",
+            ] {
+                writer
+                    .declare(prefix, &format!("urn:hostile:{prefix}"))
+                    .unwrap();
+            }
+            writer.fragment(fragment).unwrap();
+            writer.end().unwrap();
+            let written = writer.finish().unwrap();
+            let source = Source::new(written.as_bytes(), &limits).unwrap();
+            let mut reader = Reader::new(&source, &limits);
+            reader.next_event().unwrap();
+            reader.next_event().unwrap();
+            let moved = reader.capture().unwrap();
+            assert_eq!(
+                first_difference(&before, &canonical(&moved.to_standalone())),
+                None,
+                "{name}, fragment {index}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 30, "only {checked} fragments");
 }
 
 #[test]

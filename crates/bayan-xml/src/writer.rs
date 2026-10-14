@@ -1,15 +1,14 @@
 //! The writer: deterministic, well-formed XML with namespace management, and verbatim fragments.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::WriteError;
 use crate::chars::{find_invalid_char, is_name, is_ncname, is_space};
 use crate::escape;
 use crate::event::{Name, Space, StartTag};
 use crate::fragment::Fragment;
 use crate::namespace::KnownNamespace;
 use crate::reader::{XML_NAMESPACE, XMLNS_NAMESPACE};
-use crate::{Limits, WriteError};
 
 /// A name to write: its namespace (`None` for none), the prefix to write it with, and its local part.
 ///
@@ -361,11 +360,13 @@ impl Writer {
     /// Writes `tag`, as an empty-element tag if `empty`, after the checks that need the whole tag.
     fn write_start_tag(&mut self, tag: &PendingTag, empty: bool) -> Result<(), WriteError> {
         let mark = self.bindings.len();
+        // Whether the tag already declares `prefix`: its innermost binding is one of the tag's own.
         let declared_here = |writer: &Writer, prefix: &str| {
             writer
-                .bindings
-                .get(mark..)
-                .is_some_and(|own| own.iter().any(|(bound, _)| bound == prefix))
+                .by_prefix
+                .get(prefix)
+                .and_then(|stack| stack.last())
+                .is_some_and(|&index| index >= mark)
         };
         for (prefix, uri) in &tag.declarations {
             if declared_here(self, prefix) {
@@ -645,51 +646,43 @@ impl Writer {
 
     /// Writes `fragment`, an element with its context, as content or as the root element.
     ///
-    /// Where every binding of the fragment's context, its default namespace and its white space mode are the same as where the writer is, the fragment is written verbatim, byte for byte. Otherwise its text is written with declarations added to its start tag for the namespaces it uses whose binding differs here, and `xml:space` if the white space mode differs and the element does not set it; finding what it uses reads the fragment again, within `limits`.
+    /// The fragment's text is written verbatim, byte for byte, where every binding of its context that it uses ([`Fragment::needed_namespaces`]) and its white space mode are the same as where the writer is. Elsewhere, declarations are added to its start tag for the namespaces it uses whose binding differs here, and `xml:space` if the white space mode differs and the element does not set it. This takes time in proportion to the fragment's text and the bindings it uses, not to its context.
     ///
     /// # Errors
     ///
-    /// [`WriteError::ContentOutsideRoot`] after the root element; [`WriteError::Fragment`] if reading the fragment again fails (it cannot for fragments from [`Reader::capture`](crate::Reader::capture) or [`Fragment::new`] read within the same limits). Writing an open start tag first can fail as [`Writer::end`] does.
-    pub fn fragment(&mut self, fragment: &Fragment<'_>, limits: &Limits) -> Result<(), WriteError> {
+    /// [`WriteError::ContentOutsideRoot`] after the root element. Writing an open start tag first can fail as [`Writer::end`] does.
+    pub fn fragment(&mut self, fragment: &Fragment<'_>) -> Result<(), WriteError> {
         if self.phase == Phase::Epilog {
             return Err(WriteError::ContentOutsideRoot);
         }
         self.flush()?;
-        let context = fragment.context();
-        let same = context
-            .bindings()
-            .iter()
-            .all(|(prefix, uri)| self.bound(prefix).unwrap_or_default() == *uri)
-            && self.bound("").unwrap_or_default() == context.uri_of("").unwrap_or_default()
-            && self.space() == context.space();
-        let text = if same {
-            Cow::Borrowed(fragment.text())
+        let mut added = String::new();
+        for binding in fragment.uses.iter() {
+            if self.bound(&binding.prefix).unwrap_or_default() == &*binding.uri {
+                continue;
+            }
+            if binding.prefix.is_empty() {
+                added.push_str(" xmlns=\"");
+            } else {
+                added.push_str(" xmlns:");
+                added.push_str(&binding.prefix);
+                added.push_str("=\"");
+            }
+            escape::attribute(&binding.uri, &mut added);
+            added.push('"');
+        }
+        let space = fragment.context.space();
+        if !fragment.sets_space && self.space() != space {
+            added.push_str(match space {
+                Space::Preserve => " xml:space=\"preserve\"",
+                Space::Default => " xml:space=\"default\"",
+            });
+        }
+        if added.is_empty() {
+            self.out.push_str(fragment.text());
         } else {
-            let (needed, sets_space) = fragment.analyse(limits).map_err(WriteError::Fragment)?;
-            let mut added = String::new();
-            for (prefix, uri) in &needed {
-                if self.bound(prefix).unwrap_or_default() == uri {
-                    continue;
-                }
-                if prefix.is_empty() {
-                    added.push_str(" xmlns=\"");
-                } else {
-                    added.push_str(" xmlns:");
-                    added.push_str(prefix);
-                    added.push_str("=\"");
-                }
-                escape::attribute(uri, &mut added);
-                added.push('"');
-            }
-            if !sets_space && self.space() != context.space() {
-                added.push_str(match context.space() {
-                    Space::Preserve => " xml:space=\"preserve\"",
-                    Space::Default => " xml:space=\"default\"",
-                });
-            }
-            Cow::Owned(fragment.with_inserted(&added))
-        };
-        self.out.push_str(&text);
+            self.out.push_str(&fragment.with_inserted(&added));
+        }
         if self.elements.is_empty() {
             self.phase = Phase::Epilog;
         }

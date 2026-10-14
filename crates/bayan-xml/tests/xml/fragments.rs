@@ -26,17 +26,17 @@ fn capture(text: &str, local: &str, occurrence: usize) -> Fragment<'static> {
 }
 
 fn bindings(context: &Context) -> Vec<(String, String)> {
-    context
-        .bindings()
-        .into_iter()
-        .map(|(prefix, uri)| (prefix.to_owned(), uri.to_owned()))
-        .collect()
+    owned(&context.bindings())
 }
 
-fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+fn owned(list: &[(&str, &str)]) -> Vec<(String, String)> {
     list.iter()
         .map(|(prefix, uri)| ((*prefix).to_owned(), (*uri).to_owned()))
         .collect()
+}
+
+fn pairs<'s>(list: &[(&'s str, &'s str)]) -> Vec<(&'s str, &'s str)> {
+    list.to_vec()
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn records_the_context_of_the_element() {
     let fragment = capture(DOCUMENT, "p", 0);
     assert_eq!(
         bindings(fragment.context()),
-        pairs(&[
+        owned(&[
             ("", "urn:default"),
             ("mc", "urn:mc"),
             ("w", "urn:w"),
@@ -91,7 +91,7 @@ fn records_the_context_of_the_element() {
     assert_eq!(fragment.context().space(), Space::Preserve);
     assert_eq!(
         bindings(fragment.context()),
-        pairs(&[("", ""), ("p", "urn:inner")])
+        owned(&[("", ""), ("p", "urn:inner")])
     );
 }
 
@@ -147,11 +147,10 @@ fn capture_needs_a_start_tag() {
 
 #[test]
 fn finds_the_namespaces_a_fragment_needs() {
-    let limits = Limits::default();
     let fragment = capture(DOCUMENT, "p", 0);
     // w and w14 for names; not mc or the default namespace, which nothing in it uses.
     assert_eq!(
-        fragment.needed_namespaces(&limits).unwrap(),
+        fragment.needed_namespaces(),
         pairs(&[("w", "urn:w"), ("w14", "urn:w14")])
     );
     // Unprefixed element names need the default namespace, and an element without one needs none to be in force.
@@ -161,14 +160,11 @@ fn finds_the_namespaces_a_fragment_needs() {
         0,
     );
     assert_eq!(
-        fragment.needed_namespaces(&limits).unwrap(),
+        fragment.needed_namespaces(),
         pairs(&[("", "urn:d"), ("p", "urn:p")])
     );
     let fragment = capture("<r><a/></r>", "a", 0);
-    assert_eq!(
-        fragment.needed_namespaces(&limits).unwrap(),
-        pairs(&[("", "")])
-    );
+    assert_eq!(fragment.needed_namespaces(), pairs(&[("", "")]));
     // Prefixes in Markup Compatibility attributes and in xsi:type are uses too; declarations inside the fragment and the xml prefix are not needed.
     let fragment = capture(
         "<r xmlns:w=\"urn:w\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:v1=\"urn:v1\" xmlns:v2=\"urn:v2\" xmlns:v3=\"urn:v3\" xmlns:v4=\"urn:v4\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:t=\"urn:t\" xmlns:n=\"urn:n\"><w:a mc:Ignorable=\"v1 v2\" mc:ProcessContent=\"v2:x v1:*\"><mc:AlternateContent><mc:Choice Requires=\"v3\"><w:b xsi:type=\"t:typed\" xml:lang=\"en\" xmlns:n=\"urn:inner\" n:c=\"1\"/></mc:Choice></mc:AlternateContent></w:a></r>",
@@ -176,7 +172,7 @@ fn finds_the_namespaces_a_fragment_needs() {
         0,
     );
     assert_eq!(
-        fragment.needed_namespaces(&limits).unwrap(),
+        fragment.needed_namespaces(),
         pairs(&[
             (
                 "mc",
@@ -194,9 +190,8 @@ fn finds_the_namespaces_a_fragment_needs() {
 
 #[test]
 fn makes_a_standalone_element() {
-    let limits = Limits::default();
     let fragment = capture(DOCUMENT, "p", 0);
-    let standalone = fragment.to_standalone(&limits).unwrap();
+    let standalone = fragment.to_standalone();
     assert_eq!(
         standalone,
         "<w:p xmlns:w=\"urn:w\" xmlns:w14=\"urn:w14\" w14:paraId=\"1\"><w:r><w:t xml:space=\"preserve\"> a </w:t></w:r><w14:x><w14:y/></w14:x><w:r/></w:p>"
@@ -207,23 +202,17 @@ fn makes_a_standalone_element() {
         "b",
         0,
     );
-    assert_eq!(
-        fragment.to_standalone(&limits).unwrap(),
-        "<b xml:space=\"preserve\">  </b>"
-    );
+    assert_eq!(fragment.to_standalone(), "<b xml:space=\"preserve\">  </b>");
     let fragment = capture(
         "<a xml:space=\"preserve\"><b>  </b><c xml:space=\"default\"/></a>",
         "c",
         0,
     );
-    assert_eq!(
-        fragment.to_standalone(&limits).unwrap(),
-        "<c xml:space=\"default\"/>"
-    );
+    assert_eq!(fragment.to_standalone(), "<c xml:space=\"default\"/>");
     // Namespace names are escaped as attribute values.
     let fragment = capture("<r xmlns:p=\"urn:a&amp;b&quot;c\"><p:x/></r>", "x", 0);
     assert_eq!(
-        fragment.to_standalone(&limits).unwrap(),
+        fragment.to_standalone(),
         "<p:x xmlns:p=\"urn:a&amp;b&quot;c\"/>"
     );
 }

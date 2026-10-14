@@ -244,8 +244,6 @@ pub enum WriteError {
     MisplacedDeclaration,
     /// `finish` was called before every element was closed, or before a root element was written.
     Unfinished,
-    /// A fragment given to [`Writer::fragment`](crate::Writer::fragment) could not be read again with its context.
-    Fragment(Error),
 }
 
 impl fmt::Display for WriteError {
@@ -270,7 +268,6 @@ impl fmt::Display for WriteError {
             WriteError::ContentOutsideRoot => f.write_str("content outside the root element"),
             WriteError::MisplacedDeclaration => f.write_str("the XML declaration must come first"),
             WriteError::Unfinished => f.write_str("document not finished"),
-            WriteError::Fragment(error) => write!(f, "unreadable fragment: {error}"),
         }
     }
 }
@@ -294,8 +291,8 @@ mod tests {
             "a namespace that must be understood is not at byte 7"
         );
         assert_eq!(
-            WriteError::Fragment(Error::new(3, ErrorKind::UnexpectedEnd)).to_string(),
-            "unreadable fragment: unexpected end of input at byte 3"
+            WriteError::PrefixConflict.to_string(),
+            "prefix bound to two namespaces"
         );
     }
 }

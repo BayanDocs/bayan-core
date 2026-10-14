@@ -11,7 +11,7 @@ use crate::chars::{is_ncname, is_space};
 use crate::event::{
     CData, Comment, EndTag, Event, Name, NamespaceId, ProcessingInstruction, StartTag, Text,
 };
-use crate::fragment::{Context, Fragment};
+use crate::fragment::{Context, Fragment, Uses};
 use crate::namespace::KnownNamespace;
 use crate::reader::XML_ID;
 use crate::{CompatibilityError, Error, ErrorKind, Limits, Reader, Source};
@@ -259,6 +259,8 @@ pub struct McReader<'a> {
     undo: Vec<Undo>,
     frames: Vec<Frame>,
     kinds: Vec<AttributeKind>,
+    /// For each open `mc:AlternateContent`, innermost last: its depth, and the bindings declared outside it that its content uses, which its fragment needs.
+    alternates: Vec<(usize, Uses)>,
     /// The namespace, local name and whether it is a declaration of each attribute of the current start tag, kept to save allocations.
     scratch: Vec<(Option<NamespaceId>, &'a str, bool)>,
     current: Current<'a>,
@@ -302,6 +304,7 @@ impl<'a> McReader<'a> {
             undo: Vec::new(),
             frames: Vec::new(),
             kinds: Vec::new(),
+            alternates: Vec::new(),
             scratch: Vec::new(),
             current: Current::Nothing,
             done: false,
@@ -347,10 +350,16 @@ impl<'a> McReader<'a> {
         ) {
             return Err(Error::new(self.reader.offset(), ErrorKind::NotAtStartTag));
         }
+        if matches!(self.current, Current::AlternateStart) {
+            self.alternates.pop();
+        }
         self.current = Current::Nothing;
         self.pop_frame();
         match self.reader.capture() {
-            Ok(fragment) => Ok(fragment),
+            Ok(fragment) => {
+                self.note_captured(&fragment);
+                Ok(fragment)
+            }
             Err(error) => {
                 self.done = true;
                 Err(error)
@@ -439,6 +448,11 @@ impl<'a> McReader<'a> {
                 ..
             })
         );
+        if matches!(read, Read::Start)
+            && let Some((depth, uses)) = self.alternates.last_mut()
+        {
+            self.reader.note_uses(*depth, uses);
+        }
         match read {
             Read::Start if inside_alternatives => self.alternative(),
             Read::Start => self.start(),
@@ -532,6 +546,7 @@ impl<'a> McReader<'a> {
             let preserve = self.has_pair(Table::PreserveElements, id, local);
             self.undo_to(mark);
             let fragment = self.reader.capture()?;
+            self.note_captured(&fragment);
             self.current = Current::Ignored(IgnoredElement { fragment, preserve });
             return Ok(Step::Event);
         }
@@ -551,6 +566,7 @@ impl<'a> McReader<'a> {
             return Ok(Step::Nothing);
         };
         let start = element.span.start;
+        let depth = element.depth;
         let name_end = 1 + element.qname.len();
         let mark = self.undo.len();
         let declarations = self.read_declarations()?;
@@ -559,6 +575,9 @@ impl<'a> McReader<'a> {
         self.check_must_understand(&declarations)?;
         self.output_kinds();
         let context = self.reader.context();
+        let mut uses = Uses::new();
+        self.reader.note_uses(depth, &mut uses);
+        self.alternates.push((depth, uses));
         self.push_frame(
             FrameKind::Alternate(Alternatives {
                 start,
@@ -608,7 +627,8 @@ impl<'a> McReader<'a> {
                     ));
                 }
                 self.undo_to(mark);
-                self.reader.capture()?;
+                let fragment = self.reader.capture()?;
+                self.note_captured(&fragment);
                 return Ok(Step::Nothing);
             }
         };
@@ -651,7 +671,8 @@ impl<'a> McReader<'a> {
         } else {
             // Nothing inside an alternative that is not selected is processed (Part 3 §9.4).
             self.undo_to(mark);
-            self.reader.capture()?;
+            let fragment = self.reader.capture()?;
+            self.note_captured(&fragment);
         }
         Ok(Step::Nothing)
     }
@@ -683,16 +704,43 @@ impl<'a> McReader<'a> {
                     Some(Event::End(tag)) => tag.span().end,
                     _ => return Ok(Step::Nothing),
                 };
-                let fragment = Fragment {
-                    text: Cow::Borrowed(self.reader.slice_of(&(alternatives.start..end))),
-                    context: alternatives.context,
-                    name_end: alternatives.name_end,
-                };
+                let uses = self
+                    .alternates
+                    .pop()
+                    .map(|(_, uses)| uses)
+                    .unwrap_or_default();
+                // What it uses from outside the enclosing alternate content, the enclosing one uses too.
+                if let Some((depth, outer)) = self.alternates.last_mut() {
+                    for (prefix, (uri, binding)) in &uses {
+                        if *binding < *depth && !outer.contains_key(prefix) {
+                            outer.insert(prefix.clone(), (uri.clone(), *binding));
+                        }
+                    }
+                }
+                let fragment = Fragment::from_parts(
+                    Cow::Borrowed(self.reader.slice_of(&(alternatives.start..end))),
+                    alternatives.context,
+                    alternatives.name_end,
+                    &uses,
+                    false,
+                );
                 self.current = Current::AlternateEnd(AlternateContent {
                     fragment,
                     selection: alternatives.selection.unwrap_or(Selection::Nothing),
                 });
                 Ok(Step::Event)
+            }
+        }
+    }
+
+    /// Adds what a fragment captured inside alternate content uses from outside it to what the innermost one uses.
+    fn note_captured(&mut self, fragment: &Fragment<'a>) {
+        let Some((depth, uses)) = self.alternates.last_mut() else {
+            return;
+        };
+        for binding in fragment.uses.iter() {
+            if binding.depth < *depth && !uses.contains_key(&binding.prefix) {
+                uses.insert(binding.prefix.clone(), (binding.uri.clone(), binding.depth));
             }
         }
     }

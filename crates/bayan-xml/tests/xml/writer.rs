@@ -539,7 +539,6 @@ const DOCUMENT: &str = "<w:document xmlns:w=\"urn:w\" xmlns:w14=\"urn:w14\"><w:b
 
 #[test]
 fn writes_fragments_verbatim_where_their_context_holds() {
-    let limits = Limits::default();
     let paragraph = capture(DOCUMENT, "p");
     let mut writer = Writer::new();
     writer
@@ -549,7 +548,7 @@ fn writes_fragments_verbatim_where_their_context_holds() {
     writer
         .start(QName::new(Some("urn:w"), "w", "body"))
         .unwrap();
-    writer.fragment(&paragraph, &limits).unwrap();
+    writer.fragment(&paragraph).unwrap();
     writer.end().unwrap();
     writer.end().unwrap();
     assert_eq!(writer.finish().unwrap(), DOCUMENT);
@@ -557,11 +556,10 @@ fn writes_fragments_verbatim_where_their_context_holds() {
 
 #[test]
 fn adds_only_the_declarations_a_fragment_lacks() {
-    let limits = Limits::default();
     let paragraph = capture(DOCUMENT, "p");
     // Into an empty document: everything it uses.
     let mut writer = Writer::new();
-    writer.fragment(&paragraph, &limits).unwrap();
+    writer.fragment(&paragraph).unwrap();
     assert_eq!(
         writer.finish().unwrap(),
         "<w:p xmlns:w=\"urn:w\" xmlns:w14=\"urn:w14\" w14:paraId=\"1\"><w:r><w:t>x</w:t></w:r></w:p>"
@@ -573,7 +571,7 @@ fn adds_only_the_declarations_a_fragment_lacks() {
         .unwrap();
     writer.declare("w14", "urn:other").unwrap();
     writer.declare("x", "urn:unused").unwrap();
-    writer.fragment(&paragraph, &limits).unwrap();
+    writer.fragment(&paragraph).unwrap();
     writer.end().unwrap();
     assert_eq!(
         writer.finish().unwrap(),
@@ -583,11 +581,10 @@ fn adds_only_the_declarations_a_fragment_lacks() {
 
 #[test]
 fn keeps_unqualified_fragments_out_of_a_default_namespace() {
-    let limits = Limits::default();
     let fragment = capture("<r><a><b/></a></r>", "a");
     let mut writer = Writer::new();
     writer.start(QName::new(Some("urn:d"), "", "root")).unwrap();
-    writer.fragment(&fragment, &limits).unwrap();
+    writer.fragment(&fragment).unwrap();
     writer.end().unwrap();
     assert_eq!(
         writer.finish().unwrap(),
@@ -597,11 +594,10 @@ fn keeps_unqualified_fragments_out_of_a_default_namespace() {
 
 #[test]
 fn carries_the_white_space_mode_of_a_fragment() {
-    let limits = Limits::default();
     let fragment = capture("<r xml:space=\"preserve\"><a> x </a></r>", "a");
     let mut writer = Writer::new();
     writer.start(QName::unqualified("r")).unwrap();
-    writer.fragment(&fragment, &limits).unwrap();
+    writer.fragment(&fragment).unwrap();
     writer.end().unwrap();
     assert_eq!(
         writer.finish().unwrap(),
@@ -613,7 +609,7 @@ fn carries_the_white_space_mode_of_a_fragment() {
     writer
         .attribute(QName::new(Some(XML), "xml", "space"), "preserve")
         .unwrap();
-    writer.fragment(&fragment, &limits).unwrap();
+    writer.fragment(&fragment).unwrap();
     writer.end().unwrap();
     assert_eq!(
         writer.finish().unwrap(),

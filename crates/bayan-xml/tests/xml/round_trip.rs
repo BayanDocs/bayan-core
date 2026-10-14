@@ -46,7 +46,7 @@ fn rewrite(bytes: &[u8], depth: usize) -> String {
         };
         if capture {
             let fragment = reader.capture().unwrap();
-            writer.fragment(&fragment, &limits).unwrap();
+            writer.fragment(&fragment).unwrap();
         }
     }
     writer.finish().unwrap()
@@ -144,14 +144,13 @@ const HOSTILE_PREFIXES: &[&str] = &[
 
 #[test]
 fn fragments_keep_their_meaning_in_a_new_context() {
-    let limits = Limits::default();
     for (name, bytes) in &all_parts() {
         for depth in 2..=3 {
             // At most about 40 elements of each depth, spread over the part.
             let fragments = fragments_at(bytes, depth);
             let step = (fragments.len() / 40).max(1);
             for (index, fragment) in fragments.iter().enumerate().step_by(step) {
-                let before = canonical(fragment.to_standalone(&limits).unwrap().as_bytes());
+                let before = canonical(fragment.to_standalone().as_bytes());
                 for preserve in [false, true] {
                     let mut writer = Writer::new();
                     writer
@@ -167,12 +166,12 @@ fn fragments_keep_their_meaning_in_a_new_context() {
                             .attribute(QName::new(Some(XML), "xml", "space"), "preserve")
                             .unwrap();
                     }
-                    writer.fragment(fragment, &limits).unwrap();
+                    writer.fragment(fragment).unwrap();
                     writer.end().unwrap();
                     let written = writer.finish().unwrap();
                     let moved = fragments_at(written.as_bytes(), 2);
                     assert_eq!(moved.len(), 1, "{name}, depth {depth}, element {index}");
-                    let after = canonical(moved[0].to_standalone(&limits).unwrap().as_bytes());
+                    let after = canonical(moved[0].to_standalone().as_bytes());
                     assert_eq!(
                         first_difference(&before, &after),
                         None,

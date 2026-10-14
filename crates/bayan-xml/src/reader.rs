@@ -14,7 +14,7 @@ use crate::event::{
     AttributeData, CData, Comment, ElementData, EndTag, Event, NamespaceId, NamespaceTable,
     ProcessingInstruction, Space, StartTag, Text,
 };
-use crate::fragment::{Context, ContextNode, Fragment};
+use crate::fragment::{Context, ContextNode, Fragment, Uses};
 use crate::markup;
 use crate::namespace::KnownNamespace;
 use crate::{Error, ErrorKind, Limits, Source};
@@ -346,28 +346,32 @@ impl<'a> Reader<'a> {
         let depth = element.depth;
         let name_end = 1 + element.qname.len();
         let context = self.context();
+        let mut uses = Uses::new();
+        self.note_uses(depth, &mut uses);
+        let sets_space = self.sets_space();
         loop {
             if !self.advance()? {
                 return Err(Error::new(self.text.len(), ErrorKind::UnexpectedEnd));
             }
-            if let Current::End(element, span) = &self.current
-                && element.depth == depth
-            {
-                return Ok(Fragment {
-                    text: Cow::Borrowed(self.slice(&(start..span.end))),
-                    context,
-                    name_end,
-                });
+            match &self.current {
+                Current::End(element, span) if element.depth == depth => {
+                    let text = Cow::Borrowed(self.slice(&(start..span.end)));
+                    return Ok(Fragment::from_parts(
+                        text, context, name_end, &uses, sets_space,
+                    ));
+                }
+                Current::Start(_) => self.note_uses(depth, &mut uses),
+                _ => {}
             }
         }
     }
 
-    /// For [`Fragment::analyse`]: if the current event is a start tag, adds to `needed` the bindings of the initial context that it uses, and returns whether it is the root element and sets `xml:space`.
-    pub(crate) fn note_uses(&self, needed: &mut BTreeMap<String, String>) -> Option<bool> {
+    /// Adds to `uses` the bindings that the current start tag (if it is one) uses and that are declared outside the element at depth `root_depth`: by an ancestor of it, or in the context the reader was given. Uses are the prefixes of the element's and attributes' names, those that its Markup Compatibility attributes (and `Requires` on `mc:Choice`) list, and the prefix of the qualified name in `xsi:type`; an unprefixed element name, or `xsi:type` value, uses the default namespace, or the absence of one (`""` bound to `""`).
+    pub(crate) fn note_uses(&self, root_depth: usize, uses: &mut Uses) {
         let Current::Start(element) = &self.current else {
-            return None;
+            return;
         };
-        self.note_prefix(element.prefix, needed);
+        self.note_prefix(element.prefix, root_depth, uses);
         let compatibility = KnownNamespace::MarkupCompatibility.uri();
         let instance = KnownNamespace::XmlSchemaInstance.uri();
         let choice = element.local == "Choice"
@@ -375,13 +379,12 @@ impl<'a> Reader<'a> {
                 .namespace
                 .and_then(|id| self.namespaces.get(id))
                 .is_some_and(|namespace| namespace.uri() == compatibility);
-        let mut sets_space = false;
         for attribute in &self.attributes {
             if attribute.declaration {
                 continue;
             }
             if !attribute.prefix.is_empty() {
-                self.note_prefix(attribute.prefix, needed);
+                self.note_prefix(attribute.prefix, root_depth, uses);
             }
             let uri = attribute
                 .namespace
@@ -390,51 +393,57 @@ impl<'a> Reader<'a> {
             let tokens = attribute.value.split_ascii_whitespace();
             match (uri, attribute.local) {
                 (Some(uri), "Ignorable" | "MustUnderstand") if uri == compatibility => {
-                    tokens.for_each(|prefix| self.note_prefix(prefix, needed));
+                    tokens.for_each(|prefix| self.note_prefix(prefix, root_depth, uses));
                 }
                 (None, "Requires") if choice => {
-                    tokens.for_each(|prefix| self.note_prefix(prefix, needed));
+                    tokens.for_each(|prefix| self.note_prefix(prefix, root_depth, uses));
                 }
                 (Some(uri), "ProcessContent" | "PreserveElements" | "PreserveAttributes")
                     if uri == compatibility =>
                 {
                     for token in tokens {
                         if let Some((prefix, _)) = token.split_once(':') {
-                            self.note_prefix(prefix, needed);
+                            self.note_prefix(prefix, root_depth, uses);
                         }
                     }
                 }
                 (Some(uri), "type") if uri == instance => {
-                    if let Some((prefix, _)) =
-                        split_qname(attribute.value.trim_matches(|c| c == ' '))
-                    {
-                        self.note_prefix(prefix, needed);
+                    let value = attribute
+                        .value
+                        .trim_matches(|c: char| u8::try_from(c).is_ok_and(is_space));
+                    if let Some((prefix, _)) = split_qname(value) {
+                        self.note_prefix(prefix, root_depth, uses);
                     }
                 }
-                (Some(uri), "space") if uri == XML_NAMESPACE => sets_space = true,
                 _ => {}
             }
         }
-        Some(sets_space && element.depth == 1)
     }
 
-    /// Adds `prefix` to `needed` if it is bound by the initial context (or, for `""`, if no default namespace is declared inside the fragment).
-    fn note_prefix(&self, prefix: &str, needed: &mut BTreeMap<String, String>) {
-        if prefix == "xml" {
+    /// Whether the current start tag has an `xml:space` attribute.
+    pub(crate) fn sets_space(&self) -> bool {
+        matches!(self.current, Current::Start(_))
+            && self
+                .attributes
+                .iter()
+                .any(|attribute| attribute.namespace == Some(XML_ID) && attribute.local == "space")
+    }
+
+    /// Adds `prefix` to `uses` if its binding is declared outside the element at depth `root_depth` (or, for `""`, if no default namespace is declared at all).
+    fn note_prefix(&self, prefix: &str, root_depth: usize, uses: &mut Uses) {
+        if prefix == "xml" || uses.contains_key(prefix) {
             return;
         }
         match self.scope.resolve(prefix) {
             None if prefix.is_empty() => {
-                needed.entry(String::new()).or_default();
+                uses.insert(Box::from(""), (Box::from(""), 0));
             }
-            Some(binding) if binding.depth == 0 => {
+            Some(binding) if binding.depth < root_depth => {
                 let uri = binding
                     .namespace
                     .and_then(|id| self.namespaces.get(id))
                     .map_or("", |namespace| namespace.uri());
-                needed
-                    .entry(prefix.to_owned())
-                    .or_insert_with(|| uri.to_owned());
+                uses.insert(Box::from(prefix), (Box::from(uri), binding.depth));
             }
             _ => {}
         }

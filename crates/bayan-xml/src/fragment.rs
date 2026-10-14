@@ -80,15 +80,33 @@ impl Context {
     }
 }
 
+/// The bindings declared outside an element that its start tags use, by prefix: the namespace name (`""` for none) and the depth of the element that declared the binding (0 for a context, or for the absence of a default namespace).
+pub(crate) type Uses = BTreeMap<Box<str>, (Box<str>, usize)>;
+
+/// A binding declared outside a fragment that the fragment uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Use {
+    /// The prefix, `""` for the default namespace.
+    pub(crate) prefix: Box<str>,
+    /// The namespace name, `""` for no default namespace.
+    pub(crate) uri: Box<str>,
+    /// The depth of the element that declared it; 0 for a context, or for no default namespace at all.
+    pub(crate) depth: usize,
+}
+
 /// An element of a document as it was written, from the `<` of its start tag to the `>` of its end tag, with the [`Context`] it was in.
 ///
-/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context.
+/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
 #[derive(Clone, Debug)]
 pub struct Fragment<'a> {
     pub(crate) text: Cow<'a, str>,
     pub(crate) context: Context,
     /// Where, in the text, the name of the root element ends: where declarations go.
     pub(crate) name_end: usize,
+    /// The bindings of the context that the fragment uses, sorted by prefix.
+    pub(crate) uses: Arc<[Use]>,
+    /// Whether the root element has an `xml:space` attribute.
+    pub(crate) sets_space: bool,
 }
 
 impl<'a> Fragment<'a> {
@@ -103,12 +121,34 @@ impl<'a> Fragment<'a> {
         limits: &Limits,
     ) -> Result<Fragment<'a>, Error> {
         let text = text.into();
-        let name_end = check_fragment(&text, &context, limits)?;
-        Ok(Fragment {
+        let (name_end, uses, sets_space) = check_fragment(&text, &context, limits)?;
+        Ok(Fragment::from_parts(
+            text, context, name_end, &uses, sets_space,
+        ))
+    }
+
+    /// A fragment from its parts, with `uses` as the reader found them.
+    pub(crate) fn from_parts(
+        text: Cow<'a, str>,
+        context: Context,
+        name_end: usize,
+        uses: &Uses,
+        sets_space: bool,
+    ) -> Fragment<'a> {
+        Fragment {
             text,
             context,
             name_end,
-        })
+            uses: uses
+                .iter()
+                .map(|(prefix, (uri, depth))| Use {
+                    prefix: prefix.clone(),
+                    uri: uri.clone(),
+                    depth: *depth,
+                })
+                .collect(),
+            sets_space,
+        }
     }
 
     /// The element's text, exactly as it was written.
@@ -127,45 +167,41 @@ impl<'a> Fragment<'a> {
             text: Cow::Owned(self.text.into_owned()),
             context: self.context,
             name_end: self.name_end,
+            uses: self.uses,
+            sets_space: self.sets_space,
         }
     }
 
     /// The bindings of the context that the fragment uses, as (prefix, namespace name) pairs sorted by prefix: the prefixes of its element and attribute names, those that its Markup Compatibility attributes (and the `Requires` attribute of `mc:Choice`) list, and the prefix of the qualified name in an `xsi:type` attribute, wherever they are not declared inside the fragment. `("", "")` means that unprefixed element names in the fragment need no default namespace to be in force. Other qualified names in attribute values or text are not recognized, as in Exclusive XML Canonicalization.
-    ///
-    /// # Errors
-    ///
-    /// The first problem [`Reader`] finds in the fragment (none, for a fragment that [`Reader::capture`] made).
-    pub fn needed_namespaces(&self, limits: &Limits) -> Result<Vec<(String, String)>, Error> {
-        Ok(self.analyse(limits)?.0.into_iter().collect())
+    pub fn needed_namespaces(&self) -> Vec<(&str, &str)> {
+        self.uses
+            .iter()
+            .map(|binding| (&*binding.prefix, &*binding.uri))
+            .collect()
     }
 
     /// The fragment as a standalone element: its text, with the declarations of the namespaces it needs from its context, and `xml:space="preserve"` if that was in force and the element does not set `xml:space` itself, added to its start tag.
-    ///
-    /// # Errors
-    ///
-    /// The first problem [`Reader`] finds in the fragment (none, for a fragment that [`Reader::capture`] made).
-    pub fn to_standalone(&self, limits: &Limits) -> Result<String, Error> {
-        let (needed, sets_space) = self.analyse(limits)?;
+    pub fn to_standalone(&self) -> String {
         let mut added = String::new();
-        for (prefix, uri) in &needed {
-            if prefix.is_empty() {
-                if !uri.is_empty() {
+        for binding in self.uses.iter() {
+            if binding.prefix.is_empty() {
+                if !binding.uri.is_empty() {
                     added.push_str(" xmlns=\"");
-                    crate::escape::attribute(uri, &mut added);
+                    crate::escape::attribute(&binding.uri, &mut added);
                     added.push('"');
                 }
             } else {
                 added.push_str(" xmlns:");
-                added.push_str(prefix);
+                added.push_str(&binding.prefix);
                 added.push_str("=\"");
-                crate::escape::attribute(uri, &mut added);
+                crate::escape::attribute(&binding.uri, &mut added);
                 added.push('"');
             }
         }
-        if self.context.space == Space::Preserve && !sets_space {
+        if self.context.space == Space::Preserve && !self.sets_space {
             added.push_str(" xml:space=\"preserve\"");
         }
-        Ok(self.with_inserted(&added))
+        self.with_inserted(&added)
     }
 
     /// The text with `added` inserted after the root element's name.
@@ -177,27 +213,14 @@ impl<'a> Fragment<'a> {
         out.push_str(tail);
         out
     }
-
-    /// The namespaces the fragment needs from its context, and whether its root element sets `xml:space`.
-    pub(crate) fn analyse(
-        &self,
-        limits: &Limits,
-    ) -> Result<(BTreeMap<String, String>, bool), Error> {
-        let source = Source::new(self.text.as_bytes(), limits)?;
-        let mut reader = Reader::with_context(&source, limits, &self.context)?;
-        let mut needed = BTreeMap::new();
-        let mut sets_space = false;
-        while reader.advance()? {
-            if let Some(root) = reader.note_uses(&mut needed) {
-                sets_space |= root;
-            }
-        }
-        Ok((needed, sets_space))
-    }
 }
 
-/// Checks that `text` is exactly one element, well-formed in `context`, and returns where the name of its start tag ends.
-fn check_fragment(text: &str, context: &Context, limits: &Limits) -> Result<usize, Error> {
+/// Checks that `text` is exactly one element, well-formed in `context`, and returns where the name of its start tag ends, the bindings of the context it uses, and whether its root element sets `xml:space`.
+fn check_fragment(
+    text: &str,
+    context: &Context,
+    limits: &Limits,
+) -> Result<(usize, Uses, bool), Error> {
     let outside = |offset| Error::new(offset, ErrorKind::ContentOutsideRoot);
     let source = Source::new(text.as_bytes(), limits)?;
     if source.declaration().is_some() {
@@ -208,7 +231,10 @@ fn check_fragment(text: &str, context: &Context, limits: &Limits) -> Result<usiz
         return Err(outside(0));
     }
     let mut reader = Reader::with_context(&source, limits, context)?;
-    let name_end = match reader.next_event()? {
+    if !reader.advance()? {
+        return Err(outside(0));
+    }
+    let name_end = match reader.event() {
         Some(Event::Start(tag)) if tag.span().start == 0 => {
             let name = tag.name();
             let colon = usize::from(!name.prefix().is_empty());
@@ -216,20 +242,26 @@ fn check_fragment(text: &str, context: &Context, limits: &Limits) -> Result<usiz
         }
         Some(_) | None => return Err(outside(0)),
     };
+    let sets_space = reader.sets_space();
+    let mut uses = Uses::new();
+    reader.note_uses(1, &mut uses);
     loop {
-        match reader.next_event()? {
+        if !reader.advance()? {
+            return Err(Error::new(text.len(), ErrorKind::UnexpectedEnd));
+        }
+        match reader.event() {
+            Some(Event::Start(_)) => reader.note_uses(1, &mut uses),
             Some(Event::End(tag)) if tag.depth() == 1 => {
                 if tag.span().end != text.len() {
                     return Err(outside(tag.span().end));
                 }
                 break;
             }
-            Some(_) => {}
-            None => return Err(Error::new(text.len(), ErrorKind::UnexpectedEnd)),
+            Some(_) | None => {}
         }
     }
-    if reader.next_event()?.is_some() {
+    if reader.advance()? {
         return Err(outside(text.len()));
     }
-    Ok(name_end)
+    Ok((name_end, uses, sets_space))
 }
