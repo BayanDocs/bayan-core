@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod canonical;
 mod chars;
 mod error;
 mod escape;
@@ -27,6 +28,7 @@ mod reader;
 mod source;
 mod writer;
 
+pub use canonical::canonicalize;
 pub use error::{CompatibilityError, Error, ErrorKind, WriteError};
 pub use event::{
     Attribute, Attributes, CData, Comment, EndTag, Event, Name, ProcessingInstruction, Space,

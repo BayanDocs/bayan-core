@@ -440,6 +440,12 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The namespace name that `prefix` (`""` for the default namespace) is bound to where the reader is (at a start tag, with the element's own declarations), or `None` if it is not bound to one.
+    pub(crate) fn namespace_of(&self, prefix: &str) -> Option<&str> {
+        let id = self.scope.resolve(prefix)?.namespace?;
+        self.namespaces.get(id).map(|namespace| namespace.uri())
+    }
+
     /// The next event, or `None` at the end of the document.
     ///
     /// # Errors

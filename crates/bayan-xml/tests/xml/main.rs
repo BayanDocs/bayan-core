@@ -4,9 +4,12 @@
 
 #![cfg(test)]
 
+mod canonical;
 mod common;
+mod documents;
 mod fragments;
 mod namespaces;
+mod round_trip;
 mod source;
 mod wellformed;
 mod writer;

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- A synthetic WordprocessingML document part in the Strict conformance class of ECMA-376, written for bayan-xml's tests (work package CORE-006): every vocabulary of the standard under its Strict namespace name, with Markup Compatibility and Microsoft's extension namespaces, which have one name only. -->
+<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships" xmlns:wp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing" xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" xmlns:pic="http://purl.oclc.org/ooxml/drawingml/picture" xmlns:m="http://purl.oclc.org/ooxml/officeDocument/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" w:conformance="strict">
+  <w:body>
+    <w:p w14:paraId="7A6B5C4D">
+      <w:pPr><w:jc w:val="start"/><w:ind w:start="720" w:hanging="360"/></w:pPr>
+      <w:r><w:rPr><w:b/><w:sz w:val="28"/></w:rPr><w:t xml:space="preserve">Strict </w:t></w:r>
+      <w:r>
+        <w:drawing>
+          <wp:inline distT="0" distB="0" distL="0" distR="0">
+            <wp:extent cx="914400" cy="914400"/>
+            <wp:docPr id="1" name="Picture 1" descr=""/>
+            <a:graphic>
+              <a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/picture">
+                <pic:pic>
+                  <pic:nvPicPr><pic:cNvPr id="1" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>
+                  <pic:blipFill><a:blip r:embed="rId4"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+                  <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+      <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+      <w:hyperlink r:id="rId5"><w:r><w:t>Strict link</w:t></w:r></w:hyperlink>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>
