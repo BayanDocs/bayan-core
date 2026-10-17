@@ -75,6 +75,8 @@ struct Uris {
     names: Vec<Arc<str>>,
     by_text: BTreeMap<Arc<str>, UriId>,
     by_address: BTreeMap<usize, (Arc<str>, UriId)>,
+    /// The name given as text last, which the next name given as text often is: the elements of a part are mostly in one namespace, and an attribute's namespace is often the one declared just before.
+    last_text: UriId,
 }
 
 impl Uris {
@@ -83,6 +85,7 @@ impl Uris {
             names: Vec::new(),
             by_text: BTreeMap::new(),
             by_address: BTreeMap::new(),
+            last_text: NO_NAMESPACE,
         };
         for uri in [
             "",
@@ -104,11 +107,18 @@ impl Uris {
 
     /// The position of `uri`, given as text, or [`WriteError::InvalidCharacter`] for a name XML cannot represent.
     fn of_text(&mut self, uri: &str) -> Result<UriId, WriteError> {
-        if let Some(&id) = self.by_text.get(uri) {
-            return Ok(id);
+        if self.text(self.last_text) == uri {
+            return Ok(self.last_text);
         }
-        check_characters(uri)?;
-        Ok(self.insert(Arc::from(uri)))
+        let id = match self.by_text.get(uri) {
+            Some(&id) => id,
+            None => {
+                check_characters(uri)?;
+                self.insert(Arc::from(uri))
+            }
+        };
+        self.last_text = id;
+        Ok(id)
     }
 
     /// The position of `uri`, the copy of a name that a reader shares, and checked.
@@ -804,8 +814,12 @@ impl Writer {
         self.flush()?;
         let mut added = String::new();
         for binding in fragment.uses.iter() {
-            let uri = self.uris.of_shared(&binding.uri);
-            if self.bound(&binding.prefix).unwrap_or(NO_NAMESPACE) == uri {
+            // A prefix bound to nothing here needs its declaration whatever its name, and only a default namespace that the fragment needs absent is absent already; a bound one is compared with the name the fragment uses.
+            let declared = match self.bound(&binding.prefix) {
+                None => binding.uri.is_empty(),
+                Some(uri) => uri == self.uris.of_shared(&binding.uri),
+            };
+            if declared {
                 continue;
             }
             if binding.prefix.is_empty() {
