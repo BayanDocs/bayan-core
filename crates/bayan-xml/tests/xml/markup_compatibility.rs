@@ -1120,7 +1120,7 @@ fn limits_the_length_of_lists() {
         max_compatibility_tokens: 3,
         ..Limits::default()
     };
-    let config = understanding(&["base"]);
+    let config = understanding(&["base", "a", "b", "c", "d"]);
     let run = |text: &str| {
         let text = document(text);
         let source = Source::new(text.as_bytes(), &limits).unwrap();
@@ -1134,18 +1134,36 @@ fn limits_the_length_of_lists() {
         }
     };
     let declarations = "xmlns='urn:t:base' xmlns:mc='MC' xmlns:a='urn:t:a' xmlns:b='urn:t:b' xmlns:c='urn:t:c' xmlns:d='urn:t:d'";
-    assert_eq!(
-        run(&format!("<root {declarations} mc:Ignorable='a b c'/>")),
-        Ok(())
-    );
-    let text = format!("<root {declarations} mc:Ignorable='a b c d'/>");
-    assert_eq!(
-        run(&text),
-        Err((
-            ErrorKind::TooManyCompatibilityTokens,
-            at(&text, "mc:Ignorable")
-        ))
-    );
+    // Every list, with as many names as allowed, one more, and many more: a list beyond the limit is refused where its attribute starts, however long it is.
+    let lists = [
+        ("mc:Ignorable", "a", ""),
+        ("mc:MustUnderstand", "a", ""),
+        ("mc:ProcessContent", "a:x", " mc:Ignorable='a'"),
+        ("mc:PreserveElements", "a:x", " mc:Ignorable='a'"),
+        ("mc:PreserveAttributes", "a:x", " mc:Ignorable='a'"),
+        ("Requires", "a", ""),
+    ];
+    for (attribute, name, ignorable) in lists {
+        for (count, refused) in [(3, false), (4, true), (100_000, true)] {
+            let list = vec![name; count].join(" ");
+            let text = if attribute == "Requires" {
+                format!(
+                    "<root {declarations}><mc:AlternateContent><mc:Choice Requires='{list}'><x/></mc:Choice></mc:AlternateContent></root>"
+                )
+            } else {
+                format!("<root {declarations}{ignorable} {attribute}='{list}'/>")
+            };
+            let expected = if refused {
+                Err((
+                    ErrorKind::TooManyCompatibilityTokens,
+                    at(&text, &format!(" {attribute}=")) + 1,
+                ))
+            } else {
+                Ok(())
+            };
+            assert_eq!(run(&text), expected, "{attribute} with {count} names");
+        }
+    }
 }
 
 /// Understands every ECMA-376 vocabulary and names in no namespace, with the extension elements of Office Open XML, as a word processor that knows no Microsoft extensions would.

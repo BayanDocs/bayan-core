@@ -469,32 +469,32 @@ impl Writer {
         Ok(())
     }
 
-    /// Refuses Markup Compatibility attributes of `tag` that list prefixes not declared where the tag is.
+    /// Refuses Markup Compatibility attributes of `tag` that list prefixes not declared where the tag is. The lists are checked name by name, without keeping them.
     fn check_compatibility_attributes(&self, tag: &PendingTag) -> Result<(), WriteError> {
         let compatibility = KnownNamespace::MarkupCompatibility.uri();
         let choice =
             tag.name.namespace.as_deref() == Some(compatibility) && tag.name.local == "Choice";
         for (name, value) in &tag.attributes {
-            let tokens = value.split_ascii_whitespace();
-            let prefixes: Vec<&str> = match (name.namespace.as_deref(), name.local.as_str()) {
-                (Some(uri), "Ignorable" | "MustUnderstand") if uri == compatibility => {
-                    tokens.collect()
-                }
-                (None, "Requires") if choice => tokens.collect(),
+            // Whether the list holds qualified names (`prefix:local`) rather than prefixes.
+            let qualified = match (name.namespace.as_deref(), name.local.as_str()) {
+                (Some(uri), "Ignorable" | "MustUnderstand") if uri == compatibility => false,
+                (None, "Requires") if choice => false,
                 (Some(uri), "ProcessContent" | "PreserveElements" | "PreserveAttributes")
                     if uri == compatibility =>
                 {
-                    tokens
-                        .map(|token| token.split_once(':').map_or("", |(prefix, _)| prefix))
-                        .collect()
+                    true
                 }
                 _ => continue,
             };
-            if prefixes
-                .iter()
-                .any(|prefix| prefix.is_empty() || self.bound(prefix).is_none_or(str::is_empty))
-            {
-                return Err(WriteError::UndeclaredPrefix);
+            for token in value.split_ascii_whitespace() {
+                let prefix = if qualified {
+                    token.split_once(':').map_or("", |(prefix, _)| prefix)
+                } else {
+                    token
+                };
+                if prefix.is_empty() || self.bound(prefix).is_none_or(str::is_empty) {
+                    return Err(WriteError::UndeclaredPrefix);
+                }
             }
         }
         Ok(())

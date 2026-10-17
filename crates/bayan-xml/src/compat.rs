@@ -4,6 +4,7 @@ mod config;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::str::SplitAsciiWhitespace;
 
 pub use config::McConfig;
 
@@ -881,10 +882,14 @@ impl<'a> McReader<'a> {
         Ok(declarations)
     }
 
-    /// The tokens of a list attribute's value, within the limit.
-    fn tokens<'v>(&self, value: &'v str, offset: usize) -> Result<Vec<&'v str>, Error> {
-        let tokens: Vec<&str> = value.split_ascii_whitespace().collect();
-        if tokens.len() > self.limits.max_compatibility_tokens {
+    /// The tokens of a list attribute's value, once it is known to hold no more than the limit allows. Counting stops at the first token beyond the limit, and keeps nothing.
+    fn tokens<'v>(&self, value: &'v str, offset: usize) -> Result<SplitAsciiWhitespace<'v>, Error> {
+        let tokens = value.split_ascii_whitespace();
+        if tokens
+            .clone()
+            .nth(self.limits.max_compatibility_tokens)
+            .is_some()
+        {
             return Err(Error::new(offset, ErrorKind::TooManyCompatibilityTokens));
         }
         Ok(tokens)
@@ -990,10 +995,10 @@ impl<'a> McReader<'a> {
             match attribute.namespace {
                 None if is_choice && attribute.local == "Requires" => {
                     let tokens = self.tokens(&attribute.value, offset)?;
-                    if tokens.is_empty() {
+                    if tokens.clone().next().is_none() {
                         return Err(compatibility_error(offset, CompatibilityError::InvalidList));
                     }
-                    let mut ids = Vec::with_capacity(tokens.len());
+                    let mut ids = Vec::new();
                     for token in tokens {
                         ids.push(self.resolve_list_prefix(token, offset)?);
                     }
