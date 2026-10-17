@@ -1,12 +1,25 @@
-//! bayan-xml's reader, writer, fragments and canonical form, on arbitrary bytes. For every document the reader accepts: the spans of its events follow each other without gap inside the root element; what it decodes is never longer than the document; written again from its events, it has the same canonical form, and that output written again is the same bytes; the root element captured is the same bytes; and every child of the root element moved into a context that binds the prefixes it uses to other namespaces keeps its meaning.
+//! bayan-xml's reader, writer, fragments and canonical form, on arbitrary bytes. For every document the reader accepts: the spans of its events follow each other without gap inside the root element; what it decodes is never longer than the document; written again from its events, it has the same canonical form, and that output written again is the same bytes; the root element captured is the same bytes; every child of the root element is, standalone, what the writer writes as the root element of a document, and refused only where its root element may not keep its white space mode; and every child moved into a context that binds the prefixes it uses to other namespaces keeps its meaning.
 
 #![no_main]
 
-use bayan_xml::{Event, Limits, QName, Reader, Source, WriteError, Writer, canonicalize};
+use bayan_xml::{
+    Event, Fragment, Limits, QName, Reader, Source, Space, WriteError, Writer, canonicalize,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// The limits documents meet.
 const LIMITS: Limits = Limits::DEFAULT;
+
+/// The limits for reading back what the writer wrote, which may go beyond those of its input: a start tag with the declarations a fragment needs added, and the new root element's namespaces and prefix.
+const READ_BACK: Limits = Limits {
+    max_attributes: usize::MAX,
+    max_name_length: usize::MAX,
+    max_namespaces: usize::MAX,
+    ..Limits::DEFAULT
+};
+
+/// The namespace of the `xml` prefix.
+const XML: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// The document written again from its events.
 fn rewrite(source: &Source<'_>) -> Result<String, WriteError> {
@@ -30,9 +43,29 @@ fn rewrite(source: &Source<'_>) -> Result<String, WriteError> {
     writer.finish()
 }
 
+/// The canonical form of `text`, which the writer wrote.
 fn canonical(text: &str) -> String {
-    let source = Source::new(text.as_bytes(), &LIMITS).unwrap();
-    canonicalize(&source, &LIMITS).unwrap()
+    let source = Source::new(text.as_bytes(), &READ_BACK).unwrap();
+    canonicalize(&source, &READ_BACK).unwrap()
+}
+
+/// Opens an element that sets `space`, the white space mode of a fragment written inside it, so that any fragment can be written there.
+fn set_space(writer: &mut Writer, space: Space) {
+    if space == Space::Preserve {
+        writer
+            .attribute(QName::new(Some(XML), "xml", "space"), "preserve")
+            .unwrap();
+    }
+}
+
+/// The canonical form of `fragment` written inside a root element in no namespace that keeps its white space mode.
+fn in_its_mode(fragment: &Fragment<'_>) -> String {
+    let mut writer = Writer::new();
+    writer.start(QName::unqualified("n")).unwrap();
+    set_space(&mut writer, fragment.context().space());
+    writer.fragment(fragment).unwrap();
+    writer.end().unwrap();
+    canonical(&writer.finish().unwrap())
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -116,7 +149,7 @@ fuzz_target!(|data: &[u8]| {
     while !matches!(reader.next_event().unwrap(), Some(Event::Start(_))) {}
     let fragment = reader.capture().unwrap();
     assert_eq!(fragment.text(), &text[root]);
-    assert_eq!(fragment.to_standalone(), fragment.text());
+    assert_eq!(fragment.to_standalone(), Ok(fragment.text().to_owned()));
     // Every child of the root element, in a context that binds the prefixes it uses to another namespace, keeps its meaning.
     let mut reader = Reader::new(&source, &LIMITS);
     let mut captured = Vec::new();
@@ -133,7 +166,23 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(captured.len(), children.len());
     for (fragment, span) in captured.iter().zip(&children) {
         assert_eq!(fragment.text(), &text[span.clone()]);
-        let before = canonical(&fragment.to_standalone());
+        // Standalone, a child is what the writer writes as the root element of a document; both refuse it only where its root element may not have the xml:space that would keep its white space mode.
+        let standalone = fragment.to_standalone();
+        let mut alone = Writer::new();
+        assert_eq!(
+            alone.fragment(fragment).and_then(|()| alone.finish()),
+            standalone
+        );
+        match &standalone {
+            Ok(standalone) => {
+                canonical(standalone);
+            }
+            Err(error) => {
+                assert_eq!(*error, WriteError::SpaceConflict);
+                assert_eq!(fragment.context().space(), Space::Preserve);
+            }
+        }
+        let before = in_its_mode(fragment);
         let needed = fragment.needed_namespaces();
         // A prefix for the new root element that the fragment does not use.
         let mut prefix = String::from("h");
@@ -147,14 +196,15 @@ fuzz_target!(|data: &[u8]| {
         for (used, _) in &needed {
             writer.declare(used, "urn:bayan:other").unwrap();
         }
+        set_space(&mut writer, fragment.context().space());
         writer.fragment(fragment).unwrap();
         writer.end().unwrap();
         let moved = writer.finish().unwrap();
-        let moved_source = Source::new(moved.as_bytes(), &LIMITS).unwrap();
-        let mut reader = Reader::new(&moved_source, &LIMITS);
+        let moved_source = Source::new(moved.as_bytes(), &READ_BACK).unwrap();
+        let mut reader = Reader::new(&moved_source, &READ_BACK);
         reader.next_event().unwrap();
         reader.next_event().unwrap();
         let moved = reader.capture().unwrap();
-        assert_eq!(canonical(&moved.to_standalone()), before);
+        assert_eq!(in_its_mode(&moved), before);
     }
 });

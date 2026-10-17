@@ -111,7 +111,7 @@ enum Phase {
 /// - **Escaping:** `&`, `<` and `>` in text; `&`, `<`, `>` and `"` in attribute values, which are always in double quotes; and the characters that reading would change otherwise as character references (carriage return in text, tab, line feed and carriage return in attribute values). Characters that XML cannot represent at all are refused.
 /// - **Empty elements** are written as `<a/>`.
 /// - **`xml:space`:** [`Writer::text_element`] adds `xml:space="preserve"` when the text needs it.
-/// - **Fragments** ([`Writer::fragment`]) are written byte for byte where the bindings they use and their white space mode hold, and anywhere else with only the declarations they need added.
+/// - **Fragments** ([`Writer::fragment`]) are written byte for byte where the bindings they use and their white space mode hold, and anywhere else with only the declarations and the `xml:space` they need added; a Markup Compatibility element, which may not have `xml:space`, is refused where its white space mode does not hold.
 ///
 /// Each call checks its own arguments and changes nothing when it refuses them. The checks that need a whole start tag (conflicting prefixes, duplicate attributes, undeclared prefixes in Markup Compatibility attributes) run when the tag is written, which is when anything else is written after it; after such an error the writer should be dropped.
 ///
@@ -189,6 +189,19 @@ fn check_characters(text: &str) -> Result<(), WriteError> {
         Some(_) => Err(WriteError::InvalidCharacter),
         None => Ok(()),
     }
+}
+
+/// The white space mode inside the element of `tag`, written where `parent` is in force.
+fn tag_space(tag: &PendingTag, parent: Space) -> Space {
+    tag.attributes
+        .iter()
+        .find(|(name, _)| name.namespace.as_deref() == Some(XML_NAMESPACE) && name.local == "space")
+        .and_then(|(_, value)| match value.as_str() {
+            "preserve" => Some(Space::Preserve),
+            "default" => Some(Space::Default),
+            _ => None,
+        })
+        .unwrap_or(parent)
 }
 
 /// Whether text needs `xml:space="preserve"` to keep its white space with every reader: white space at its start or end, a tab, line feed or carriage return, or two spaces in a row.
@@ -412,18 +425,7 @@ impl Writer {
             }
         }
         self.check_compatibility_attributes(tag)?;
-        let space = tag
-            .attributes
-            .iter()
-            .find(|(name, _)| {
-                name.namespace.as_deref() == Some(XML_NAMESPACE) && name.local == "space"
-            })
-            .and_then(|(_, value)| match value.as_str() {
-                "preserve" => Some(Space::Preserve),
-                "default" => Some(Space::Default),
-                _ => None,
-            })
-            .unwrap_or(self.space());
+        let space = tag_space(tag, self.space());
         let out = &mut self.out;
         out.push('<');
         tag.name.write(out);
@@ -648,12 +650,24 @@ impl Writer {
     ///
     /// The fragment's text is written verbatim, byte for byte, where every binding of its context that it uses ([`Fragment::needed_namespaces`]) and its white space mode are the same as where the writer is. Elsewhere, declarations are added to its start tag for the namespaces it uses whose binding differs here, and `xml:space` if the white space mode differs and the element does not set it. This takes time in proportion to the fragment's text and the bindings it uses, not to its context.
     ///
+    /// Two kinds of element may not have `xml:space`, so they can be written only where their white space mode holds: elements of the Markup Compatibility namespace, such as the `mc:AlternateContent` that [`McEvent::AlternateContentEnd`](crate::McEvent::AlternateContentEnd) reports, which may have no attribute in the XML namespace (ECMA-376 Part 3, 5th edition, §7.1), and elements whose content Markup Compatibility processes in their place (§9.2), which [`McReader::capture`](crate::McReader::capture) marks when it captures one. Elements that [`Reader::capture`](crate::Reader::capture) or [`Fragment::new`] read without Markup Compatibility are marked only if they are in its namespace.
+    ///
     /// # Errors
     ///
-    /// [`WriteError::ContentOutsideRoot`] after the root element. Writing an open start tag first can fail as [`Writer::end`] does.
+    /// [`WriteError::SpaceConflict`] if the fragment's root element may not have `xml:space` and its white space mode is not the one in force here; nothing is written then, and the open start tag stays open, so that `xml:space` can be added to it with [`Writer::attribute`] before the fragment is written again. [`WriteError::ContentOutsideRoot`] after the root element. Writing an open start tag first can fail as [`Writer::end`] does.
     pub fn fragment(&mut self, fragment: &Fragment<'_>) -> Result<(), WriteError> {
         if self.phase == Phase::Epilog {
             return Err(WriteError::ContentOutsideRoot);
+        }
+        // The white space mode where the fragment goes: inside the open start tag, if there is one.
+        let here = self
+            .pending
+            .as_ref()
+            .map_or(self.space(), |tag| tag_space(tag, self.space()));
+        let space = fragment.context.space();
+        let add_space = !fragment.sets_space && here != space;
+        if add_space && fragment.fixed_space {
+            return Err(WriteError::SpaceConflict);
         }
         self.flush()?;
         let mut added = String::new();
@@ -671,8 +685,7 @@ impl Writer {
             escape::attribute(&binding.uri, &mut added);
             added.push('"');
         }
-        let space = fragment.context.space();
-        if !fragment.sets_space && self.space() != space {
+        if add_space {
             added.push_str(match space {
                 Space::Preserve => " xml:space=\"preserve\"",
                 Space::Default => " xml:space=\"default\"",

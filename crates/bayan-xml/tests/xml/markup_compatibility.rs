@@ -3,9 +3,9 @@
 //! The scenarios use their own names (`urn:t:…` namespaces, shapes instead of circles) but the structure, configurations and outcomes of the examples they cite. A scenario's input is processed with a configuration; the output document is what the events say is left (written with the writer, compared in canonical form), and the lossless events must recreate the input.
 
 use bayan_xml::{
-    AttributeKind, CompatibilityError, Error, ErrorKind, Fragment, KnownNamespace, Limits,
-    McConfig, McEvent, McReader, NamespaceName, QName, Reader, Selection, Source, Writer,
-    canonicalize,
+    AttributeKind, CompatibilityError, Error, ErrorKind, Event, Fragment, KnownNamespace, Limits,
+    McConfig, McEvent, McReader, NamespaceName, QName, Reader, Selection, Source, WriteError,
+    Writer, canonicalize,
 };
 
 use crate::common::first_difference;
@@ -1388,7 +1388,7 @@ fn reported_fragments_keep_their_meaning_in_a_new_context() {
         ])
     {
         for (index, fragment) in reported_fragments(&text, &config).iter().enumerate() {
-            let before = canonical(&fragment.to_standalone());
+            let before = canonical(&fragment.to_standalone().unwrap());
             let mut writer = Writer::new();
             writer
                 .start(QName::new(Some("urn:hostile"), "hostile", "root"))
@@ -1410,7 +1410,7 @@ fn reported_fragments_keep_their_meaning_in_a_new_context() {
             reader.next_event().unwrap();
             let moved = reader.capture().unwrap();
             assert_eq!(
-                first_difference(&before, &canonical(&moved.to_standalone())),
+                first_difference(&before, &canonical(&moved.to_standalone().unwrap())),
                 None,
                 "{name}, fragment {index}"
             );
@@ -1418,6 +1418,116 @@ fn reported_fragments_keep_their_meaning_in_a_new_context() {
         }
     }
     assert!(checked >= 30, "only {checked} fragments");
+}
+
+/// The alternate content that processing `text` with `config` reports, and the elements whose content it processes, captured whole.
+fn kept_whole(text: &str, config: &McConfig) -> Vec<Fragment<'static>> {
+    let limits = Limits::default();
+    let source = Source::new(text.as_bytes(), &limits).unwrap();
+    let mut reader = McReader::new(&source, &limits, config);
+    let mut fragments = Vec::new();
+    loop {
+        let unwrap = match reader.next_event().unwrap() {
+            None => break,
+            Some(McEvent::AlternateContentEnd(alternate)) => {
+                fragments.push(alternate.into_fragment().into_owned());
+                false
+            }
+            Some(McEvent::UnwrapStart(_)) => true,
+            Some(_) => false,
+        };
+        if unwrap {
+            fragments.push(reader.capture().unwrap().into_owned());
+        }
+    }
+    fragments
+}
+
+/// `around`, an empty root element, with `fragment` written as its content.
+fn write_inside(around: &str, fragment: &Fragment<'_>) -> Result<String, WriteError> {
+    let limits = Limits::default();
+    let around = document(around);
+    let source = Source::new(around.as_bytes(), &limits).unwrap();
+    let mut reader = Reader::new(&source, &limits);
+    let Some(Event::Start(root)) = reader.next_event().unwrap() else {
+        panic!("expected a root element");
+    };
+    let mut writer = Writer::new();
+    writer.start_tag(&root)?;
+    writer.fragment(fragment)?;
+    writer.end()?;
+    writer.finish()
+}
+
+// Markup Compatibility elements may have no attribute in the XML namespace (Part 3, 5th edition §7.1; 2nd edition §10.2.1–10.2.3), and an element whose content is processed no xml:space (§9.2): written where another white space mode holds, such fragments would need one, so the writer refuses them instead, and everything it does write is processed again as before.
+#[test]
+fn moves_compatibility_elements_only_where_their_white_space_mode_holds() {
+    let config = understanding(&[]);
+    let text = "<root xmlns:mc='MC' xmlns:n1='urn:t:n1' xmlns:i='urn:t:i' mc:Ignorable='i' mc:ProcessContent='i:wrap'{space}><p><mc:AlternateContent><mc:Choice Requires='n1'><a/></mc:Choice><mc:Fallback><b> </b></mc:Fallback></mc:AlternateContent><i:wrap><c> </c></i:wrap></p></root>";
+    let place = "<root xmlns:mc='MC' xmlns:n1='urn:t:n1' xmlns:i='urn:t:i' mc:Ignorable='i' mc:ProcessContent='i:wrap'{space}/>";
+    let preserve = " xml:space='preserve'";
+    for (from, to) in [(preserve, ""), ("", preserve)] {
+        let fragments = kept_whole(&document(&text.replace("{space}", from)), &config);
+        assert_eq!(
+            fragments.len(),
+            2,
+            "alternate content and unwrapped element"
+        );
+        for fragment in &fragments {
+            // Where the mode differs, the writer refuses, and so does a standalone element when the mode was to preserve white space.
+            assert_eq!(
+                write_inside(&place.replace("{space}", to), fragment),
+                Err(WriteError::SpaceConflict),
+                "{}",
+                fragment.text()
+            );
+            let standalone = fragment.to_standalone();
+            if from == preserve {
+                assert_eq!(standalone, Err(WriteError::SpaceConflict));
+            } else {
+                output(&standalone.unwrap(), &config).unwrap();
+            }
+            // Where it holds, the element is written as it was, and processed again without error.
+            let written = write_inside(&place.replace("{space}", from), fragment).unwrap();
+            assert!(written.contains(fragment.text()), "{written}");
+            output(&written, &config).unwrap();
+        }
+    }
+    // Other elements still take their mode with them: an ignored element gets xml:space.
+    let ignored = reported_fragments(
+        &document(
+            "<root xmlns:mc='MC' xmlns:i='urn:t:i' mc:Ignorable='i' xml:space='preserve'><i:x> </i:x></root>",
+        ),
+        &config,
+    );
+    assert_eq!(
+        write_inside(&place.replace("{space}", ""), &ignored[0]).unwrap(),
+        format!(
+            "<root xmlns:mc=\"{MC}\" xmlns:n1=\"urn:t:n1\" xmlns:i=\"urn:t:i\" mc:Ignorable=\"i\" mc:ProcessContent=\"i:wrap\"><i:x xml:space=\"preserve\"> </i:x></root>"
+        )
+    );
+    // A refusal changes nothing: the open start tag takes xml:space, and then the fragment is written.
+    let alternate = &kept_whole(&document(&text.replace("{space}", preserve)), &config)[0];
+    let mut writer = Writer::new();
+    writer.start(QName::unqualified("p")).unwrap();
+    writer.declare("mc", MC).unwrap();
+    writer.declare("n1", "urn:t:n1").unwrap();
+    assert_eq!(writer.fragment(alternate), Err(WriteError::SpaceConflict));
+    writer
+        .attribute(
+            QName::new(Some("http://www.w3.org/XML/1998/namespace"), "xml", "space"),
+            "preserve",
+        )
+        .unwrap();
+    writer.fragment(alternate).unwrap();
+    writer.end().unwrap();
+    assert_eq!(
+        writer.finish().unwrap(),
+        format!(
+            "<p xmlns:mc=\"{MC}\" xmlns:n1=\"urn:t:n1\" xml:space=\"preserve\">{}</p>",
+            alternate.text()
+        )
+    );
 }
 
 #[test]

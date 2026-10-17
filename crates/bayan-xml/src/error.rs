@@ -244,6 +244,8 @@ pub enum WriteError {
     MisplacedDeclaration,
     /// `finish` was called before every element was closed, or before a root element was written.
     Unfinished,
+    /// A fragment would need `xml:space` to keep its white space mode where it is written, and its root element may not have one: an element of the Markup Compatibility namespace, which may have no attribute in the XML namespace, or an element whose content Markup Compatibility processes in its place, which may not have `xml:space` (ECMA-376 Part 3, 5th edition, §7.1 and §9.2). See [`Writer::fragment`](crate::Writer::fragment).
+    SpaceConflict,
 }
 
 impl fmt::Display for WriteError {
@@ -268,6 +270,9 @@ impl fmt::Display for WriteError {
             WriteError::ContentOutsideRoot => f.write_str("content outside the root element"),
             WriteError::MisplacedDeclaration => f.write_str("the XML declaration must come first"),
             WriteError::Unfinished => f.write_str("document not finished"),
+            WriteError::SpaceConflict => {
+                f.write_str("fragment needs a white space mode it may not set")
+            }
         }
     }
 }

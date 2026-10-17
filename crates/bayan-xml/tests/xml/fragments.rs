@@ -191,7 +191,7 @@ fn finds_the_namespaces_a_fragment_needs() {
 #[test]
 fn makes_a_standalone_element() {
     let fragment = capture(DOCUMENT, "p", 0);
-    let standalone = fragment.to_standalone();
+    let standalone = fragment.to_standalone().unwrap();
     assert_eq!(
         standalone,
         "<w:p xmlns:w=\"urn:w\" xmlns:w14=\"urn:w14\" w14:paraId=\"1\"><w:r><w:t xml:space=\"preserve\"> a </w:t></w:r><w14:x><w14:y/></w14:x><w:r/></w:p>"
@@ -202,17 +202,23 @@ fn makes_a_standalone_element() {
         "b",
         0,
     );
-    assert_eq!(fragment.to_standalone(), "<b xml:space=\"preserve\">  </b>");
+    assert_eq!(
+        fragment.to_standalone().unwrap(),
+        "<b xml:space=\"preserve\">  </b>"
+    );
     let fragment = capture(
         "<a xml:space=\"preserve\"><b>  </b><c xml:space=\"default\"/></a>",
         "c",
         0,
     );
-    assert_eq!(fragment.to_standalone(), "<c xml:space=\"default\"/>");
+    assert_eq!(
+        fragment.to_standalone().unwrap(),
+        "<c xml:space=\"default\"/>"
+    );
     // Namespace names are escaped as attribute values.
     let fragment = capture("<r xmlns:p=\"urn:a&amp;b&quot;c\"><p:x/></r>", "x", 0);
     assert_eq!(
-        fragment.to_standalone(),
+        fragment.to_standalone().unwrap(),
         "<p:x xmlns:p=\"urn:a&amp;b&quot;c\"/>"
     );
 }

@@ -345,6 +345,10 @@ impl<'a> Reader<'a> {
         let start = element.span.start;
         let depth = element.depth;
         let name_end = 1 + element.qname.len();
+        let compatibility = element
+            .namespace
+            .and_then(|id| self.namespaces.get(id))
+            .is_some_and(|namespace| namespace.is(KnownNamespace::MarkupCompatibility));
         let context = self.context();
         let mut uses = Uses::new();
         self.note_uses(depth, &mut uses);
@@ -357,7 +361,12 @@ impl<'a> Reader<'a> {
                 Current::End(element, span) if element.depth == depth => {
                     let text = Cow::Borrowed(self.slice(&(start..span.end)));
                     return Ok(Fragment::from_parts(
-                        text, context, name_end, &uses, sets_space,
+                        text,
+                        context,
+                        name_end,
+                        &uses,
+                        sets_space,
+                        compatibility,
                     ));
                 }
                 Current::Start(_) => self.note_uses(depth, &mut uses),

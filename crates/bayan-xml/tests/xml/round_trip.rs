@@ -150,7 +150,7 @@ fn fragments_keep_their_meaning_in_a_new_context() {
             let fragments = fragments_at(bytes, depth);
             let step = (fragments.len() / 40).max(1);
             for (index, fragment) in fragments.iter().enumerate().step_by(step) {
-                let before = canonical(fragment.to_standalone().as_bytes());
+                let before = canonical(fragment.to_standalone().unwrap().as_bytes());
                 for preserve in [false, true] {
                     let mut writer = Writer::new();
                     writer
@@ -171,7 +171,7 @@ fn fragments_keep_their_meaning_in_a_new_context() {
                     let written = writer.finish().unwrap();
                     let moved = fragments_at(written.as_bytes(), 2);
                     assert_eq!(moved.len(), 1, "{name}, depth {depth}, element {index}");
-                    let after = canonical(moved[0].to_standalone().as_bytes());
+                    let after = canonical(moved[0].to_standalone().unwrap().as_bytes());
                     assert_eq!(
                         first_difference(&before, &after),
                         None,

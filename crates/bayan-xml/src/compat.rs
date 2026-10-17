@@ -118,7 +118,7 @@ pub struct AlternateContent<'a> {
 }
 
 impl<'a> AlternateContent<'a> {
-    /// The element, exactly as it was written, with its context: to write back where the selected alternative was not changed.
+    /// The element, exactly as it was written, with its context: to write back where the selected alternative was not changed. `mc:AlternateContent` may have no attribute in the XML namespace, so it can be written only where its white space mode holds ([`Writer::fragment`](crate::Writer::fragment)).
     pub fn fragment(&self) -> &Fragment<'a> {
         &self.fragment
     }
@@ -339,7 +339,7 @@ impl<'a> McReader<'a> {
         }
     }
 
-    /// Reads the element whose start tag is the current event ([`McEvent::Start`], [`McEvent::UnwrapStart`] or [`McEvent::AlternateContentStart`]) to its end, without processing anything inside it, and returns it as a fragment with its context. Reading continues after it.
+    /// Reads the element whose start tag is the current event ([`McEvent::Start`], [`McEvent::UnwrapStart`] or [`McEvent::AlternateContentStart`]) to its end, without processing anything inside it, and returns it as a fragment with its context. Reading continues after it. An element whose content Markup Compatibility processes in its place ([`McEvent::UnwrapStart`]) may not have `xml:space`, so the fragment is marked to keep its white space mode (see [`Writer::fragment`](crate::Writer::fragment)).
     ///
     /// # Errors
     ///
@@ -354,11 +354,13 @@ impl<'a> McReader<'a> {
         if matches!(self.current, Current::AlternateStart) {
             self.alternates.pop();
         }
+        let unwrapped = matches!(self.current, Current::UnwrapStart { .. });
         self.current = Current::Nothing;
         self.pop_frame();
         match self.reader.capture() {
-            Ok(fragment) => {
+            Ok(mut fragment) => {
                 self.note_captured(&fragment);
+                fragment.fixed_space |= unwrapped;
                 Ok(fragment)
             }
             Err(error) => {
@@ -724,6 +726,7 @@ impl<'a> McReader<'a> {
                     alternatives.name_end,
                     &uses,
                     false,
+                    true,
                 );
                 self.current = Current::AlternateEnd(AlternateContent {
                     fragment,

@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::event::{Event, Space};
-use crate::{Error, ErrorKind, Limits, Reader, Source};
+use crate::namespace::KnownNamespace;
+use crate::{Error, ErrorKind, Limits, Reader, Source, WriteError};
 
 /// One element's namespace declarations, in a chain that ends at the outermost element: a context is shared by everything that has it in scope, so taking it costs nothing, however many bindings are in scope.
 #[derive(Debug)]
@@ -96,7 +97,7 @@ pub(crate) struct Use {
 
 /// An element of a document as it was written, from the `<` of its start tag to the `>` of its end tag, with the [`Context`] it was in.
 ///
-/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
+/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there, and `xml:space` where another white space mode holds, unless its root element may not have one (a Markup Compatibility element, or an element whose content Markup Compatibility processes in its place), which is refused there instead. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
 #[derive(Clone, Debug)]
 pub struct Fragment<'a> {
     pub(crate) text: Cow<'a, str>,
@@ -107,6 +108,8 @@ pub struct Fragment<'a> {
     pub(crate) uses: Arc<[Use]>,
     /// Whether the root element has an `xml:space` attribute.
     pub(crate) sets_space: bool,
+    /// Whether the root element may have no `xml:space` attribute, so that none can be added to it: an element of the Markup Compatibility namespace (ECMA-376 Part 3, 5th edition, §7.1), or one whose content Markup Compatibility processes in its place (§9.2), as [`McReader::capture`](crate::McReader::capture) marks it.
+    pub(crate) fixed_space: bool,
 }
 
 impl<'a> Fragment<'a> {
@@ -121,9 +124,14 @@ impl<'a> Fragment<'a> {
         limits: &Limits,
     ) -> Result<Fragment<'a>, Error> {
         let text = text.into();
-        let (name_end, uses, sets_space) = check_fragment(&text, &context, limits)?;
+        let root = check_fragment(&text, &context, limits)?;
         Ok(Fragment::from_parts(
-            text, context, name_end, &uses, sets_space,
+            text,
+            context,
+            root.name_end,
+            &root.uses,
+            root.sets_space,
+            root.compatibility,
         ))
     }
 
@@ -134,6 +142,7 @@ impl<'a> Fragment<'a> {
         name_end: usize,
         uses: &Uses,
         sets_space: bool,
+        fixed_space: bool,
     ) -> Fragment<'a> {
         Fragment {
             text,
@@ -148,6 +157,7 @@ impl<'a> Fragment<'a> {
                 })
                 .collect(),
             sets_space,
+            fixed_space,
         }
     }
 
@@ -169,6 +179,7 @@ impl<'a> Fragment<'a> {
             name_end: self.name_end,
             uses: self.uses,
             sets_space: self.sets_space,
+            fixed_space: self.fixed_space,
         }
     }
 
@@ -180,8 +191,16 @@ impl<'a> Fragment<'a> {
             .collect()
     }
 
-    /// The fragment as a standalone element: its text, with the declarations of the namespaces it needs from its context, and `xml:space="preserve"` if that was in force and the element does not set `xml:space` itself, added to its start tag.
-    pub fn to_standalone(&self) -> String {
+    /// The fragment as a standalone element: its text, with the declarations of the namespaces it needs from its context, and `xml:space="preserve"` if that was in force and the element does not set `xml:space` itself, added to its start tag. It is what [`Writer::fragment`](crate::Writer::fragment) writes as the root element of a document.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::SpaceConflict`] if `xml:space="preserve"` was in force and the root element may not have `xml:space`: an element of the Markup Compatibility namespace, or one whose content Markup Compatibility processes in its place (see [`Writer::fragment`](crate::Writer::fragment)).
+    pub fn to_standalone(&self) -> Result<String, WriteError> {
+        let preserve = self.context.space == Space::Preserve && !self.sets_space;
+        if preserve && self.fixed_space {
+            return Err(WriteError::SpaceConflict);
+        }
         let mut added = String::new();
         for binding in self.uses.iter() {
             if binding.prefix.is_empty() {
@@ -198,10 +217,10 @@ impl<'a> Fragment<'a> {
                 added.push('"');
             }
         }
-        if self.context.space == Space::Preserve && !self.sets_space {
+        if preserve {
             added.push_str(" xml:space=\"preserve\"");
         }
-        self.with_inserted(&added)
+        Ok(self.with_inserted(&added))
     }
 
     /// The text with `added` inserted after the root element's name.
@@ -215,12 +234,20 @@ impl<'a> Fragment<'a> {
     }
 }
 
-/// Checks that `text` is exactly one element, well-formed in `context`, and returns where the name of its start tag ends, the bindings of the context it uses, and whether its root element sets `xml:space`.
-fn check_fragment(
-    text: &str,
-    context: &Context,
-    limits: &Limits,
-) -> Result<(usize, Uses, bool), Error> {
+/// What [`check_fragment`] finds about a fragment's root element.
+struct Root {
+    /// Where its name ends.
+    name_end: usize,
+    /// The bindings of the context that the fragment uses.
+    uses: Uses,
+    /// Whether it has an `xml:space` attribute.
+    sets_space: bool,
+    /// Whether it is in the Markup Compatibility namespace.
+    compatibility: bool,
+}
+
+/// Checks that `text` is exactly one element, well-formed in `context`, and returns what it finds about its root element.
+fn check_fragment(text: &str, context: &Context, limits: &Limits) -> Result<Root, Error> {
     let outside = |offset| Error::new(offset, ErrorKind::ContentOutsideRoot);
     let source = Source::new(text.as_bytes(), limits)?;
     if source.declaration().is_some() {
@@ -234,11 +261,17 @@ fn check_fragment(
     if !reader.advance()? {
         return Err(outside(0));
     }
-    let name_end = match reader.event() {
+    let (name_end, compatibility) = match reader.event() {
         Some(Event::Start(tag)) if tag.span().start == 0 => {
             let name = tag.name();
             let colon = usize::from(!name.prefix().is_empty());
-            1 + name.prefix().len() + colon + name.local().len()
+            let compatibility = name
+                .namespace()
+                .is_some_and(|namespace| namespace.is(KnownNamespace::MarkupCompatibility));
+            (
+                1 + name.prefix().len() + colon + name.local().len(),
+                compatibility,
+            )
         }
         Some(_) | None => return Err(outside(0)),
     };
@@ -263,5 +296,10 @@ fn check_fragment(
     if reader.advance()? {
         return Err(outside(text.len()));
     }
-    Ok((name_end, uses, sets_space))
+    Ok(Root {
+        name_end,
+        uses,
+        sets_space,
+        compatibility,
+    })
 }
