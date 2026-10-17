@@ -8,5 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+quick-xml.workspace = true
+
+[dev-dependencies]
+# Reads the XML parts of the real .docx files that bayan-opc's tests keep, for the round-trip tests.
+miniz_oxide.workspace = true
+proptest.workspace = true
+
 [lints]
 workspace = true
