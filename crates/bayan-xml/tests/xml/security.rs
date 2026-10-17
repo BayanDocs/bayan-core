@@ -422,6 +422,99 @@ fn stays_linear_with_nested_alternate_content() {
     );
 }
 
+/// A document whose root element binds the ignorable prefix `i` to the namespace named `used`, which `count` empty elements use, and `u` to the one named `unused`, which nothing uses.
+fn named(used: &str, unused: &str, count: usize) -> String {
+    format!(
+        "<root xmlns:mc='{MC}' xmlns:i='{used}' xmlns:u='{unused}' mc:Ignorable='i'>{}</root>",
+        "<i:x/>".repeat(count)
+    )
+}
+
+/// Some work on a document, within limits.
+type Work = fn(&str, &Limits);
+
+/// Processes `text` with Markup Compatibility, which keeps every ignored element whole.
+fn ignore_all(text: &str, limits: &Limits) {
+    let source = Source::new(text.as_bytes(), limits).unwrap();
+    let config = McConfig::new().understand(NamespaceName::None);
+    let mut reader = McReader::new(&source, limits, &config);
+    while reader.next_event().unwrap().is_some() {}
+}
+
+/// Reads `text` and writes every start tag again as it was.
+fn rewrite_all(text: &str, limits: &Limits) {
+    let source = Source::new(text.as_bytes(), limits).unwrap();
+    let mut reader = Reader::new(&source, limits);
+    let mut writer = Writer::new();
+    while let Some(event) = reader.next_event().unwrap() {
+        match event {
+            Event::Start(tag) => writer.start_tag(&tag).unwrap(),
+            Event::End(_) => writer.end().unwrap(),
+            _ => {}
+        }
+    }
+    writer.finish().unwrap();
+}
+
+/// Reads `text`, writes its root element's start tag again, and captures every child and writes it back as a fragment.
+fn capture_all(text: &str, limits: &Limits) {
+    let source = Source::new(text.as_bytes(), limits).unwrap();
+    let mut reader = Reader::new(&source, limits);
+    let mut writer = Writer::new();
+    loop {
+        let capture = match reader.next_event().unwrap() {
+            None => break,
+            Some(Event::Start(tag)) if tag.depth() == 1 => {
+                writer.start_tag(&tag).unwrap();
+                false
+            }
+            Some(Event::Start(_)) => true,
+            Some(Event::End(_)) => {
+                writer.end().unwrap();
+                false
+            }
+            Some(_) => false,
+        };
+        if capture {
+            writer.fragment(&reader.capture().unwrap()).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+}
+
+/// The canonical form of `text`.
+fn canonical_of(text: &str, limits: &Limits) {
+    let source = Source::new(text.as_bytes(), limits).unwrap();
+    canonicalize(&source, limits).unwrap();
+}
+
+// The length of a namespace name costs nothing per element or fragment that uses it: with 5,000 elements in a namespace whose name is as long as the limit allows, at the default limit and at one raised to 256 KiB, Markup Compatibility (which keeps every ignored element), writing start tags again, capturing and writing fragments, and the canonical form take as long as when the elements use a short name and the long one is only declared.
+#[test]
+fn stays_linear_with_long_namespace_names() {
+    for length in [Limits::default().max_namespace_name_length, 256 << 10] {
+        let limits = Limits {
+            max_namespace_name_length: length,
+            ..Limits::default()
+        };
+        let long = format!("urn:{}", "n".repeat(length - 4));
+        let crafted = named(&long, "urn:u", 5_000);
+        let ordinary = named("urn:i", &long, 5_000);
+        let runs: [(&str, Work); 4] = [
+            ("Markup Compatibility", ignore_all),
+            ("writing start tags again", rewrite_all),
+            ("capturing and writing fragments", capture_all),
+            ("the canonical form", canonical_of),
+        ];
+        for (what, run) in runs {
+            assert_linear(
+                &format!("{what}, namespace names of {length} bytes"),
+                || run(&crafted, &limits),
+                || run(&ordinary, &limits),
+            );
+        }
+    }
+}
+
 // Ignoring many elements, each kept whole, takes time in proportion to their number.
 #[test]
 fn stays_linear_with_many_ignored_elements() {

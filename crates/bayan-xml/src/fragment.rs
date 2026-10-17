@@ -12,8 +12,8 @@ use crate::{Error, ErrorKind, Limits, Reader, Source, WriteError};
 #[derive(Debug)]
 pub(crate) struct ContextNode {
     pub(crate) parent: Option<Arc<ContextNode>>,
-    /// The declarations, as (prefix, namespace name): `""` as prefix for the default namespace, and `""` as name for `xmlns=""`.
-    pub(crate) bindings: Box<[(Box<str>, Box<str>)]>,
+    /// The declarations, as (prefix, namespace name): `""` as prefix for the default namespace, and `""` as name for `xmlns=""`. The names are the copies the reader shares, never copied again.
+    pub(crate) bindings: Box<[(Box<str>, Arc<str>)]>,
 }
 
 /// The namespace bindings and the white space mode in scope at a place in a document: what an element found there inherits.
@@ -38,7 +38,7 @@ impl Context {
                 parent: None,
                 bindings: bindings
                     .iter()
-                    .map(|&(prefix, uri)| (Box::from(prefix), Box::from(uri)))
+                    .map(|&(prefix, uri)| (Box::from(prefix), Arc::from(uri)))
                     .collect(),
             })
         });
@@ -47,7 +47,15 @@ impl Context {
 
     /// The bindings in scope, as (prefix, namespace name) pairs sorted by prefix, each prefix once with its innermost binding.
     pub fn bindings(&self) -> Vec<(&str, &str)> {
-        let mut found: BTreeMap<&str, &str> = BTreeMap::new();
+        self.shared_bindings()
+            .into_iter()
+            .map(|(prefix, uri)| (prefix, &**uri))
+            .collect()
+    }
+
+    /// The bindings in scope with the shared copies of their names, sorted by prefix, each prefix once with its innermost binding.
+    pub(crate) fn shared_bindings(&self) -> Vec<(&str, &Arc<str>)> {
+        let mut found: BTreeMap<&str, &Arc<str>> = BTreeMap::new();
         let mut node = self.node.as_deref();
         while let Some(current) = node {
             for (prefix, uri) in &*current.bindings {
@@ -81,16 +89,16 @@ impl Context {
     }
 }
 
-/// The bindings declared outside an element that its start tags use, by prefix: the namespace name (`""` for none) and the depth of the element that declared the binding (0 for a context, or for the absence of a default namespace).
-pub(crate) type Uses = BTreeMap<Box<str>, (Box<str>, usize)>;
+/// The bindings declared outside an element that its start tags use, by prefix: the namespace name (`""` for none), shared, and the depth of the element that declared the binding (0 for a context, or for the absence of a default namespace).
+pub(crate) type Uses = BTreeMap<Box<str>, (Arc<str>, usize)>;
 
 /// A binding declared outside a fragment that the fragment uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Use {
     /// The prefix, `""` for the default namespace.
     pub(crate) prefix: Box<str>,
-    /// The namespace name, `""` for no default namespace.
-    pub(crate) uri: Box<str>,
+    /// The namespace name, `""` for no default namespace: the copy the reader shares.
+    pub(crate) uri: Arc<str>,
     /// The depth of the element that declared it; 0 for a context, or for no default namespace at all.
     pub(crate) depth: usize,
 }
@@ -113,7 +121,7 @@ pub struct Fragment<'a> {
 }
 
 impl<'a> Fragment<'a> {
-    /// A fragment of `text`, which must be exactly one element that is well-formed in `context`.
+    /// A fragment of `text`, which must be exactly one element that is well-formed in `context`. It is read as [`Reader::with_context`] reads it, in time in proportion to the text and to the context's bindings.
     ///
     /// # Errors
     ///

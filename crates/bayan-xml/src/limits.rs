@@ -23,6 +23,8 @@ pub struct Limits {
     pub max_name_length: usize,
     /// The most distinct namespace names (URIs) one document may declare. Default: 4,096 (a document that Word writes declares fewer than 50).
     pub max_namespaces: usize,
+    /// The longest namespace name (URI) a declaration may give, in bytes, after its references are resolved. Default: 2,048 (the names of Office Open XML and of Microsoft's extensions have at most about 80 bytes, and those of custom XML rarely more than a few hundred). However long the names, reading, Markup Compatibility, writing and the canonical form take no longer per element; the limit bounds the copies of names that contexts and fragments share, and the declarations that writing a fragment where its namespaces are not declared adds.
+    pub max_namespace_name_length: usize,
     /// The most names one Markup Compatibility attribute may list (`mc:Ignorable`, `mc:ProcessContent`, `mc:MustUnderstand`, `mc:PreserveElements`, `mc:PreserveAttributes` and the `Requires` attribute of `mc:Choice`). Default: 256 (Word lists about ten prefixes in `mc:Ignorable`).
     pub max_compatibility_tokens: usize,
 }
@@ -35,6 +37,7 @@ impl Limits {
         max_attributes: 256,
         max_name_length: 256,
         max_namespaces: 4_096,
+        max_namespace_name_length: 2_048,
         max_compatibility_tokens: 256,
     };
 }
@@ -58,6 +61,7 @@ mod tests {
         assert_eq!(limits.max_attributes, 256);
         assert_eq!(limits.max_name_length, 256);
         assert_eq!(limits.max_namespaces, 4_096);
+        assert_eq!(limits.max_namespace_name_length, 2_048);
         assert_eq!(limits.max_compatibility_tokens, 256);
     }
 }

@@ -185,8 +185,8 @@ impl<'a> Reader<'a> {
         config.allow_unmatched_ends = false;
         config.trim_text(false);
         let mut namespaces = NamespaceTable::default();
-        namespaces.intern(Cow::Borrowed(XML_NAMESPACE));
-        namespaces.intern(Cow::Borrowed(XMLNS_NAMESPACE));
+        namespaces.intern(Cow::Borrowed(XML_NAMESPACE), None);
+        namespaces.intern(Cow::Borrowed(XMLNS_NAMESPACE), None);
         let mut scope = Scope::default();
         scope.push(Cow::Borrowed("xml"), Some(XML_ID), 0);
         Reader {
@@ -212,11 +212,11 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// A reader of `source`, a fragment of a document, read in `context`: its bindings and white space mode apply to the root element, as they did where the fragment came from.
+    /// A reader of `source`, a fragment of a document, read in `context`: its bindings and white space mode apply to the root element, as they did where the fragment came from. Every binding of the context is checked, so this takes time in proportion to the context's bindings and their names, besides the text.
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidNamespaceDeclaration`] if a binding of the context breaks the rules of Namespaces in XML (a prefix that is not an NCName, the `xmlns` prefix, the `xml` prefix bound elsewhere, a reserved namespace name, a prefix bound to an empty name, or a name with a character XML does not allow), [`ErrorKind::NameTooLong`] for a prefix longer than [`Limits::max_name_length`], [`ErrorKind::TooManyNamespaces`] beyond [`Limits::max_namespaces`]; all at offset 0.
+    /// [`ErrorKind::InvalidNamespaceDeclaration`] if a binding of the context breaks the rules of Namespaces in XML (a prefix that is not an NCName, the `xmlns` prefix, the `xml` prefix bound elsewhere, a reserved namespace name, a prefix bound to an empty name, or a name with a character XML does not allow), [`ErrorKind::NameTooLong`] for a prefix longer than [`Limits::max_name_length`], [`ErrorKind::NamespaceNameTooLong`] for a namespace name longer than [`Limits::max_namespace_name_length`], [`ErrorKind::TooManyNamespaces`] beyond [`Limits::max_namespaces`]; all at offset 0.
     pub fn with_context(
         source: &'a Source<'_>,
         limits: &Limits,
@@ -224,9 +224,13 @@ impl<'a> Reader<'a> {
     ) -> Result<Reader<'a>, Error> {
         let mut reader = Reader::new(source, limits);
         let invalid = Error::new(0, ErrorKind::InvalidNamespaceDeclaration);
-        for (prefix, uri) in context.bindings() {
+        for (prefix, shared) in context.shared_bindings() {
+            let uri: &str = shared;
             if prefix.len() > limits.max_name_length {
                 return Err(Error::new(0, ErrorKind::NameTooLong));
+            }
+            if uri.len() > limits.max_namespace_name_length {
+                return Err(Error::new(0, ErrorKind::NamespaceNameTooLong));
             }
             if find_invalid_char(uri).is_some() {
                 return Err(invalid);
@@ -235,14 +239,14 @@ impl<'a> Reader<'a> {
             let namespace = match prefix {
                 "xml" if uri == XML_NAMESPACE => continue,
                 "" if uri.is_empty() => None,
-                "" if !reserved => Some(reader.intern(Cow::Owned(uri.to_owned()), 0)?),
+                "" if !reserved => Some(reader.intern_shared(shared)?),
                 _ if is_ncname(prefix)
                     && prefix != "xml"
                     && prefix != "xmlns"
                     && !uri.is_empty()
                     && !reserved =>
                 {
-                    Some(reader.intern(Cow::Owned(uri.to_owned()), 0)?)
+                    Some(reader.intern_shared(shared)?)
                 }
                 _ => return Err(invalid),
             };
@@ -318,13 +322,7 @@ impl<'a> Reader<'a> {
                     parent: node,
                     bindings: own
                         .iter()
-                        .map(|binding| {
-                            let uri = binding
-                                .namespace
-                                .and_then(|id| self.namespaces.get(id))
-                                .map_or("", |namespace| namespace.uri());
-                            (Box::from(binding.prefix.as_ref()), Box::from(uri))
-                        })
+                        .map(|binding| (Box::from(binding.prefix.as_ref()), self.shared(binding)))
                         .collect(),
                 }));
             }
@@ -445,17 +443,21 @@ impl<'a> Reader<'a> {
         }
         match self.scope.resolve(prefix) {
             None if prefix.is_empty() => {
-                uses.insert(Box::from(""), (Box::from(""), 0));
+                uses.insert(Box::from(""), (Arc::from(""), 0));
             }
             Some(binding) if binding.depth < root_depth => {
-                let uri = binding
-                    .namespace
-                    .and_then(|id| self.namespaces.get(id))
-                    .map_or("", |namespace| namespace.uri());
-                uses.insert(Box::from(prefix), (Box::from(uri), binding.depth));
+                uses.insert(Box::from(prefix), (self.shared(binding), binding.depth));
             }
             _ => {}
         }
+    }
+
+    /// The shared copy of the namespace name that `binding` binds its prefix to, `""` for none.
+    fn shared(&self, binding: &Binding<'_>) -> Arc<str> {
+        binding
+            .namespace
+            .and_then(|id| self.namespaces.shared(id))
+            .unwrap_or_else(|| Arc::from(""))
     }
 
     /// The element and the attributes of the current start tag, if the current event is one.
@@ -484,12 +486,6 @@ impl<'a> Reader<'a> {
     /// Where the reader is in the text.
     pub(crate) fn offset(&self) -> usize {
         self.position()
-    }
-
-    /// The namespace name that `prefix` (`""` for the default namespace) is bound to where the reader is (at a start tag, with the element's own declarations), or `None` if it is not bound to one.
-    pub(crate) fn namespace_of(&self, prefix: &str) -> Option<&str> {
-        let id = self.scope.resolve(prefix)?.namespace?;
-        self.namespaces.get(id).map(|namespace| namespace.uri())
     }
 
     /// The next event, or `None` at the end of the document.
@@ -835,13 +831,29 @@ impl<'a> Reader<'a> {
 
     /// The identifier of the namespace `uri`, declared at `offset`.
     fn intern(&mut self, uri: Cow<'a, str>, offset: usize) -> Result<NamespaceId, Error> {
+        if uri.len() > self.limits.max_namespace_name_length {
+            return Err(Error::new(offset, ErrorKind::NamespaceNameTooLong));
+        }
         if let Some(id) = self.namespaces.find(&uri) {
             return Ok(id);
         }
         if self.namespaces.len() - BUILT_IN_NAMESPACES >= self.limits.max_namespaces {
             return Err(Error::new(offset, ErrorKind::TooManyNamespaces));
         }
-        Ok(self.namespaces.intern(uri))
+        Ok(self.namespaces.intern(uri, None))
+    }
+
+    /// The identifier of the namespace `uri`, a binding of the context the reader was given, whose shared copy the reader shares in turn.
+    fn intern_shared(&mut self, uri: &Arc<str>) -> Result<NamespaceId, Error> {
+        if let Some(id) = self.namespaces.find(uri) {
+            return Ok(id);
+        }
+        if self.namespaces.len() - BUILT_IN_NAMESPACES >= self.limits.max_namespaces {
+            return Err(Error::new(0, ErrorKind::TooManyNamespaces));
+        }
+        Ok(self
+            .namespaces
+            .intern(Cow::Owned(uri.as_ref().to_owned()), Some(uri)))
     }
 
     /// The namespace of an element name with `prefix`, written at `offset`.

@@ -204,3 +204,25 @@ fn limits_the_number_of_distinct_namespaces() {
         (ErrorKind::TooManyNamespaces, 42)
     );
 }
+
+#[test]
+fn limits_the_length_of_namespace_names() {
+    let limits = Limits {
+        max_namespace_name_length: 8,
+        ..Limits::default()
+    };
+    // As long as the limit allows, counted after references are resolved: read.
+    let text = "<a xmlns:p=\"urn:1234\" xmlns=\"urn:&#x31;&#x32;34\"><p:b/></a>";
+    let source = Source::new(text.as_bytes(), &limits).unwrap();
+    let mut reader = Reader::new(&source, &limits);
+    while reader.next_event().unwrap().is_some() {}
+    // One byte longer: refused where the declaration starts, for a prefix or the default namespace, anywhere.
+    assert_eq!(
+        refusal_with("<a xmlns:p=\"urn:12345\"/>", &limits),
+        (ErrorKind::NamespaceNameTooLong, 3)
+    );
+    assert_eq!(
+        refusal_with("<a><b xmlns=\"urn:1234&#x35;\"/></a>", &limits),
+        (ErrorKind::NamespaceNameTooLong, 6)
+    );
+}

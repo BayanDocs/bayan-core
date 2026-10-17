@@ -1,7 +1,10 @@
 //! The events of the reader: what it found in the document, borrowed from it.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::namespace::{KnownNamespace, KnownUri, Namespace};
 
@@ -19,11 +22,20 @@ pub enum Space {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct NamespaceId(pub(crate) u32);
 
-/// The namespace names of a document, each stored once. Names without references in their declaration are borrowed from the text.
+/// A namespace name in the table.
+#[derive(Debug)]
+struct Entry<'a> {
+    uri: Cow<'a, str>,
+    known: Option<KnownUri>,
+    /// The copy of the name that contexts, fragments and writers share, made the first time one needs it.
+    shared: OnceCell<Arc<str>>,
+}
+
+/// The namespace names of a document, each stored once. Names without references in their declaration are borrowed from the text. What outlives the reader (contexts, the bindings fragments use) or compares names (writers) shares one copy of each name, made the first time it is needed, so that keeping or comparing a name never copies or reads it again, however long it is.
 #[derive(Debug, Default)]
 pub(crate) struct NamespaceTable<'a> {
-    entries: Vec<(Cow<'a, str>, Option<KnownUri>)>,
-    index: std::collections::BTreeMap<Cow<'a, str>, NamespaceId>,
+    entries: Vec<Entry<'a>>,
+    index: BTreeMap<Cow<'a, str>, NamespaceId>,
 }
 
 impl<'a> NamespaceTable<'a> {
@@ -32,14 +44,18 @@ impl<'a> NamespaceTable<'a> {
         self.index.get(uri).copied()
     }
 
-    /// Adds `uri` if it is not in the table yet, and returns its identifier.
-    pub(crate) fn intern(&mut self, uri: Cow<'a, str>) -> NamespaceId {
+    /// Adds `uri` if it is not in the table yet, and returns its identifier. `shared`, if given, is a copy of the name to share, such as the one a context holds.
+    pub(crate) fn intern(&mut self, uri: Cow<'a, str>, shared: Option<&Arc<str>>) -> NamespaceId {
         if let Some(id) = self.find(&uri) {
             return id;
         }
         let id = NamespaceId(u32::try_from(self.entries.len()).unwrap_or(u32::MAX));
         let known = KnownNamespace::lookup(&uri);
-        self.entries.push((uri.clone(), known));
+        self.entries.push(Entry {
+            uri: uri.clone(),
+            known,
+            shared: shared.cloned().map(OnceCell::from).unwrap_or_default(),
+        });
         self.index.insert(uri, id);
         id
     }
@@ -51,9 +67,19 @@ impl<'a> NamespaceTable<'a> {
 
     /// The namespace with identifier `id`.
     pub(crate) fn get(&self, id: NamespaceId) -> Option<Namespace<'_>> {
-        let index = usize::try_from(id.0).ok()?;
-        let (uri, known) = self.entries.get(index)?;
-        Some(Namespace::with_known(uri, *known))
+        let entry = self.entries.get(usize::try_from(id.0).ok()?)?;
+        Some(Namespace::with_known(&entry.uri, entry.known))
+    }
+
+    /// The shared copy of the namespace name with identifier `id`.
+    pub(crate) fn shared(&self, id: NamespaceId) -> Option<Arc<str>> {
+        let entry = self.entries.get(usize::try_from(id.0).ok()?)?;
+        Some(
+            entry
+                .shared
+                .get_or_init(|| Arc::from(entry.uri.as_ref()))
+                .clone(),
+        )
     }
 }
 

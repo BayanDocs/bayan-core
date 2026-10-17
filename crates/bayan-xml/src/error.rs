@@ -95,6 +95,8 @@ pub enum ErrorKind {
     TooManyAttributes,
     /// A name is longer than [`Limits::max_name_length`](crate::Limits::max_name_length) bytes.
     NameTooLong,
+    /// A namespace name is longer than [`Limits::max_namespace_name_length`](crate::Limits::max_namespace_name_length) bytes.
+    NamespaceNameTooLong,
     /// The document declares more distinct namespace names than [`Limits::max_namespaces`](crate::Limits::max_namespaces).
     TooManyNamespaces,
     /// A Markup Compatibility attribute lists more names than [`Limits::max_compatibility_tokens`](crate::Limits::max_compatibility_tokens).
@@ -136,6 +138,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::TooDeep => "elements nested too deeply",
             ErrorKind::TooManyAttributes => "too many attributes",
             ErrorKind::NameTooLong => "name too long",
+            ErrorKind::NamespaceNameTooLong => "namespace name too long",
             ErrorKind::TooManyNamespaces => "too many namespaces",
             ErrorKind::TooManyCompatibilityTokens => {
                 "too many names in a Markup Compatibility attribute"

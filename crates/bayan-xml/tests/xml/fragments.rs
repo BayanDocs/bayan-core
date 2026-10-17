@@ -293,4 +293,17 @@ fn refuses_contexts_that_namespaces_in_xml_forbids() {
         Fragment::new("<a/>", context, &limits).unwrap_err().kind(),
         ErrorKind::TooManyNamespaces
     );
+    // The names of a context meet the limit on their length.
+    let limits = Limits {
+        max_namespace_name_length: 8,
+        ..Limits::default()
+    };
+    let context = Context::new(&[("p", "urn:1234")], Space::Default);
+    Fragment::new("<p:a/>", context, &limits).unwrap();
+    let context = Context::new(&[("p", "urn:12345")], Space::Default);
+    let error = Fragment::new("<p:a/>", context, &limits).unwrap_err();
+    assert_eq!(
+        (error.kind(), error.offset()),
+        (ErrorKind::NamespaceNameTooLong, 0)
+    );
 }

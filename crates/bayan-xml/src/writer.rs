@@ -1,11 +1,12 @@
 //! The writer: deterministic, well-formed XML with namespace management, and verbatim fragments.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::WriteError;
 use crate::chars::{find_invalid_char, is_name, is_ncname, is_space};
 use crate::escape;
-use crate::event::{Name, Space, StartTag};
+use crate::event::{Name, NamespaceId, Space, StartTag};
 use crate::fragment::Fragment;
 use crate::namespace::KnownNamespace;
 use crate::reader::{XML_NAMESPACE, XMLNS_NAMESPACE};
@@ -53,20 +54,101 @@ impl<'s> QName<'s> {
     }
 }
 
+/// A namespace name that the writer has seen: its position in the writer's table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct UriId(usize);
+
+/// The empty namespace name, which undeclares the default namespace: the first name of every table.
+const NO_NAMESPACE: UriId = UriId(0);
+/// The namespace of the `xml` prefix: the second name of every table.
+const XML_ID: UriId = UriId(1);
+/// The namespace of namespace declarations: the third name of every table.
+const XMLNS_ID: UriId = UriId(2);
+/// The Markup Compatibility namespace: the fourth name of every table.
+const COMPATIBILITY_ID: UriId = UriId(3);
+
+/// The namespace names the writer has seen, each stored once and known by its position, so that bindings and names are compared by position, without reading the names.
+///
+/// A name given as text is found by comparing it with the names in the table, which takes time in proportion to its length, as reading the text does. A name that comes from a reader, in a start tag or a fragment it gave out, is the copy that the reader shares and is found by the address of that copy, without being read: the table keeps every copy it has looked up, so that no other name can take its address while the writer lives. Names from a reader therefore cost nothing per element or fragment, however long they are.
+#[derive(Debug)]
+struct Uris {
+    names: Vec<Arc<str>>,
+    by_text: BTreeMap<Arc<str>, UriId>,
+    by_address: BTreeMap<usize, (Arc<str>, UriId)>,
+}
+
+impl Uris {
+    fn new() -> Uris {
+        let mut uris = Uris {
+            names: Vec::new(),
+            by_text: BTreeMap::new(),
+            by_address: BTreeMap::new(),
+        };
+        for uri in [
+            "",
+            XML_NAMESPACE,
+            XMLNS_NAMESPACE,
+            KnownNamespace::MarkupCompatibility.uri(),
+        ] {
+            uris.insert(Arc::from(uri));
+        }
+        uris
+    }
+
+    fn insert(&mut self, uri: Arc<str>) -> UriId {
+        let id = UriId(self.names.len());
+        self.names.push(Arc::clone(&uri));
+        self.by_text.insert(uri, id);
+        id
+    }
+
+    /// The position of `uri`, given as text, or [`WriteError::InvalidCharacter`] for a name XML cannot represent.
+    fn of_text(&mut self, uri: &str) -> Result<UriId, WriteError> {
+        if let Some(&id) = self.by_text.get(uri) {
+            return Ok(id);
+        }
+        check_characters(uri)?;
+        Ok(self.insert(Arc::from(uri)))
+    }
+
+    /// The position of `uri`, the copy of a name that a reader shares, and checked.
+    fn of_shared(&mut self, uri: &Arc<str>) -> UriId {
+        // Readers make a new empty name wherever no default namespace is in force; it needs no lookup, and keeping each would only grow the table.
+        if uri.is_empty() {
+            return NO_NAMESPACE;
+        }
+        let address = Arc::as_ptr(uri).cast::<u8>().addr();
+        if let Some(&(_, id)) = self.by_address.get(&address) {
+            return id;
+        }
+        let id = match self.by_text.get(&**uri) {
+            Some(&id) => id,
+            None => self.insert(Arc::clone(uri)),
+        };
+        self.by_address.insert(address, (Arc::clone(uri), id));
+        id
+    }
+
+    /// The name at `id`.
+    fn text(&self, id: UriId) -> &str {
+        self.names.get(id.0).map_or("", |name| name)
+    }
+}
+
 /// A name with its own strings, kept in an open start tag until it is written.
 #[derive(Clone, Debug)]
 struct OwnedName {
-    namespace: Option<String>,
+    namespace: Option<UriId>,
     prefix: String,
     local: String,
 }
 
 impl OwnedName {
-    fn new(name: &QName<'_>) -> OwnedName {
+    fn new(prefix: &str, local: &str, namespace: Option<UriId>) -> OwnedName {
         OwnedName {
-            namespace: name.namespace.map(str::to_owned),
-            prefix: name.prefix.to_owned(),
-            local: name.local.to_owned(),
+            namespace,
+            prefix: prefix.to_owned(),
+            local: local.to_owned(),
         }
     }
 
@@ -83,7 +165,7 @@ impl OwnedName {
 #[derive(Debug)]
 struct PendingTag {
     name: OwnedName,
-    declarations: Vec<(String, String)>,
+    declarations: Vec<(String, UriId)>,
     attributes: Vec<(OwnedName, String)>,
 }
 
@@ -115,6 +197,8 @@ enum Phase {
 ///
 /// Each call checks its own arguments and changes nothing when it refuses them. The checks that need a whole start tag (conflicting prefixes, duplicate attributes, undeclared prefixes in Markup Compatibility attributes) run when the tag is written, which is when anything else is written after it; after such an error the writer should be dropped.
 ///
+/// Writing takes time in proportion to what is written and to the arguments of each call: a namespace name given as text is read each time it is given. Names that come from a reader ([`Writer::start_tag`], [`Writer::fragment`]) are the copies it shares, which the writer recognizes without reading them, so that they cost nothing per element or fragment however long they are.
+///
 /// ```
 /// use bayan_xml::{KnownNamespace, QName, Writer};
 ///
@@ -139,7 +223,8 @@ pub struct Writer {
     phase: Phase,
     pending: Option<PendingTag>,
     elements: Vec<OpenElement>,
-    bindings: Vec<(String, String)>,
+    uris: Uris,
+    bindings: Vec<(String, UriId)>,
     by_prefix: BTreeMap<String, Vec<usize>>,
 }
 
@@ -149,33 +234,37 @@ impl Default for Writer {
     }
 }
 
-/// Checks the syntax of a name given to the writer, for an element (`attribute` false) or an attribute.
-fn check_name(name: &QName<'_>, attribute: bool) -> Result<(), WriteError> {
-    if !is_ncname(name.local) || !(name.prefix.is_empty() || is_ncname(name.prefix)) {
+/// Checks the syntax of the prefix and the local part of a name given to the writer.
+fn check_parts(prefix: &str, local: &str) -> Result<(), WriteError> {
+    if !is_ncname(local) || !(prefix.is_empty() || is_ncname(prefix)) {
         return Err(WriteError::InvalidName);
     }
-    if attribute && name.namespace.is_none() && name.prefix.is_empty() && name.local == "xmlns" {
-        return Err(WriteError::ReservedPrefix);
-    }
-    match name.namespace {
-        None if !name.prefix.is_empty() => Err(if attribute {
+    Ok(())
+}
+
+/// Checks a name for an element (`attribute` false) or an attribute, with its namespace looked up in the writer's table (`None` for no namespace), against the rules of Namespaces in XML.
+fn check_namespace(
+    prefix: &str,
+    local: &str,
+    namespace: Option<UriId>,
+    attribute: bool,
+) -> Result<(), WriteError> {
+    match namespace {
+        None if attribute && prefix.is_empty() && local == "xmlns" => {
+            Err(WriteError::ReservedPrefix)
+        }
+        None if !prefix.is_empty() => Err(if attribute {
             WriteError::InvalidAttributeName
         } else {
             WriteError::InvalidName
         }),
         None => Ok(()),
-        Some("") => Err(WriteError::InvalidName),
-        Some(uri) => {
-            if find_invalid_char(uri).is_some() {
-                return Err(WriteError::InvalidCharacter);
-            }
-            if name.prefix == "xmlns" || uri == XMLNS_NAMESPACE {
+        Some(NO_NAMESPACE) => Err(WriteError::InvalidName),
+        Some(id) => {
+            if prefix == "xmlns" || id == XMLNS_ID || (prefix == "xml") != (id == XML_ID) {
                 return Err(WriteError::ReservedPrefix);
             }
-            if (name.prefix == "xml") != (uri == XML_NAMESPACE) {
-                return Err(WriteError::ReservedPrefix);
-            }
-            if attribute && name.prefix.is_empty() {
+            if attribute && prefix.is_empty() {
                 return Err(WriteError::InvalidAttributeName);
             }
             Ok(())
@@ -195,7 +284,7 @@ fn check_characters(text: &str) -> Result<(), WriteError> {
 fn tag_space(tag: &PendingTag, parent: Space) -> Space {
     tag.attributes
         .iter()
-        .find(|(name, _)| name.namespace.as_deref() == Some(XML_NAMESPACE) && name.local == "space")
+        .find(|(name, _)| name.namespace == Some(XML_ID) && name.local == "space")
         .and_then(|(_, value)| match value.as_str() {
             "preserve" => Some(Space::Preserve),
             "default" => Some(Space::Default),
@@ -224,26 +313,27 @@ impl Writer {
             phase: Phase::Prolog,
             pending: None,
             elements: Vec::new(),
+            uris: Uris::new(),
             bindings: Vec::new(),
             by_prefix: BTreeMap::new(),
         }
     }
 
-    /// The namespace name bound to `prefix` where the writer is (`Some("")` for a default namespace undeclared with `xmlns=""`).
-    fn bound(&self, prefix: &str) -> Option<&str> {
+    /// The namespace name bound to `prefix` where the writer is ([`NO_NAMESPACE`] for a default namespace undeclared with `xmlns=""`).
+    fn bound(&self, prefix: &str) -> Option<UriId> {
         if prefix == "xml" {
-            return Some(XML_NAMESPACE);
+            return Some(XML_ID);
         }
         let index = *self.by_prefix.get(prefix)?.last()?;
-        self.bindings.get(index).map(|(_, uri)| uri.as_str())
+        self.bindings.get(index).map(|&(_, uri)| uri)
     }
 
-    fn bind(&mut self, prefix: &str, uri: &str) {
+    fn bind(&mut self, prefix: &str, uri: UriId) {
         self.by_prefix
             .entry(prefix.to_owned())
             .or_default()
             .push(self.bindings.len());
-        self.bindings.push((prefix.to_owned(), uri.to_owned()));
+        self.bindings.push((prefix.to_owned(), uri));
     }
 
     fn unbind_to(&mut self, length: usize) {
@@ -306,13 +396,28 @@ impl Writer {
     ///
     /// [`WriteError::InvalidName`] for a local part or prefix that is not an NCName, a prefix without a namespace, or an empty namespace name; [`WriteError::ReservedPrefix`] for the `xmlns` prefix or namespace, or the `xml` prefix with another namespace or the reverse; [`WriteError::InvalidCharacter`] for a namespace name XML cannot represent; [`WriteError::ContentOutsideRoot`] after the root element. Writing the open start tag of the parent first can fail as [`Writer::end`] does.
     pub fn start(&mut self, name: QName<'_>) -> Result<(), WriteError> {
-        check_name(&name, false)?;
+        check_parts(name.prefix, name.local)?;
+        let namespace = match name.namespace {
+            Some(uri) => Some(self.uris.of_text(uri)?),
+            None => None,
+        };
+        self.open(name.prefix, name.local, namespace)
+    }
+
+    /// Opens the start tag of the element `local`, written with `prefix`, in the namespace at `namespace`.
+    fn open(
+        &mut self,
+        prefix: &str,
+        local: &str,
+        namespace: Option<UriId>,
+    ) -> Result<(), WriteError> {
+        check_namespace(prefix, local, namespace, false)?;
         if self.phase == Phase::Epilog {
             return Err(WriteError::ContentOutsideRoot);
         }
         self.flush()?;
         self.pending = Some(PendingTag {
-            name: OwnedName::new(&name),
+            name: OwnedName::new(prefix, local, namespace),
             declarations: Vec::new(),
             attributes: Vec::new(),
         });
@@ -328,20 +433,18 @@ impl Writer {
         if !(prefix.is_empty() || is_ncname(prefix)) {
             return Err(WriteError::InvalidName);
         }
-        check_characters(uri)?;
+        let uri = self.uris.of_text(uri)?;
         let reserved = prefix == "xmlns"
-            || uri == XMLNS_NAMESPACE
-            || ((prefix == "xml") != (uri == XML_NAMESPACE))
-            || (!prefix.is_empty() && uri.is_empty());
+            || uri == XMLNS_ID
+            || ((prefix == "xml") != (uri == XML_ID))
+            || (!prefix.is_empty() && uri == NO_NAMESPACE);
         if reserved {
             return Err(WriteError::ReservedPrefix);
         }
         let Some(pending) = self.pending.as_mut() else {
             return Err(WriteError::NoOpenElement);
         };
-        pending
-            .declarations
-            .push((prefix.to_owned(), uri.to_owned()));
+        pending.declarations.push((prefix.to_owned(), uri));
         Ok(())
     }
 
@@ -351,14 +454,30 @@ impl Writer {
     ///
     /// [`WriteError::NoOpenElement`] without an open start tag; [`WriteError::InvalidName`], [`WriteError::ReservedPrefix`] or [`WriteError::InvalidAttributeName`] for a name that cannot be written (see [`QName`]); [`WriteError::InvalidCharacter`] for a value XML cannot represent.
     pub fn attribute(&mut self, name: QName<'_>, value: &str) -> Result<(), WriteError> {
-        check_name(&name, true)?;
+        check_parts(name.prefix, name.local)?;
+        let namespace = match name.namespace {
+            Some(uri) => Some(self.uris.of_text(uri)?),
+            None => None,
+        };
+        self.add_attribute(name.prefix, name.local, namespace, value)
+    }
+
+    /// Adds the attribute `local`, written with `prefix`, in the namespace at `namespace`, to the open start tag.
+    fn add_attribute(
+        &mut self,
+        prefix: &str,
+        local: &str,
+        namespace: Option<UriId>,
+        value: &str,
+    ) -> Result<(), WriteError> {
+        check_namespace(prefix, local, namespace, true)?;
         check_characters(value)?;
         let Some(pending) = self.pending.as_mut() else {
             return Err(WriteError::NoOpenElement);
         };
         pending
             .attributes
-            .push((OwnedName::new(&name), value.to_owned()));
+            .push((OwnedName::new(prefix, local, namespace), value.to_owned()));
         Ok(())
     }
 
@@ -385,17 +504,17 @@ impl Writer {
             if declared_here(self, prefix) {
                 return Err(WriteError::DuplicateAttribute);
             }
-            self.bind(prefix, uri);
+            self.bind(prefix, *uri);
         }
         let mut own_namespace = None;
-        match tag.name.namespace.as_deref() {
+        match tag.name.namespace {
             None => {
-                if !self.bound("").unwrap_or_default().is_empty() {
+                if self.bound("").unwrap_or(NO_NAMESPACE) != NO_NAMESPACE {
                     if declared_here(self, "") {
                         return Err(WriteError::PrefixConflict);
                     }
-                    self.bind("", "");
-                    own_namespace = Some((String::new(), String::new()));
+                    self.bind("", NO_NAMESPACE);
+                    own_namespace = Some((String::new(), NO_NAMESPACE));
                 }
             }
             Some(uri) => {
@@ -404,28 +523,29 @@ impl Writer {
                         return Err(WriteError::PrefixConflict);
                     }
                     self.bind(&tag.name.prefix, uri);
-                    own_namespace = Some((tag.name.prefix.clone(), uri.to_owned()));
+                    own_namespace = Some((tag.name.prefix.clone(), uri));
                 }
             }
         }
         let mut attribute_namespaces = Vec::new();
         let mut names = BTreeSet::new();
         for (name, _) in &tag.attributes {
-            if !names.insert((name.namespace.as_deref(), name.local.as_str())) {
+            if !names.insert((name.namespace, name.local.as_str())) {
                 return Err(WriteError::DuplicateAttribute);
             }
-            if let Some(uri) = name.namespace.as_deref()
+            if let Some(uri) = name.namespace
                 && self.bound(&name.prefix) != Some(uri)
             {
                 if declared_here(self, &name.prefix) {
                     return Err(WriteError::PrefixConflict);
                 }
                 self.bind(&name.prefix, uri);
-                attribute_namespaces.push((name.prefix.clone(), uri.to_owned()));
+                attribute_namespaces.push((name.prefix.clone(), uri));
             }
         }
         self.check_compatibility_attributes(tag)?;
         let space = tag_space(tag, self.space());
+        let uris = &self.uris;
         let out = &mut self.out;
         out.push('<');
         tag.name.write(out);
@@ -441,7 +561,7 @@ impl Writer {
                 out.push_str(prefix);
                 out.push_str("=\"");
             }
-            escape::attribute(uri, out);
+            escape::attribute(uris.text(*uri), out);
             out.push('"');
         }
         for (name, value) in &tag.attributes {
@@ -473,19 +593,16 @@ impl Writer {
 
     /// Refuses Markup Compatibility attributes of `tag` that list prefixes not declared where the tag is. The lists are checked name by name, without keeping them.
     fn check_compatibility_attributes(&self, tag: &PendingTag) -> Result<(), WriteError> {
-        let compatibility = KnownNamespace::MarkupCompatibility.uri();
-        let choice =
-            tag.name.namespace.as_deref() == Some(compatibility) && tag.name.local == "Choice";
+        let choice = tag.name.namespace == Some(COMPATIBILITY_ID) && tag.name.local == "Choice";
         for (name, value) in &tag.attributes {
             // Whether the list holds qualified names (`prefix:local`) rather than prefixes.
-            let qualified = match (name.namespace.as_deref(), name.local.as_str()) {
-                (Some(uri), "Ignorable" | "MustUnderstand") if uri == compatibility => false,
+            let qualified = match (name.namespace, name.local.as_str()) {
+                (Some(COMPATIBILITY_ID), "Ignorable" | "MustUnderstand") => false,
                 (None, "Requires") if choice => false,
-                (Some(uri), "ProcessContent" | "PreserveElements" | "PreserveAttributes")
-                    if uri == compatibility =>
-                {
-                    true
-                }
+                (
+                    Some(COMPATIBILITY_ID),
+                    "ProcessContent" | "PreserveElements" | "PreserveAttributes",
+                ) => true,
                 _ => continue,
             };
             for token in value.split_ascii_whitespace() {
@@ -494,7 +611,7 @@ impl Writer {
                 } else {
                     token
                 };
-                if prefix.is_empty() || self.bound(prefix).is_none_or(str::is_empty) {
+                if prefix.is_empty() || self.bound(prefix).is_none_or(|uri| uri == NO_NAMESPACE) {
                     return Err(WriteError::UndeclaredPrefix);
                 }
             }
@@ -629,21 +746,36 @@ impl Writer {
     ///
     /// As [`Writer::start`], [`Writer::declare`] and [`Writer::attribute`].
     pub fn start_tag(&mut self, tag: &StartTag<'_>) -> Result<(), WriteError> {
-        self.start(QName::from_name(&tag.name()))?;
-        for attribute in tag.attributes() {
-            let name = attribute.name();
-            if attribute.is_namespace_declaration() {
-                let prefix = if name.prefix().is_empty() {
+        let element = tag.element;
+        check_parts(element.prefix, element.local)?;
+        let namespace = self.shared(tag, element.namespace);
+        self.open(element.prefix, element.local, namespace)?;
+        for attribute in tag.attributes {
+            if attribute.declaration {
+                let prefix = if attribute.prefix.is_empty() {
                     ""
                 } else {
-                    name.local()
+                    attribute.local
                 };
-                self.declare(prefix, attribute.value())?;
+                self.declare(prefix, &attribute.value)?;
             } else {
-                self.attribute(QName::from_name(&name), attribute.value())?;
+                check_parts(attribute.prefix, attribute.local)?;
+                let namespace = self.shared(tag, attribute.namespace);
+                self.add_attribute(
+                    attribute.prefix,
+                    attribute.local,
+                    namespace,
+                    &attribute.value,
+                )?;
             }
         }
         Ok(())
+    }
+
+    /// The position of the namespace with the reader's identifier `id` in the namespaces of `tag`, through the copy of its name that the reader shares.
+    fn shared(&mut self, tag: &StartTag<'_>, id: Option<NamespaceId>) -> Option<UriId> {
+        let uri = tag.namespaces.shared(id?)?;
+        Some(self.uris.of_shared(&uri))
     }
 
     /// Writes `fragment`, an element with its context, as content or as the root element.
@@ -672,7 +804,8 @@ impl Writer {
         self.flush()?;
         let mut added = String::new();
         for binding in fragment.uses.iter() {
-            if self.bound(&binding.prefix).unwrap_or_default() == &*binding.uri {
+            let uri = self.uris.of_shared(&binding.uri);
+            if self.bound(&binding.prefix).unwrap_or(NO_NAMESPACE) == uri {
                 continue;
             }
             if binding.prefix.is_empty() {
