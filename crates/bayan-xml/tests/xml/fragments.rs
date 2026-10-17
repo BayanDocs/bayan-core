@@ -265,6 +265,17 @@ fn checks_fragments_made_by_hand() {
 }
 
 #[test]
+fn binds_a_prefix_given_twice_to_its_last_name() {
+    let context = Context::new(&[("w", "urn:first"), ("w", "urn:last")], Space::Default);
+    assert_eq!(context.uri_of("w"), Some("urn:last"));
+    assert_eq!(bindings(&context), owned(&[("w", "urn:last")]));
+    // And so does a fragment read in it.
+    let limits = Limits::default();
+    let fragment = Fragment::new("<w:p/>", context, &limits).unwrap();
+    assert_eq!(fragment.needed_namespaces(), [("w", "urn:last")]);
+}
+
+#[test]
 fn refuses_contexts_that_namespaces_in_xml_forbids() {
     let limits = Limits::default();
     for bindings in [

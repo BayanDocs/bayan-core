@@ -6,7 +6,7 @@ use std::ops::Range;
 use crate::chars::{find_invalid_char, is_space};
 use crate::{Error, ErrorKind, Limits};
 
-/// The character encoding of a part, kept so that a caller can write a changed part back in the same encoding.
+/// The character encoding a part was written in, as [`Source::new`] found it. The [`Writer`](crate::Writer) always writes UTF-8, one of the two encodings Office Open XML allows; a caller that must keep a part in UTF-16 converts the writer's output itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
     /// UTF-8, with or without a byte order mark.

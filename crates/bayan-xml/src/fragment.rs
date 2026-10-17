@@ -31,7 +31,7 @@ impl Context {
         Context::default()
     }
 
-    /// A context with `bindings`, as (prefix, namespace name) pairs: `""` as prefix for the default namespace, and `""` as name for no default namespace. The bindings are checked when the context is used ([`Reader::with_context`], [`Fragment::new`]).
+    /// A context with `bindings`, as (prefix, namespace name) pairs: `""` as prefix for the default namespace, and `""` as name for no default namespace. A prefix given more than once is bound to its last name. The bindings are checked when the context is used ([`Reader::with_context`], [`Fragment::new`]).
     pub fn new(bindings: &[(&str, &str)], space: Space) -> Context {
         let node = (!bindings.is_empty()).then(|| {
             Arc::new(ContextNode {
@@ -58,7 +58,8 @@ impl Context {
         let mut found: BTreeMap<&str, &Arc<str>> = BTreeMap::new();
         let mut node = self.node.as_deref();
         while let Some(current) = node {
-            for (prefix, uri) in &*current.bindings {
+            // Innermost first, and in one element's declarations the last first, as `uri_of` finds them.
+            for (prefix, uri) in current.bindings.iter().rev() {
                 found.entry(prefix).or_insert(uri);
             }
             node = current.parent.as_deref();
@@ -105,7 +106,7 @@ pub(crate) struct Use {
 
 /// An element of a document as it was written, from the `<` of its start tag to the `>` of its end tag, with the [`Context`] it was in.
 ///
-/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there, and `xml:space` where another white space mode holds, unless its root element may not have one (a Markup Compatibility element, or an element whose content Markup Compatibility processes in its place), which is refused there instead. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
+/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there, and `xml:space` where another white space mode holds, unless its root element may not have one (a Markup Compatibility element, or an element whose content Markup Compatibility processes in its place), which is refused there instead. The context carries the namespace bindings and the white space mode, not an `xml:lang` or `xml:base` inherited from an ancestor (WordprocessingML marks the language of text with `w:lang` instead): a fragment written elsewhere takes on those of its new place. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
 #[derive(Clone, Debug)]
 pub struct Fragment<'a> {
     pub(crate) text: Cow<'a, str>,
