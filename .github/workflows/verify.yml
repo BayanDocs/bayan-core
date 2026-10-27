@@ -1,9 +1,11 @@
-# Runs the verification gate, `cargo xtask verify`, on Linux, Windows and macOS for every pull request and every push to main (work package CORE-001).
+# Runs the verification gate, `cargo xtask verify`, on Linux, Windows and macOS for every pull request, in the merge queue and for every push to main (work package CORE-001).
 # Workflow rules (ADR-0017): actions pinned to full commit SHAs with the version in a comment, minimal permissions, no credentials kept after checkout, a timeout on every job, tools downloaded at pinned versions and checked against SHA-256 checksums, and caching only with GitHub's own actions.
 name: verify
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   schedule:
