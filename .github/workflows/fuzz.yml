@@ -1,10 +1,10 @@
 # Fuzzes every parser of untrusted input that has a fuzz target in fuzz/ (ADR-0025 §4, ADR-0006 §5; bayan-core#21, the follow-up 1 of CORE-005): the targets are built with cargo-fuzz (libFuzzer with AddressSanitizer) on the pinned nightly toolchain, and run by fuzz/ci.py, which holds each target's settings.
-# - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved.
-# - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. The corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run.
+# - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved, which a pull request only reads.
+# - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. The corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run. Only these runs save a corpus, each into the cache of its own branch: the scheduled runs on main, and a manual run on the branch it was started on.
 # A crash, a timeout, running out of memory or a leak fails the run, and the inputs that caused it are uploaded with every target's log as the artifact fuzzing-failures; fuzz/README.md explains how to reproduce one. Everyone who can read this repository's Actions can download that artifact, which is acceptable only because every input comes from public files (fuzz/ci.py seeds); a crash that is a security problem is then reported privately, as SECURITY.md says.
 # It is not a required check: a path filter skips it on most pull requests, and a required check that never runs would block merging forever (docs/scripts/github-settings.py), as for text-pipeline.yml.
 # GitHub notifies the person who last changed the cron schedule below when a scheduled run fails. Agents push and merge under the owner's account, so that is the owner; whoever else changes the schedule receives the notifications instead. GitHub also switches scheduled workflows off after 60 days without activity in the repository; re-enabling one makes its notifications go to whoever re-enabled it.
-# Workflow conventions (AGENTS.md): GitHub's own actions only, pinned to full commit SHAs with the version in a comment; no permissions beyond reading the repository; no credentials kept after checkout; a timeout; one concurrency group; tools at pinned versions, checked against SHA-256 checksums; no secrets. The caches that pull requests restore are written only by the scheduled and manual runs on main, never by a pull request.
+# Workflow conventions (AGENTS.md): GitHub's own actions only, pinned to full commit SHAs with the version in a comment; no permissions beyond reading the repository; no credentials kept after checkout; a timeout; one concurrency group; tools at pinned versions, checked against SHA-256 checksums; no secrets. A pull request never saves a cache, and GitHub lets it read only the caches of its base branch and of main, so a pull request against main reads only corpora that runs on main saved.
 name: Fuzzing
 
 on:
@@ -90,7 +90,7 @@ jobs:
       - name: Write the seeds (public files only)
         run: python3 -I fuzz/ci.py seeds "$RUNNER_TEMP/seeds"
 
-      # The most recent corpus that a scheduled or manual run on this branch, or else on main, saved; a pull request only reads it. The first run starts from the seeds alone.
+      # The latest corpus that a scheduled or manual run saved on this branch, or else on main (for a pull request: on its base branch, or else on main). A pull request only reads it. Without one, the run starts from the seeds alone.
       - name: Restore the corpus of the last nightly run
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -105,11 +105,12 @@ jobs:
       # Also after a target failed: its corpus holds only inputs that passed, and the others' progress is kept.
       - name: Minimize the corpora
         id: minimize
-        if: ${{ github.event_name != 'pull_request' && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
         run: python3 -I fuzz/ci.py minimize --all
 
+      # Only scheduled and manual runs save, each into its own branch's cache; never a pull request, whose code is not yet reviewed.
       - name: Save the corpora for the next run
-        if: ${{ github.event_name != 'pull_request' && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
