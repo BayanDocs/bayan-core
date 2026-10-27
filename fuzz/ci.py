@@ -25,10 +25,11 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 FUZZ = Path(__file__).resolve().parent
 REPOSITORY = FUZZ.parent
@@ -137,6 +138,7 @@ class Result:
     """What fuzzing or minimizing one target gave."""
 
     target: str
+    # How long the target ran, measured: one that fails stops before its time is up.
     seconds: int = 0
     status: str = "passed"
     problems: List[str] = dataclasses.field(default_factory=list)
@@ -220,9 +222,12 @@ def merge_command(name: str, work: Path, binaries: Path) -> List[str]:
     ]
 
 
-def run_one(command: List[str], log: Path) -> int:
+def run_one(command: List[str], log: Path) -> Tuple[int, float]:
+    """Runs a command with its output in `log`, and returns its exit code and the seconds it took."""
+    start = time.monotonic()
     with log.open("wb") as output:
-        return subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, env=environment(), check=False).returncode
+        code = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, env=environment(), check=False).returncode
+    return code, time.monotonic() - start
 
 
 def in_github_actions() -> bool:
@@ -262,12 +267,12 @@ def run(names: Sequence[str], seconds: int, jobs: int, seeds_dir: Path, work: Pa
         running = {pool.submit(run_one, commands[name], work / "logs" / f"{name}.log"): name for name in order}
         for future in concurrent.futures.as_completed(running):
             name = running[future]
-            result = Result(name, seconds * TARGETS[name].share, log=work / "logs" / f"{name}.log")
+            code, elapsed = future.result()
+            result = Result(name, round(elapsed), log=work / "logs" / f"{name}.log")
             text = result.log.read_text(errors="replace")
             result.stats = parse_log(text)
             result.corpus = last_corpus_size(text)
             kept = failures(work / "artifacts" / name)
-            code = future.result()
             if code != 0 or kept:
                 result.status = "failed"
                 result.problems = [f"libFuzzer exited with {code}"] if code != 0 else []
@@ -302,7 +307,7 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
             result = pending[name]
             text = result.log.read_text(errors="replace")
             merged = MERGE_RESULT.findall(text)
-            code = future.result()
+            code, _ = future.result()
             # Merging runs the inputs in a process that it restarts after a crash, so a report in its log is a failure too.
             reports = [line for line in text.splitlines() if "ERROR: libFuzzer" in line or "==ERROR:" in line]
             if code != 0 or not merged or reports:
@@ -325,7 +330,7 @@ def status_of(result: Result) -> str:
 
 def run_table(results: Sequence[Result]) -> str:
     rows = [
-        "| Target | Result | Fuzzing time | Executions | Per second | Coverage (edges / features) | Corpus at the end | Peak memory | Inputs up to |",
+        "| Target | Result | Time | Executions | Per second | Coverage (edges / features) | Corpus at the end | Peak memory | Inputs up to |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:

@@ -176,7 +176,7 @@ class Runs(Isolated):
         self.assertEqual(results[0].stats["edges"], 12)
         self.assertEqual(results[0].corpus, "5/1Kb")
         table = ci.run_table(results)
-        self.assertIn("| `zip_archive` | passed | 1 s | 100 | 50 | 12 / 34 | 5/1Kb | 31 MB | 64 KiB |", table)
+        self.assertIn(f"| `zip_archive` | passed | {results[0].seconds} s | 100 | 50 | 12 / 34 | 5/1Kb | 31 MB | 64 KiB |", table)
 
     def test_fails_when_a_target_crashes_and_keeps_its_input(self) -> None:
         binaries = self.fake_targets(["zip_archive"])
@@ -184,8 +184,10 @@ class Runs(Isolated):
         crashing = self.folder / "crash"
         crashing.mkdir()
         (crashing / "zip_archive").symlink_to(binaries / "zip_archive")
-        results = ci.run(["zip_archive"], 1, 1, self.folder / "seeds", self.folder / "work", crashing)
+        results = ci.run(["zip_archive"], 600, 1, self.folder / "seeds", self.folder / "work", crashing)
         self.assertEqual(results[0].status, "failed")
+        # It reports how long the target ran, not the time it was given.
+        self.assertLess(results[0].seconds, 600)
         self.assertEqual(results[0].problems, ["libFuzzer exited with 77", "kept artifacts/zip_archive/crash-0123"])
         self.assertTrue((self.folder / "work" / "artifacts" / "zip_archive" / "crash-0123").is_file())
         self.assertIn("ERROR: libFuzzer: deadly signal", self.output.getvalue())
