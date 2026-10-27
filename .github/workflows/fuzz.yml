@@ -48,7 +48,7 @@ jobs:
   fuzz:
     name: Fuzzing
     runs-on: ubuntu-24.04
-    # A pull request's run takes about 15 minutes and a nightly one about an hour: building the targets takes a few minutes, and libFuzzer's -max_total_time counts only the fuzzing.
+    # A pull request's run takes about 10 minutes and a nightly one about an hour: the fuzzing takes 7.5 and 45 minutes (FUZZ_SECONDS above), and the setup, the build (under a minute) and, at night, the minimizing come on top.
     timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 90 }}
     permissions:
       contents: read # check out the repository
