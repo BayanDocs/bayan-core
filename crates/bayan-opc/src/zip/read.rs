@@ -10,8 +10,9 @@ use super::crc32::Crc32;
 use super::{
     CENTRAL_HEADER, CENTRAL_HEADER_SIZE, CompressionMethod, DATA_DESCRIPTOR, DIGITAL_SIGNATURE,
     END_OF_CENTRAL_DIRECTORY, END_OF_CENTRAL_DIRECTORY_SIZE, LOCAL_HEADER, LOCAL_HEADER_SIZE,
-    ZIP64_END_OF_CENTRAL_DIRECTORY, ZIP64_END_OF_CENTRAL_DIRECTORY_SIZE, ZIP64_EXTRA,
-    ZIP64_LOCATOR, ZIP64_LOCATOR_SIZE, check_name, equivalence_key, flags, u16_at, u32_at, u64_at,
+    UNICODE_PATH_EXTRA, ZIP64_END_OF_CENTRAL_DIRECTORY, ZIP64_END_OF_CENTRAL_DIRECTORY_SIZE,
+    ZIP64_EXTRA, ZIP64_LOCATOR, ZIP64_LOCATOR_SIZE, check_name, equivalence_key, flags, u16_at,
+    u32_at, u64_at,
 };
 use crate::{Error, LimitError, Limits, ZipError};
 
@@ -535,7 +536,7 @@ fn read_central(
     let mut compressed_size = u64::from(compressed32);
     let mut header_offset = u64::from(offset32);
     let mut disk = u32::from(disk16);
-    let zip64 = find_zip64_extra(extra, index)?;
+    let zip64 = read_extra_fields(extra, index)?;
     let needs_zip64 = uncompressed32 == 0xFFFF_FFFF
         || compressed32 == 0xFFFF_FFFF
         || offset32 == 0xFFFF_FFFF
@@ -619,8 +620,8 @@ fn check_file_type(
     Ok(())
 }
 
-/// The data of the ZIP64 extra field among `extra`, if there is one. Fails if the extra fields are malformed or hold two ZIP64 fields.
-fn find_zip64_extra(extra: &[u8], index: usize) -> Result<Option<&[u8]>, ZipError> {
+/// Checks the extra fields in `extra` and returns the data of the ZIP64 extra field, if there is one. Fails if the extra fields are malformed or hold two ZIP64 fields, and refuses an Info-ZIP Unicode Path field as an unsafe name: it gives the entry a second name, which other tools read instead of the name field when the field's checksum of the name field matches (Info-ZIP's UnZip, 7-Zip and Apache Commons Compress for an entry without the UTF-8 flag, Python's zipfile and libarchive also with it), so they would see another file than this reader. Packages never need it, since the UTF-8 flag says how a name is encoded.
+fn read_extra_fields(extra: &[u8], index: usize) -> Result<Option<&[u8]>, ZipError> {
     let mut found = None;
     let mut at = 0;
     // Some tools pad the extra fields with a few zero bytes, too few to form a field; those are ignored.
@@ -636,6 +637,8 @@ fn find_zip64_extra(extra: &[u8], index: usize) -> Result<Option<&[u8]>, ZipErro
                 return Err(ZipError::MalformedEntry { entry: index });
             }
             found = Some(body);
+        } else if id == UNICODE_PATH_EXTRA {
+            return Err(ZipError::UnsafeName { entry: index });
         }
         at += 4 + size;
     }
@@ -734,7 +737,8 @@ fn read_local(
     let extra = header
         .get(extra_start..extra_start + extra_length)
         .ok_or(malformed)?;
-    let zip64 = find_zip64_extra(extra, index)?;
+    // The local header's extra fields are checked like the central directory's, for the tools that read only local headers.
+    let zip64 = read_extra_fields(extra, index)?;
     // In a local header, the ZIP64 extra field holds both sizes, uncompressed first.
     let mut uncompressed_size = u64::from(uncompressed32);
     let mut compressed_size = u64::from(compressed32);
