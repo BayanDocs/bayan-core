@@ -405,12 +405,17 @@ fn refuses_duplicate_and_equivalent_names() {
 
 // A Unicode Path field gives an entry a second name, which other tools read instead of the name field, so they would see a different file than this reader. Packages never need it, since the UTF-8 flag says how a name is encoded, so the reader refuses every entry that carries one, in either header (follow-up 6 of pull request 17).
 
-/// An Info-ZIP Unicode Path extra field (ID 0x7075, APPNOTE 4.6.9): version 1, the CRC-32 of the name field it stands for, then `name` in UTF-8. Where that checksum matches the header's name field, other tools take `name` as the entry's name: Info-ZIP's UnZip, 7-Zip and Apache Commons Compress for an entry without the UTF-8 flag, Python's zipfile and libarchive also with it.
+/// An Info-ZIP Unicode Path extra field (ID 0x7075, APPNOTE 4.6.9) as tools write it: version 1, the CRC-32 of the name field it stands for, then `name` in UTF-8. Where that checksum matches the header's name field, other tools take `name` as the entry's name: Info-ZIP's UnZip, 7-Zip and Apache Commons Compress for an entry without the UTF-8 flag, Python's zipfile and libarchive also with it.
 fn unicode_path(name_field: &str, name: &str) -> Vec<u8> {
+    unicode_path_field(1, craft::crc32(name_field.as_bytes()), name)
+}
+
+/// A Unicode Path extra field of any `version`, with any `checksum`, then `name`.
+fn unicode_path_field(version: u8, checksum: u32, name: &str) -> Vec<u8> {
     let mut field = vec![0x75, 0x70];
     field.extend_from_slice(&u16::try_from(5 + name.len()).unwrap().to_le_bytes());
-    field.push(1);
-    field.extend_from_slice(&craft::crc32(name_field.as_bytes()).to_le_bytes());
+    field.push(version);
+    field.extend_from_slice(&checksum.to_le_bytes());
     field.extend_from_slice(name.as_bytes());
     field
 }
@@ -479,15 +484,29 @@ fn refuses_a_unicode_path_field_in_both_headers() {
             "{case}"
         );
     }
-    // The field is refused even where it gives the name the entry already has: packages never need it.
-    let mut item = Item::stored("a.xml", b"x");
-    item.central_extra = unicode_path("a.xml", "a.xml");
-    item.local_extra = unicode_path("a.xml", "a.xml");
-    assert_eq!(
-        open_zip(&Archive::new(vec![item]).build()).map(|_| ()),
-        Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
-        "a field that agrees with the name"
-    );
+    // Packages never need the field, so what it holds does not matter: it is refused even where it gives the name the entry already has, and whatever its version and checksum. Python's zipfile reads only version 1 with a checksum that matches the name field, but 7-Zip and UnZip also read version 0, libarchive any version, and libarchive with its `ignorecrc32` option any checksum (the review of pull request 32).
+    let checksum = craft::crc32(b"a.xml");
+    for (case, field) in [
+        (
+            "a field that agrees with the name",
+            unicode_path("a.xml", "a.xml"),
+        ),
+        ("version 0", unicode_path_field(0, checksum, "b.xml")),
+        ("version 2", unicode_path_field(2, checksum, "b.xml")),
+        (
+            "a checksum that does not match the name field",
+            unicode_path_field(1, !checksum, "b.xml"),
+        ),
+    ] {
+        let mut item = Item::stored("a.xml", b"x");
+        item.central_extra = field.clone();
+        item.local_extra = field;
+        assert_eq!(
+            open_zip(&Archive::new(vec![item]).build()).map(|_| ()),
+            Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
+            "{case}"
+        );
+    }
 }
 
 // Encryption, compression methods and special files.
