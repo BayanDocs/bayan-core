@@ -14,6 +14,7 @@ cargo-fuzz = true
 # The fuzzing engine: LLVM's libFuzzer, which the crate compiles from C++ with its build script, and the `fuzz_target!` macro. Published 2026-06-04; (MIT OR Apache-2.0) AND NCSA, accepted for fuzzing dependencies only (ADR-0017, amendment of 2026-10-08).
 libfuzzer-sys = "=0.4.13"
 bayan-opc = { path = "../crates/bayan-opc" }
+bayan-xml = { path = "../crates/bayan-xml" }
 
 [[bin]]
 name = "zip_archive"
@@ -53,6 +54,20 @@ bench = false
 [[bin]]
 name = "compound_file"
 path = "fuzz_targets/compound_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml_reader"
+path = "fuzz_targets/xml_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markup_compatibility"
+path = "fuzz_targets/markup_compatibility.rs"
 test = false
 doc = false
 bench = false

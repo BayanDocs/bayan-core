@@ -20,7 +20,7 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const WASM_TEST_TARGET: &str = "wasm32-wasip1";
 
 /// The Node.js version that runs the tests in WebAssembly. CI installs exactly this version, checked against SHA-256 checksums, in `.github/workflows/verify.yml`, and `scripts/dev-setup.sh` installs it for developers; the Node.js driver in `.github/workflows/artifacts.yml` and the text pipeline spike's runners in `.github/workflows/text-pipeline.yml` use it too, and a test keeps all five equal. It is also the version of bayan-web's `.nvmrc` and of the BayanDocs cloud environment. Change all of them together, in the monthly dependency session.
-pub const NODE_VERSION: &str = "24.21.0";
+pub const NODE_VERSION: &str = "24.22.1";
 
 /// Crates that run natively only and are therefore not built for WebAssembly, with the reason. Every other workspace member must build for WebAssembly, so a new crate is covered without anyone having to remember it.
 pub const NATIVE_ONLY: [(&str, &str); 4] = [

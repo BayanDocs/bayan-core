@@ -1,0 +1,314 @@
+//! Lossless capture: fragments of a document that can be written back exactly as they were, in their own context or in another one.
+
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::event::{Event, Space};
+use crate::namespace::KnownNamespace;
+use crate::{Error, ErrorKind, Limits, Reader, Source, WriteError};
+
+/// One element's namespace declarations, in a chain that ends at the outermost element: a context is shared by everything that has it in scope, so taking it costs nothing, however many bindings are in scope.
+#[derive(Debug)]
+pub(crate) struct ContextNode {
+    pub(crate) parent: Option<Arc<ContextNode>>,
+    /// The declarations, as (prefix, namespace name): `""` as prefix for the default namespace, and `""` as name for `xmlns=""`. The names are the copies the reader shares, never copied again.
+    pub(crate) bindings: Box<[(Box<str>, Arc<str>)]>,
+}
+
+/// The namespace bindings and the white space mode in scope at a place in a document: what an element found there inherits.
+///
+/// The prefix `xml` is always bound to its namespace and is never listed.
+#[derive(Clone, Debug, Default)]
+pub struct Context {
+    pub(crate) node: Option<Arc<ContextNode>>,
+    pub(crate) space: Space,
+}
+
+impl Context {
+    /// The empty context: no namespace bindings, and the default white space mode. This is where a root element is.
+    pub fn empty() -> Context {
+        Context::default()
+    }
+
+    /// A context with `bindings`, as (prefix, namespace name) pairs: `""` as prefix for the default namespace, and `""` as name for no default namespace. A prefix given more than once is bound to its last name. The bindings are checked when the context is used ([`Reader::with_context`], [`Fragment::new`]).
+    pub fn new(bindings: &[(&str, &str)], space: Space) -> Context {
+        let node = (!bindings.is_empty()).then(|| {
+            Arc::new(ContextNode {
+                parent: None,
+                bindings: bindings
+                    .iter()
+                    .map(|&(prefix, uri)| (Box::from(prefix), Arc::from(uri)))
+                    .collect(),
+            })
+        });
+        Context { node, space }
+    }
+
+    /// The bindings in scope, as (prefix, namespace name) pairs sorted by prefix, each prefix once with its innermost binding.
+    pub fn bindings(&self) -> Vec<(&str, &str)> {
+        self.shared_bindings()
+            .into_iter()
+            .map(|(prefix, uri)| (prefix, &**uri))
+            .collect()
+    }
+
+    /// The bindings in scope with the shared copies of their names, sorted by prefix, each prefix once with its innermost binding.
+    pub(crate) fn shared_bindings(&self) -> Vec<(&str, &Arc<str>)> {
+        let mut found: BTreeMap<&str, &Arc<str>> = BTreeMap::new();
+        let mut node = self.node.as_deref();
+        while let Some(current) = node {
+            // Innermost first, and in one element's declarations the last first, as `uri_of` finds them.
+            for (prefix, uri) in current.bindings.iter().rev() {
+                found.entry(prefix).or_insert(uri);
+            }
+            node = current.parent.as_deref();
+        }
+        found.into_iter().collect()
+    }
+
+    /// The namespace name bound to `prefix` (`""` for the default namespace), if any: `Some("")` when the default namespace was undeclared with `xmlns=""`.
+    pub fn uri_of(&self, prefix: &str) -> Option<&str> {
+        let mut node = self.node.as_deref();
+        while let Some(current) = node {
+            if let Some((_, uri)) = current
+                .bindings
+                .iter()
+                .rev()
+                .find(|(bound, _)| bound.as_ref() == prefix)
+            {
+                return Some(uri);
+            }
+            node = current.parent.as_deref();
+        }
+        None
+    }
+
+    /// The white space mode in scope.
+    pub fn space(&self) -> Space {
+        self.space
+    }
+}
+
+/// The bindings declared outside an element that its start tags use, by prefix: the namespace name (`""` for none), shared, and the depth of the element that declared the binding (0 for a context, or for the absence of a default namespace).
+pub(crate) type Uses = BTreeMap<Box<str>, (Arc<str>, usize)>;
+
+/// A binding declared outside a fragment that the fragment uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Use {
+    /// The prefix, `""` for the default namespace.
+    pub(crate) prefix: Box<str>,
+    /// The namespace name, `""` for no default namespace: the copy the reader shares.
+    pub(crate) uri: Arc<str>,
+    /// The depth of the element that declared it; 0 for a context, or for no default namespace at all.
+    pub(crate) depth: usize,
+}
+
+/// An element of a document as it was written, from the `<` of its start tag to the `>` of its end tag, with the [`Context`] it was in.
+///
+/// A fragment keeps unknown content for lossless round trips: written back where it came from, it is the same bytes ([`Writer::fragment`](crate::Writer::fragment)); written somewhere else, it gets the namespace declarations it needs there, and `xml:space` where another white space mode holds, unless its root element may not have one (a Markup Compatibility element, or an element whose content Markup Compatibility processes in its place), which is refused there instead. The context carries the namespace bindings and the white space mode, not an `xml:lang` or `xml:base` inherited from an ancestor (WordprocessingML marks the language of text with `w:lang` instead): a fragment written elsewhere takes on those of its new place. Its text uses the prefixes of the document it came from and may refer to namespaces declared outside it, which is why it carries its context, and which of the context's bindings it uses, found while it was read: writing it takes time in proportion to what it uses, however many bindings its context has.
+#[derive(Clone, Debug)]
+pub struct Fragment<'a> {
+    pub(crate) text: Cow<'a, str>,
+    pub(crate) context: Context,
+    /// Where, in the text, the name of the root element ends: where declarations go.
+    pub(crate) name_end: usize,
+    /// The bindings of the context that the fragment uses, sorted by prefix.
+    pub(crate) uses: Arc<[Use]>,
+    /// Whether the root element has an `xml:space` attribute.
+    pub(crate) sets_space: bool,
+    /// Whether the root element may have no `xml:space` attribute, so that none can be added to it: an element of the Markup Compatibility namespace (ECMA-376 Part 3, 5th edition, §7.1), or one whose content Markup Compatibility processes in its place (§9.2), as [`McReader::capture`](crate::McReader::capture) marks it.
+    pub(crate) fixed_space: bool,
+}
+
+impl<'a> Fragment<'a> {
+    /// A fragment of `text`, which must be exactly one element that is well-formed in `context`. It is read as [`Reader::with_context`] reads it, in time in proportion to the text and to the context's bindings.
+    ///
+    /// # Errors
+    ///
+    /// The first problem [`Reader`] finds in `text` read in `context`, or [`ErrorKind::ContentOutsideRoot`] if it is not exactly one element (white space, comments or anything else before or after it), [`ErrorKind::MisplacedDeclaration`] for an XML declaration.
+    pub fn new(
+        text: impl Into<Cow<'a, str>>,
+        context: Context,
+        limits: &Limits,
+    ) -> Result<Fragment<'a>, Error> {
+        let text = text.into();
+        let root = check_fragment(&text, &context, limits)?;
+        Ok(Fragment::from_parts(
+            text,
+            context,
+            root.name_end,
+            &root.uses,
+            root.sets_space,
+            root.compatibility,
+        ))
+    }
+
+    /// A fragment from its parts, with `uses` as the reader found them.
+    pub(crate) fn from_parts(
+        text: Cow<'a, str>,
+        context: Context,
+        name_end: usize,
+        uses: &Uses,
+        sets_space: bool,
+        fixed_space: bool,
+    ) -> Fragment<'a> {
+        Fragment {
+            text,
+            context,
+            name_end,
+            uses: uses
+                .iter()
+                .map(|(prefix, (uri, depth))| Use {
+                    prefix: prefix.clone(),
+                    uri: uri.clone(),
+                    depth: *depth,
+                })
+                .collect(),
+            sets_space,
+            fixed_space,
+        }
+    }
+
+    /// The element's text, exactly as it was written.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The namespace bindings and white space mode the element was in.
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    /// The fragment with its own copy of the text.
+    pub fn into_owned(self) -> Fragment<'static> {
+        Fragment {
+            text: Cow::Owned(self.text.into_owned()),
+            context: self.context,
+            name_end: self.name_end,
+            uses: self.uses,
+            sets_space: self.sets_space,
+            fixed_space: self.fixed_space,
+        }
+    }
+
+    /// The bindings of the context that the fragment uses, as (prefix, namespace name) pairs sorted by prefix: the prefixes of its element and attribute names, those that its Markup Compatibility attributes (and the `Requires` attribute of `mc:Choice`) list, and the prefix of the qualified name in an `xsi:type` attribute, wherever they are not declared inside the fragment. `("", "")` means that unprefixed element names in the fragment need no default namespace to be in force. Other qualified names in attribute values or text are not recognized, as in Exclusive XML Canonicalization.
+    pub fn needed_namespaces(&self) -> Vec<(&str, &str)> {
+        self.uses
+            .iter()
+            .map(|binding| (&*binding.prefix, &*binding.uri))
+            .collect()
+    }
+
+    /// The fragment as a standalone element: its text, with the declarations of the namespaces it needs from its context, and `xml:space="preserve"` if that was in force and the element does not set `xml:space` itself, added to its start tag. It is what [`Writer::fragment`](crate::Writer::fragment) writes as the root element of a document.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::SpaceConflict`] if `xml:space="preserve"` was in force and the root element may not have `xml:space`: an element of the Markup Compatibility namespace, or one whose content Markup Compatibility processes in its place (see [`Writer::fragment`](crate::Writer::fragment)).
+    pub fn to_standalone(&self) -> Result<String, WriteError> {
+        let preserve = self.context.space == Space::Preserve && !self.sets_space;
+        if preserve && self.fixed_space {
+            return Err(WriteError::SpaceConflict);
+        }
+        let mut added = String::new();
+        for binding in self.uses.iter() {
+            if binding.prefix.is_empty() {
+                if !binding.uri.is_empty() {
+                    added.push_str(" xmlns=\"");
+                    crate::escape::attribute(&binding.uri, &mut added);
+                    added.push('"');
+                }
+            } else {
+                added.push_str(" xmlns:");
+                added.push_str(&binding.prefix);
+                added.push_str("=\"");
+                crate::escape::attribute(&binding.uri, &mut added);
+                added.push('"');
+            }
+        }
+        if preserve {
+            added.push_str(" xml:space=\"preserve\"");
+        }
+        Ok(self.with_inserted(&added))
+    }
+
+    /// The text with `added` inserted after the root element's name.
+    pub(crate) fn with_inserted(&self, added: &str) -> String {
+        let (head, tail) = self.text.split_at(self.name_end.min(self.text.len()));
+        let mut out = String::with_capacity(self.text.len() + added.len());
+        out.push_str(head);
+        out.push_str(added);
+        out.push_str(tail);
+        out
+    }
+}
+
+/// What [`check_fragment`] finds about a fragment's root element.
+struct Root {
+    /// Where its name ends.
+    name_end: usize,
+    /// The bindings of the context that the fragment uses.
+    uses: Uses,
+    /// Whether it has an `xml:space` attribute.
+    sets_space: bool,
+    /// Whether it is in the Markup Compatibility namespace.
+    compatibility: bool,
+}
+
+/// Checks that `text` is exactly one element, well-formed in `context`, and returns what it finds about its root element.
+fn check_fragment(text: &str, context: &Context, limits: &Limits) -> Result<Root, Error> {
+    let outside = |offset| Error::new(offset, ErrorKind::ContentOutsideRoot);
+    let source = Source::new(text.as_bytes(), limits)?;
+    if source.declaration().is_some() {
+        return Err(Error::new(0, ErrorKind::MisplacedDeclaration));
+    }
+    if source.text().len() != text.len() {
+        // A byte order mark, which Source removed.
+        return Err(outside(0));
+    }
+    let mut reader = Reader::with_context(&source, limits, context)?;
+    if !reader.advance()? {
+        return Err(outside(0));
+    }
+    let (name_end, compatibility) = match reader.event() {
+        Some(Event::Start(tag)) if tag.span().start == 0 => {
+            let name = tag.name();
+            let colon = usize::from(!name.prefix().is_empty());
+            let compatibility = name
+                .namespace()
+                .is_some_and(|namespace| namespace.is(KnownNamespace::MarkupCompatibility));
+            (
+                1 + name.prefix().len() + colon + name.local().len(),
+                compatibility,
+            )
+        }
+        Some(_) | None => return Err(outside(0)),
+    };
+    let sets_space = reader.sets_space();
+    let mut uses = Uses::new();
+    reader.note_uses(1, &mut uses);
+    loop {
+        if !reader.advance()? {
+            return Err(Error::new(text.len(), ErrorKind::UnexpectedEnd));
+        }
+        match reader.event() {
+            Some(Event::Start(_)) => reader.note_uses(1, &mut uses),
+            Some(Event::End(tag)) if tag.depth() == 1 => {
+                if tag.span().end != text.len() {
+                    return Err(outside(tag.span().end));
+                }
+                break;
+            }
+            Some(_) | None => {}
+        }
+    }
+    if reader.advance()? {
+        return Err(outside(text.len()));
+    }
+    Ok(Root {
+        name_end,
+        uses,
+        sets_space,
+        compatibility,
+    })
+}
