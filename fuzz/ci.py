@@ -320,7 +320,7 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
                 shutil.rmtree(corpus)
                 (work / "minimized" / name).rename(corpus)
             results[name] = result
-            show(result, f"{name}: corpus {result.status}, {result.stats.get('before', 0):,} inputs before and {result.stats.get('after', 0):,} after, coverage {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
+            show(result, f"{name}: corpus {result.status}, {result.stats.get('before', 0):,} inputs before and {result.stats.get('after', 0):,} after, coverage without the seeds {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
     return [results[name] for name in TARGETS if name in results]
 
 
@@ -343,7 +343,8 @@ def run_table(results: Sequence[Result]) -> str:
 
 
 def minimize_table(results: Sequence[Result]) -> str:
-    rows = ["| Target | Result | Inputs before | Inputs after | Coverage (edges / features) |", "|---|---|---|---|---|"]
+    # libFuzzer never copies the seeds into the corpus, and every run reads them again, so a minimized corpus can reach less than the run that fuzzed with the seeds.
+    rows = ["| Target | Result | Inputs before | Inputs after | Coverage without the seeds (edges / features) |", "|---|---|---|---|---|"]
     for result in results:
         stats = result.stats
         rows.append(f"| `{result.target}` | {status_of(result)} | {stats.get('before', 0):,} | {stats.get('after', 0):,} | {stats.get('edges', 0):,} / {stats.get('features', 0):,} |")
