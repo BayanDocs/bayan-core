@@ -162,7 +162,6 @@ pub struct Reader<'a> {
     current: Current<'a>,
     attributes: Vec<AttributeData<'a>>,
     duplicates: Vec<(Option<NamespaceId>, &'a str, usize)>,
-    pieces: Vec<(bool, Range<usize>)>,
     text_buffer: String,
     end_of_empty_element: bool,
     initial_space: Space,
@@ -204,7 +203,6 @@ impl<'a> Reader<'a> {
             current: Current::Nothing,
             attributes: Vec::new(),
             duplicates: Vec::new(),
-            pieces: Vec::new(),
             text_buffer: String::new(),
             end_of_empty_element: false,
             initial_space: Space::Default,
@@ -938,57 +936,54 @@ impl<'a> Reader<'a> {
     }
 
     /// A run of text and references that starts with the token at `span` (a reference if `reference`). Returns whether it is an event: white space outside the root element is skipped.
+    ///
+    /// Each piece is checked and decoded as soon as it is read, so that the run keeps nothing for each piece: its text is borrowed from the document as long as decoding leaves it unchanged, and from the first piece that decoding changes (a reference, or line ends to normalize) on, it is decoded into one copy of the run.
     fn text_run(&mut self, reference: bool, span: Range<usize>) -> Result<bool, Error> {
-        self.pieces.clear();
-        self.pieces.push((reference, span));
+        let in_root = self.phase == Phase::InRoot;
+        let start = span.start;
+        let mut end = span.end;
+        let mut buffered = false;
+        let mut piece = (reference, span);
         loop {
-            let (token, span) = self.token()?;
-            match token {
-                Token::Text(_) => self.pieces.push((false, span)),
-                Token::GeneralRef(_) => self.pieces.push((true, span)),
-                other => {
-                    self.lookahead = Some((other, span));
-                    break;
-                }
-            }
-        }
-        if self.phase != Phase::InRoot {
-            for (reference, span) in &self.pieces {
-                let blank = self.slice(span).bytes().all(is_space);
-                if *reference || !blank {
+            let (reference, span) = piece;
+            let raw = self.slice(&span);
+            if !in_root {
+                if reference || !raw.bytes().all(is_space) {
                     return Err(Error::new(span.start, ErrorKind::ContentOutsideRoot));
                 }
-            }
-            return Ok(false);
-        }
-        let mut owned = self.pieces.len() > 1;
-        for (reference, span) in &self.pieces {
-            let raw = self.slice(span);
-            if *reference {
-                owned = true;
+            } else if reference {
+                let name = raw.get(1..raw.len().saturating_sub(1)).unwrap_or_default();
+                let character = markup::reference(name, span.start, &self.limits)?;
+                if !buffered {
+                    self.start_copy(start, span.start);
+                    buffered = true;
+                }
+                self.text_buffer.push(character);
             } else {
                 if let Some(offset) = raw.find("]]>") {
                     return Err(Error::new(span.start + offset, ErrorKind::CDataEndInText));
                 }
-                owned |= raw.contains('\r');
-            }
-        }
-        let start = self.pieces.first().map_or(0, |(_, span)| span.start);
-        let end = self.pieces.last().map_or(start, |(_, span)| span.end);
-        if owned {
-            // Decoding never makes text longer, so the run's own length is all the copy can need.
-            self.text_buffer.clear();
-            self.text_buffer.reserve_exact(end - start);
-            for (reference, span) in &self.pieces {
-                let raw = self.slice(span);
-                if *reference {
-                    let name = raw.get(1..raw.len().saturating_sub(1)).unwrap_or_default();
-                    self.text_buffer
-                        .push(markup::reference(name, span.start, &self.limits)?);
-                } else {
+                if !buffered && raw.contains('\r') {
+                    self.start_copy(start, span.start);
+                    buffered = true;
+                }
+                if buffered {
                     markup::push_normalized_line_ends(raw, &mut self.text_buffer);
                 }
             }
+            let (token, next) = self.token()?;
+            piece = match token {
+                Token::Text(_) => (false, next),
+                Token::GeneralRef(_) => (true, next),
+                other => {
+                    self.lookahead = Some((other, next));
+                    break;
+                }
+            };
+            end = piece.1.end;
+        }
+        if !in_root {
+            return Ok(false);
         }
         let space = self
             .elements
@@ -996,10 +991,19 @@ impl<'a> Reader<'a> {
             .map_or(self.initial_space, |frame| frame.element.space);
         self.current = Current::Text {
             span: start..end,
-            buffered: owned,
+            buffered,
             space,
         };
         Ok(true)
+    }
+
+    /// Starts the copy of the run of text that begins at `start` with `piece`, the first of its pieces that decoding changes: the text before it is the same decoded. The copy gets room for the whole run, which ends at the next `<` (neither character data nor a reference contains one), because decoding never makes text longer, so it needs no more and is never moved.
+    fn start_copy(&mut self, start: usize, piece: usize) {
+        let rest = self.text.get(piece..).unwrap_or_default();
+        let end = piece + rest.find('<').unwrap_or(rest.len());
+        self.text_buffer.clear();
+        self.text_buffer.reserve_exact(end - start);
+        self.text_buffer.push_str(self.slice(&(start..piece)));
     }
 
     /// A processing instruction at `span`.
@@ -1035,3 +1039,4 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 }
+
