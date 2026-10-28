@@ -981,6 +981,32 @@ fn refuses_a_second_end_record_that_does_not_end_the_input() {
 }
 
 #[test]
+fn reads_an_end_signature_before_the_end_record() {
+    // An embedded spreadsheet is itself a ZIP archive, and Word stores it uncompressed, so its end record appears in the package before the package's own, which stays the last signature (29 documents of the public corpus carry such signatures). Only a signature after the end record makes the end ambiguous.
+    let spreadsheet = Archive::new(vec![Item::deflated("xl/workbook.xml", b"<workbook/>")]).build();
+    let bytes = Archive::new(vec![
+        Item::deflated(
+            "[Content_Types].xml",
+            b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/></Types>",
+        ),
+        Item::deflated("word/document.xml", b"<document/>"),
+        Item::stored(
+            "word/embeddings/Microsoft_Excel_Worksheet.xlsx",
+            &spreadsheet,
+        ),
+    ])
+    .build();
+    let signatures = bytes
+        .windows(4)
+        .filter(|window| *window == [0x50, 0x4B, 0x05, 0x06])
+        .count();
+    assert_eq!(signatures, 2);
+    assert_eq!(open_zip(&bytes).unwrap().entries().len(), 3);
+    let package = Package::open(&bytes, &Limits::default()).unwrap();
+    assert_eq!(package.parts().count(), 2);
+}
+
+#[test]
 fn refuses_split_archives() {
     let mut archive = Archive::new(package_items());
     archive.disk = 1;
