@@ -199,7 +199,7 @@ fn refuses_malformed_declarations() {
 
 #[test]
 fn refuses_each_declaration_field_as_soon_as_it_is_read() {
-    // Each declaration ends right after a field it may not have, so it is refused at that field's value; a reader that collected the fields before checking them would reach the end of the text first and report that instead (finding M3 of the architecture review of 2026-10-27).
+    // Each declaration has a field it may not have, followed by the end of the text or, in the last case, by a syntax error, so it is refused at that field's value; a reader that collected the fields before checking them would reach the later problem first and report that instead (finding M3 of the architecture review of 2026-10-27).
     for (text, kind, offset) in [
         ("<?xml version=\"1.1\"", ErrorKind::MalformedDeclaration, 15),
         (
@@ -236,6 +236,11 @@ fn refuses_each_declaration_field_as_soon_as_it_is_read() {
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" standalone=\"no\"",
             ErrorKind::MalformedDeclaration,
             65,
+        ),
+        (
+            "<?xml version=\"1.1\" x?><a/>",
+            ErrorKind::MalformedDeclaration,
+            15,
         ),
     ] {
         assert_eq!(refusal(text.as_bytes()), (kind, offset), "{text}");
