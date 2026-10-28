@@ -16,7 +16,7 @@ from unittest import mock
 
 import ci
 
-# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, keeps a crash input and exits with libFuzzer's error code when its name says so, and in merge mode copies the corpus into the output folder and prints libFuzzer's summary, or when its name says so a sanitizer's or libFuzzer's report, or no summary.
+# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, keeps a crash input and exits with libFuzzer's error code when its name says so, and in merge mode copies the corpus into the output folder and prints libFuzzer's summary. When its name says so, a merge prints a sanitizer's or libFuzzer's report, or no summary, and copies nothing, so that a test sees whether the corpus was replaced by what a failed merge left.
 FAKE_TARGET = """#!/bin/sh
 prefix=
 merge=
@@ -29,10 +29,11 @@ done
 if [ -n "$merge" ]; then
   output="$(eval echo "\\${$(($# - 1))}")"
   input="$(eval echo "\\${$#}")"
-  cp "$input"/* "$output"/
   case "$0" in
     *sanitizer*) echo "==1==ERROR: AddressSanitizer: heap-use-after-free" ;;
     *signal*) echo "==1== ERROR: libFuzzer: deadly signal" ;;
+    *silent*) ;;
+    *) cp "$input"/* "$output"/ ;;
   esac
   case "$0" in
     *silent*) ;;
