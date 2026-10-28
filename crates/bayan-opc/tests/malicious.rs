@@ -899,7 +899,12 @@ fn refuses_an_end_signature_in_the_comment() {
         ),
         (
             "in the middle of the comment",
-            [&b"some text, "[..], &signature, b", and more text"].concat(),
+            [
+                &b"some text, "[..],
+                &signature,
+                b", and enough text after it for a record",
+            ]
+            .concat(),
         ),
         // Too close to the end for a whole record, but Python's zipfile still takes it for the end record (and then refuses the archive).
         (
@@ -910,8 +915,8 @@ fn refuses_an_end_signature_in_the_comment() {
         let mut archive = Archive::new(package_items());
         archive.comment = comment;
         assert_eq!(
-            zip_error(&archive.build()),
-            ZipError::AmbiguousEnd,
+            open_zip(&archive.build()).map(|_| ()),
+            Err(Error::Zip(ZipError::AmbiguousEnd)),
             "{case}"
         );
     }
@@ -962,10 +967,14 @@ fn refuses_a_second_end_record_that_does_not_end_the_input() {
         let mut bytes = bytes.clone();
         put16(&mut bytes, second_end + 20, u16::try_from(length).unwrap());
         assert_ne!(second_end + END + length, bytes.len());
-        assert_eq!(zip_error(&bytes), ZipError::AmbiguousEnd, "{length}");
         assert_eq!(
-            package_error(&bytes),
-            Error::Zip(ZipError::AmbiguousEnd),
+            open_zip(&bytes).map(|_| ()),
+            Err(Error::Zip(ZipError::AmbiguousEnd)),
+            "{length}"
+        );
+        assert_eq!(
+            Package::open(&bytes, &Limits::default()).map(|_| ()),
+            Err(Error::Zip(ZipError::AmbiguousEnd)),
             "{length}"
         );
     }
