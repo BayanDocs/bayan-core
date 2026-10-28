@@ -957,6 +957,23 @@ mod tests {
     }
 
     #[test]
+    fn the_fuzz_workflow_uses_the_miri_toolchain() {
+        // Fuzzing and Miri both use the BayanDocs cloud environment's RUST_NIGHTLY, so the monthly dependency session moves them together.
+        let workflow = read(
+            &crate::workspace_root()
+                .join(".github")
+                .join("workflows")
+                .join("fuzz.yml"),
+        )
+        .unwrap();
+        let pinned = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("FUZZ_TOOLCHAIN: "))
+            .unwrap();
+        assert_eq!(pinned, MIRI_TOOLCHAIN);
+    }
+
+    #[test]
     fn the_package_json_is_private_and_names_the_licence() {
         let text = package_json("1.2.3");
         let value = json::parse(&text).unwrap();

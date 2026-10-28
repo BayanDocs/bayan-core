@@ -58,6 +58,21 @@ test = false
 doc = false
 bench = false
 
+# zip_archive and package again, with bayan-opc's default limits instead of smaller ones, for the nightly runs with large inputs (see README.md).
+[[bin]]
+name = "zip_archive_default_limits"
+path = "fuzz_targets/zip_archive_default_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "package_default_limits"
+path = "fuzz_targets/package_default_limits.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "xml_reader"
 path = "fuzz_targets/xml_reader.rs"
