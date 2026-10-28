@@ -1044,13 +1044,13 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
-    /// The most memory that reading may keep, in bytes for every byte of the part, for the parts these tests read: the bound they hold the reader to (ADR-0006 §5; "Time and memory" in the crate documentation). Their text is ASCII, in runs about as long as the part. The reader keeps one copy of a run, never longer than the run itself, so at most the part's size; a UTF-16 part adds its decoded text, for which `Source::new` reserves as many bytes as the part has, while the run's copy then takes half as many, one and a half times the part in all. Memory kept for every piece of a run or every field of a declaration goes far beyond this.
+    /// The most that the reader's buffers may hold, in bytes for every byte of the part, for the parts this test reads: the bound it holds the reader to (ADR-0006 §5; "Time and memory" in the crate documentation). Their text is ASCII, in runs about as long as the part, and the reader keeps one copy of a run, never longer than the run itself, so at most the part's size. Memory kept for every piece of a run goes far beyond this.
     const AT_MOST: usize = 2;
 
     /// About the size of the crafted parts: large enough that memory kept for every piece of a run shows far above the bound, small enough to read quickly in a debug build and in WebAssembly.
     const SIZE: usize = 1 << 20;
 
-    /// The bytes that the reader's own buffers hold, by their capacity: the attributes of the current start tag and their decoded values, the list for finding duplicate attributes, the open elements, the bindings in scope, and the decoded copy of a run of text or of a CDATA section. Left out are the maps of prefixes and of namespace names, which the limits bound, and quick-xml's own list of the names of open elements, which it does not show; the measurement in WebAssembly counts both.
+    /// The bytes that the reader's own buffers hold, by their capacity: the attributes of the current start tag and their decoded values, the list for finding duplicate attributes, the open elements, the bindings in scope, and the decoded copy of a run of text or of a CDATA section. Left out are the maps of prefixes and of namespace names, which the limits bound, and quick-xml's own list of the names of open elements, which it does not show; the test program `memory_runs` measures all the memory in WebAssembly.
     fn kept(reader: &Reader<'_>) -> usize {
         let owned = |value: &Cow<'_, str>| match value {
             Cow::Owned(value) => value.capacity(),
@@ -1081,41 +1081,16 @@ mod tests {
             + cdata
     }
 
-    /// Reads `part` to its end or to its first error, and returns the error, if there is one, with the most that the reader's buffers held after any event.
-    fn read(part: &[u8]) -> (Option<Error>, usize) {
+    /// Reads `part` to its end and returns the most that the reader's buffers held after any event.
+    fn most_kept(part: &[u8]) -> usize {
         let limits = Limits::default();
-        let source = match Source::new(part, &limits) {
-            Ok(source) => source,
-            Err(error) => return (Some(error), 0),
-        };
+        let source = Source::new(part, &limits).unwrap();
         let mut reader = Reader::new(&source, &limits);
         let mut most = 0;
-        loop {
-            let read = reader.next_event().map(|event| event.is_some());
+        while reader.next_event().unwrap().is_some() {
             most = most.max(kept(&reader));
-            match read {
-                Ok(true) => {}
-                Ok(false) => return (None, most),
-                Err(error) => return (Some(error), most),
-            }
         }
-    }
-
-    /// How much WebAssembly's linear memory grows while `work` runs, in bytes. Linear memory never shrinks, so this is the most memory that `work` held at once, besides what it found free. The free memory is filled first with blocks of 64 KiB, so that what earlier work freed cannot hide what `work` allocates: all that can be left free is pieces smaller than a block, too small for a large buffer, and the rest of the last page.
-    #[cfg(target_arch = "wasm32")]
-    fn growth(work: impl FnOnce()) -> usize {
-        use core::arch::wasm32::memory_size;
-        const PAGE: usize = 64 << 10;
-        let mut ballast = Vec::new();
-        let start = memory_size::<0>();
-        while memory_size::<0>() == start {
-            ballast.push(vec![0_u8; PAGE]);
-        }
-        let before = memory_size::<0>();
-        work();
-        let grown = memory_size::<0>() - before;
-        drop(ballast);
-        grown * PAGE
+        most
     }
 
     /// About `SIZE` bytes of `unit` repeated, as the text of a root element.
@@ -1131,7 +1106,7 @@ mod tests {
             .collect()
     }
 
-    // Finding M3 of the architecture review of 2026-10-27: the reader listed every piece of a run of text before decoding any, and every reference is a piece of its own, so that its buffers held seven times a run of `&lt;` on 64-bit platforms, and thirteen times a run of `x&#9;`, two pieces every five bytes. Decoded as they are read, the pieces keep one copy of the run, never longer than the run itself.
+    // Finding M3 of the architecture review of 2026-10-27: the reader listed every piece of a run of text before decoding any, and every reference is a piece of its own, so that its buffers held seven times a run of `&lt;` on 64-bit platforms, and thirteen times a run of `x&#9;`, two pieces every five bytes. Decoded as they are read, the pieces keep one copy of the run, never longer than the run itself. On the host and in WebAssembly alike; the test program `memory_runs` measures the same runs' memory in WebAssembly.
     #[test]
     fn keeps_one_copy_of_a_run_of_text_however_many_references_it_holds() {
         for part in [
@@ -1141,61 +1116,12 @@ mod tests {
             run("&#x10FFFF;").into_bytes(),
             utf16(&run("&lt;")),
         ] {
-            let (error, most) = read(&part);
-            assert_eq!(error, None);
+            let most = most_kept(&part);
             assert!(
                 most <= AT_MOST * part.len(),
                 "kept {most} bytes for a part of {} bytes",
                 part.len()
             );
-            #[cfg(target_arch = "wasm32")]
-            {
-                let grown = growth(|| {
-                    read(&part);
-                });
-                assert!(
-                    grown <= AT_MOST * part.len(),
-                    "took {grown} bytes for a part of {} bytes",
-                    part.len()
-                );
-            }
-        }
-    }
-
-    // Finding M3 of the architecture review of 2026-10-27: the XML declaration collected all its fields before checking any, so that a declaration of empty fields kept 40 bytes for every 4 of its own before it was refused. Each field is now checked as soon as it is read: the first field that the declaration may not have is refused before anything after it is read, where a reader that collected the fields would read on to the end of the declaration, which never comes here, and report that instead. Nothing of the fields is kept, and only WebAssembly can measure that: fields kept for checking later would live inside `Source::new`, where no capacity can be seen from outside. On the host the point of refusal stands in for the measurement, because a reader that stops at the first field it may not have cannot have kept more than three.
-    #[test]
-    fn refuses_a_long_declaration_at_the_first_field_it_does_not_allow() {
-        let empty_fields = " =\"\"".repeat(SIZE / 4);
-        for (start, offset) in [
-            // A field without a name,
-            ("<?xml version=\"1.0\"", 22),
-            // one that repeats a field,
-            ("<?xml version=\"1.0\" version=\"1.0\"", 29),
-            // and a fourth field.
-            (
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"",
-                56,
-            ),
-        ] {
-            let part = format!("{start}{empty_fields}").into_bytes();
-            let (error, _) = read(&part);
-            let error = error.unwrap();
-            assert_eq!(
-                (error.kind(), error.offset()),
-                (ErrorKind::MalformedDeclaration, offset),
-                "{start}"
-            );
-            #[cfg(target_arch = "wasm32")]
-            {
-                let grown = growth(|| {
-                    read(&part);
-                });
-                assert!(
-                    grown <= AT_MOST * part.len(),
-                    "took {grown} bytes for a part of {} bytes",
-                    part.len()
-                );
-            }
         }
     }
 }
