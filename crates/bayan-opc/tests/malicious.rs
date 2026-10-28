@@ -403,6 +403,112 @@ fn refuses_duplicate_and_equivalent_names() {
     }
 }
 
+// A Unicode Path field gives an entry a second name, which other tools read instead of the name field, so they would see a different file than this reader. Packages never need it, since the UTF-8 flag says how a name is encoded, so the reader refuses every entry that carries one, in either header (follow-up 6 of pull request 17).
+
+/// An Info-ZIP Unicode Path extra field (ID 0x7075, APPNOTE 4.6.9) as tools write it: version 1, the CRC-32 of the name field it stands for, then `name` in UTF-8. Where that checksum matches the header's name field, other tools take `name` as the entry's name: Info-ZIP's UnZip, 7-Zip and Apache Commons Compress for an entry without the UTF-8 flag, Python's zipfile and libarchive also with it.
+fn unicode_path(name_field: &str, name: &str) -> Vec<u8> {
+    unicode_path_field(1, craft::crc32(name_field.as_bytes()), name)
+}
+
+/// A Unicode Path extra field of any `version`, with any `checksum`, then `name`.
+fn unicode_path_field(version: u8, checksum: u32, name: &str) -> Vec<u8> {
+    let mut field = vec![0x75, 0x70];
+    field.extend_from_slice(&u16::try_from(5 + name.len()).unwrap().to_le_bytes());
+    field.push(version);
+    field.extend_from_slice(&checksum.to_le_bytes());
+    field.extend_from_slice(name.as_bytes());
+    field
+}
+
+/// An Info-ZIP extended timestamp extra field (ID 0x5455) with a modification time, which many tools write: an extra field that gives no name.
+const TIMESTAMP: [u8; 9] = [0x55, 0x54, 5, 0, 1, 0, 0, 0, 0];
+
+/// Archives of one entry whose name field is `a.xml` and whose Unicode Path field, with the checksum of `a.xml`, calls it `b.xml`, in the central directory header if `central` and in the local header if `local`: without the UTF-8 flag, with it, and after another extra field. Each comes with a description for the test's messages.
+fn renamed_by_unicode_path(central: bool, local: bool) -> Vec<(&'static str, Vec<u8>)> {
+    let field = unicode_path("a.xml", "b.xml");
+    let after_timestamp = [TIMESTAMP.as_slice(), &field].concat();
+    [
+        ("without the UTF-8 flag", 0, field.clone()),
+        ("with the UTF-8 flag", 1 << 11, field),
+        ("after a timestamp field", 0, after_timestamp),
+    ]
+    .into_iter()
+    .map(|(case, flags, extra)| {
+        let mut item = Item::stored("a.xml", b"x");
+        item.flags = flags;
+        if central {
+            item.central_extra = extra.clone();
+        }
+        if local {
+            item.local_extra = extra;
+        }
+        (case, Archive::new(vec![item]).build())
+    })
+    .collect()
+}
+
+#[test]
+fn refuses_a_unicode_path_field_in_the_central_directory() {
+    // Other extra fields give no name and stay accepted, in both headers, which also shows that the builder writes extra fields soundly.
+    let mut item = Item::stored("a.xml", b"x");
+    item.central_extra = TIMESTAMP.to_vec();
+    item.local_extra = TIMESTAMP.to_vec();
+    open_zip(&Archive::new(vec![item]).build()).unwrap();
+    for (case, bytes) in renamed_by_unicode_path(true, false) {
+        assert_eq!(
+            open_zip(&bytes).map(|_| ()),
+            Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn refuses_a_unicode_path_field_in_the_local_header() {
+    // Streaming readers, such as Commons Compress's `ZipArchiveInputStream`, read only the local headers.
+    for (case, bytes) in renamed_by_unicode_path(false, true) {
+        assert_eq!(
+            open_zip(&bytes).map(|_| ()),
+            Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn refuses_a_unicode_path_field_in_both_headers() {
+    for (case, bytes) in renamed_by_unicode_path(true, true) {
+        assert_eq!(
+            open_zip(&bytes).map(|_| ()),
+            Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
+            "{case}"
+        );
+    }
+    // Packages never need the field, so what it holds does not matter: it is refused even where it gives the name the entry already has, and whatever its version and checksum. Python's zipfile reads only version 1 with a checksum that matches the name field, but 7-Zip and UnZip also read version 0, libarchive any version, and libarchive with its `ignorecrc32` option any checksum (the review of pull request 32).
+    let checksum = craft::crc32(b"a.xml");
+    for (case, field) in [
+        (
+            "a field that agrees with the name",
+            unicode_path("a.xml", "a.xml"),
+        ),
+        ("version 0", unicode_path_field(0, checksum, "b.xml")),
+        ("version 2", unicode_path_field(2, checksum, "b.xml")),
+        (
+            "a checksum that does not match the name field",
+            unicode_path_field(1, !checksum, "b.xml"),
+        ),
+    ] {
+        let mut item = Item::stored("a.xml", b"x");
+        item.central_extra = field.clone();
+        item.local_extra = field;
+        assert_eq!(
+            open_zip(&Archive::new(vec![item]).build()).map(|_| ()),
+            Err(Error::Zip(ZipError::UnsafeName { entry: 0 })),
+            "{case}"
+        );
+    }
+}
+
 // Encryption, compression methods and special files.
 
 #[test]
@@ -1629,6 +1735,9 @@ mod craft {
         pub central_offset: Option<u64>,
         /// Write no local header or data at all (for entries that point into another entry).
         pub skip_local: bool,
+        /// Extra fields to write after the ZIP64 field, if there is one: in the central directory header, and in the local header.
+        pub central_extra: Vec<u8>,
+        pub local_extra: Vec<u8>,
     }
 
     /// How a data descriptor is written.
@@ -1663,6 +1772,8 @@ mod craft {
                 central_name: None,
                 central_offset: None,
                 skip_local: false,
+                central_extra: Vec::new(),
+                local_extra: Vec::new(),
             }
         }
 
@@ -1751,6 +1862,7 @@ mod craft {
                         put32(&mut out, low32(item.size));
                     }
                 }
+                extra.extend_from_slice(&item.local_extra);
                 put16(&mut out, u16::try_from(name.len()).unwrap());
                 put16(&mut out, u16::try_from(extra.len()).unwrap());
                 out.extend_from_slice(&name);
@@ -1787,6 +1899,7 @@ mod craft {
                     put64(&mut extra, item.compressed());
                     put64(&mut extra, offset);
                 }
+                extra.extend_from_slice(&item.central_extra);
                 put32(&mut out, 0x0201_4B50);
                 put16(&mut out, item.made_by);
                 put16(&mut out, if item.zip64 { 45 } else { 20 });
