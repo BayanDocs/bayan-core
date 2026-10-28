@@ -5,7 +5,7 @@
 //! - `cargo xtask verify` runs the verification gate: every check a change must pass before it is pushed, the same locally and in CI. See `verify.rs` and the "Verification gate" section of AGENTS.md.
 //! - `cargo xtask sdk`, `cargo xtask wasm-package` and `cargo xtask c-driver` build the engine's artifacts for the shells, the C SDK and the WebAssembly package, and run the C test driver against the SDK; `cargo xtask miri` runs bayan-ffi's tests under Miri (`artifacts.rs`, work package CORE-007).
 //!
-//! - `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age [--base <revision>]` run the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003; see `supply_chain/`). The gate runs both in its supply-chain step.
+//! - `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age [--base <revision>]` run the supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003; see `supply_chain/`), in every Cargo workspace of the repository: the main one, and every folder below it with its own `Cargo.lock`, today `fuzz/` (bayan-core#22). The gate runs both in its supply-chain step.
 //!
 //! xtask never builds its own executable while it runs (Windows cannot replace a running program), so the gate's commands check, test or document xtask but do not build its binary.
 
@@ -41,13 +41,16 @@ Commands:
            Run it before every push; CI runs the same command.
   check-exact-pins
            Check that every dependency is pinned exactly (=x.y.z), in
-           [workspace.dependencies] and in every crate (ADR-0017 rule 5).
+           [workspace.dependencies] and in every crate (ADR-0017 rule 5), in the
+           main workspace and in every workspace below it with its own Cargo.lock
+           (today fuzz/). Needs git.
   check-lockfile-age [--base <revision>]
-           Check that every package version added to Cargo.lock since the merge
-           base with <revision> (default: origin/<GITHUB_BASE_REF> in a pull request
-           on GitHub Actions, otherwise origin/main) was published on crates.io at
-           least 24 hours before the commit that added it, and before now
-           (ADR-0017 rule 4). Needs git and curl; uses the network only when
+           Check that every package version added to a Cargo.lock (the main
+           workspace's, and fuzz/Cargo.lock and any other below the root) since the
+           merge base with <revision> (default: origin/<GITHUB_BASE_REF> in a pull
+           request on GitHub Actions, otherwise origin/main) was published on
+           crates.io at least 24 hours before the commit that added it, and before
+           now (ADR-0017 rule 4). Needs git and curl; uses the network only when a
            Cargo.lock changed.
   sdk [--target <triple>] [--out <folder>]
            Build the engine's C SDK (static and dynamic library, C header, JSON Schema,

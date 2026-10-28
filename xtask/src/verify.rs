@@ -98,14 +98,14 @@ pub const CLIPPY_RUNS: [ClippyRun; 4] = [
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
 
-/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to `Cargo.lock` is at least 24 hours old. The second compares with the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when `Cargo.lock` changed.
+/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to a `Cargo.lock` is at least 24 hours old. Both read every Cargo workspace of the repository: the main one, and every folder below it where Git tracks a `Cargo.lock`, today the fuzz workspace (`fuzz/`, bayan-core#22), which may depend by path on members of the main workspace. The second compares each `Cargo.lock` with its own version at the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when a `Cargo.lock` changed.
 const SUPPLY_CHAIN_CHECKS: &[Check] = &[
     (
-        "check-exact-pins: every dependency is pinned exactly (ADR-0017 rule 5)",
+        "check-exact-pins: every dependency of every workspace (the main one and fuzz/) is pinned exactly (ADR-0017 rule 5)",
         exact_pins,
     ),
     (
-        "check-lockfile-age: Cargo builds exactly what Cargo.lock lists, and every package version added to it was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
+        "check-lockfile-age: Cargo builds exactly what each Cargo.lock lists (the main workspace's and fuzz/Cargo.lock), and every package version added to one was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
         lockfile_age,
     ),
 ];
