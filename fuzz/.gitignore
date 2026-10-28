@@ -1,5 +1,8 @@
-# Built by cargo-fuzz, and the corpora and crash artifacts that fuzzing produces locally.
+# Built by cargo-fuzz, and the corpora and crash artifacts that fuzzing produces locally; seeds/, logs/ and minimized/ are ci.py's.
 /target/
 /corpus/
 /artifacts/
 /coverage/
+/seeds/
+/logs/
+/minimized/

@@ -1,0 +1,128 @@
+# Fuzzes every parser of untrusted input that has a fuzz target in fuzz/ (ADR-0025 §4, ADR-0006 §5; bayan-core#21, the follow-up 1 of CORE-005): the targets are built with cargo-fuzz (libFuzzer with AddressSanitizer) on the pinned nightly toolchain, and run by fuzz/ci.py, which holds each target's settings.
+# - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved, which a pull request only reads.
+# - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. The corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run. Only these runs save a corpus, each into the cache of its own branch: the scheduled runs on main, and a manual run on the branch it was started on.
+# A crash, a timeout, running out of memory or a leak fails the run, and the inputs that caused it are uploaded with every target's log as the artifact fuzzing-failures; fuzz/README.md explains how to reproduce one. Everyone who can read this repository's Actions can download that artifact, which is acceptable only because every input comes from public files (fuzz/ci.py seeds); a crash that is a security problem is then reported privately, as SECURITY.md says.
+# It is not a required check: a path filter skips it on most pull requests, and a required check that never runs would block merging forever (docs/scripts/github-settings.py), as for text-pipeline.yml.
+# GitHub notifies the person who last changed the cron schedule below when a scheduled run fails. Agents push and merge under the owner's account, so that is the owner; whoever else changes the schedule receives the notifications instead. GitHub also switches scheduled workflows off after 60 days without activity in the repository; re-enabling one makes its notifications go to whoever re-enabled it.
+# Workflow conventions (AGENTS.md): GitHub's own actions only, pinned to full commit SHAs with the version in a comment; no permissions beyond reading the repository; no credentials kept after checkout; a timeout; one concurrency group; tools at pinned versions, checked against SHA-256 checksums; no secrets. A pull request never saves a cache, and GitHub lets it read only the caches of its base branch and of main, so a pull request against main reads only corpora that runs on main saved.
+name: Fuzzing
+
+on:
+  pull_request:
+    paths:
+      - crates/bayan-opc/**
+      - crates/bayan-xml/**
+      - fuzz/**
+      # bayan-opc and bayan-xml take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
+      - Cargo.toml
+      - .cargo/**
+      - .github/workflows/fuzz.yml
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  # Only a newer push to the same pull request cancels a run; a manual run waits for the nightly one, or the other way round.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation helps only when one machine rebuilds again and again, which this job never does.
+  CARGO_INCREMENTAL: 0
+  # The nightly toolchain that cargo-fuzz needs (for AddressSanitizer and libFuzzer's instrumentation): the BayanDocs cloud environment's RUST_NIGHTLY (docs/scripts/cloud-environment-setup.sh), built on 2026-10-02. Must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs and scripts/dev-setup.sh (an xtask test checks this). Change it only in the monthly dependency session.
+  FUZZ_TOOLCHAIN: nightly-2026-10-02
+  # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
+  CARGO_FUZZ_VERSION: 0.13.2
+  CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
+  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, every target has run after 3 × FUZZ_SECONDS: 7.5 minutes on a pull request, 45 minutes at night.
+  FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 150 || 900 }}
+
+jobs:
+  fuzz:
+    name: Fuzzing
+    runs-on: ubuntu-24.04
+    # A pull request's run takes about 10 minutes and a nightly one about an hour: the fuzzing takes 7.5 and 45 minutes (FUZZ_SECONDS above), and the setup, the build (under a minute) and, at night, the minimizing come on top.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 90 }}
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The minimal profile: rustc, Cargo and the standard library are all that cargo-fuzz needs. rustup checks every component against the SHA-256 in the toolchain's release manifest.
+      - name: Install the pinned nightly toolchain
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
+          rustc "+$FUZZ_TOOLCHAIN" --version
+
+      - name: Install cargo-fuzz (pinned release archive, SHA-256 checked)
+        run: |
+          name="cargo-fuzz-$CARGO_FUZZ_VERSION-x86_64-unknown-linux-musl"
+          cd "$RUNNER_TEMP" || exit 1
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$name.tar.gz" \
+            "https://github.com/rust-fuzz/cargo-fuzz/releases/download/$CARGO_FUZZ_VERSION/$name.tar.gz"
+          echo "$CARGO_FUZZ_SHA256  $name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$name.tar.gz" cargo-fuzz
+          # Install next to cargo (rustup's bin directory), which is already on PATH.
+          cp cargo-fuzz "$(dirname "$(command -v cargo)")/"
+          cargo "+$FUZZ_TOOLCHAIN" fuzz --version
+
+      - name: Test the fuzzing helper (fuzz/test_ci.py)
+        run: python3 -I -m unittest discover --start-directory fuzz --pattern 'test_*.py'
+
+      # From fuzz/Cargo.lock as it is: `cargo fetch --locked` fails if the lockfile would have to change, and Cargo checks every crate against the checksum the lockfile records. --target names the host, because this cargo-fuzz would otherwise build for its own musl target.
+      - name: Build every fuzz target
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" fetch --locked --manifest-path fuzz/Cargo.toml
+          cargo "+$FUZZ_TOOLCHAIN" fuzz build --target x86_64-unknown-linux-gnu
+          git diff --exit-code fuzz/Cargo.lock
+
+      - name: Write the seeds (public files only)
+        run: python3 -I fuzz/ci.py seeds "$RUNNER_TEMP/seeds"
+
+      # The latest corpus that a scheduled or manual run saved on this branch, or else on main (for a pull request: on its base branch, or else on main). A pull request only reads it. Without one, the run starts from the seeds alone.
+      - name: Restore the corpus of the last nightly run
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz every target
+        id: fuzz
+        run: python3 -I fuzz/ci.py run --all --seconds "$FUZZ_SECONDS" --seeds "$RUNNER_TEMP/seeds"
+
+      # Also after a target failed: its corpus holds only inputs that passed, and the others' progress is kept.
+      - name: Minimize the corpora
+        id: minimize
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        run: python3 -I fuzz/ci.py minimize --all
+
+      # Only scheduled and manual runs save, each into its own branch's cache; never a pull request, whose code is not yet reviewed.
+      - name: Save the corpora for the next run
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload the inputs that failed, with the logs
+        if: ${{ failure() && (steps.fuzz.outcome == 'failure' || steps.minimize.outcome == 'failure') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzzing-failures
+          path: |
+            fuzz/artifacts/
+            fuzz/logs/
+          if-no-files-found: warn
+          retention-days: 30
