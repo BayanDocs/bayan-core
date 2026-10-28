@@ -124,7 +124,15 @@ fn decode(bytes: &[u8]) -> Result<(Cow<'_, str>, Encoding), Error> {
     Ok((Cow::Borrowed(text), Encoding::Utf8 { bom }))
 }
 
-/// Reads the XML declaration at the start of `text`, if there is one: `version="1.0"`, then optionally `encoding`, which must name the encoding of the bytes, then optionally `standalone`, in this order (XML 1.0 §2.8).
+/// A field of the XML declaration, in the order the fields must come in.
+#[derive(Clone, Copy)]
+enum Field {
+    Version,
+    Encoding,
+    Standalone,
+}
+
+/// Reads the XML declaration at the start of `text`, if there is one: `version="1.0"`, then optionally `encoding`, which must name the encoding of the bytes, then optionally `standalone`, in this order (XML 1.0 §2.8). Each field is checked as soon as it is read, so that a field the declaration may not have there (an unknown name, a field out of order or repeated, a fourth field) is refused before anything after it is read, and nothing is kept of the fields but what the declaration reports.
 fn declaration(text: &str, encoding: Encoding) -> Result<Option<Declaration>, Error> {
     let Some(rest) = text.strip_prefix("<?xml") else {
         return Ok(None);
@@ -141,7 +149,10 @@ fn declaration(text: &str, encoding: Encoding) -> Result<Option<Declaration>, Er
     let end = |offset| Error::new(offset, ErrorKind::UnexpectedEnd);
     let bytes = text.as_bytes();
     let mut position = "<?xml".len();
-    let mut fields = Vec::new();
+    // The field read last; each may be followed only by one that comes after it.
+    let mut last = None;
+    let mut declares_encoding = false;
+    let mut standalone = None;
     loop {
         let start = position;
         while bytes.get(position).copied().is_some_and(is_space) {
@@ -193,38 +204,39 @@ fn declaration(text: &str, encoding: Encoding) -> Result<Option<Declaration>, Er
             Some(_) => return Err(malformed(position)),
             None => return Err(end(text.len())),
         }
-        fields.push((name, &text[value_start..position], value_start));
+        let value = &text[value_start..position];
+        last = Some(match (last, name) {
+            (None, "version") => {
+                if value != "1.0" {
+                    return Err(malformed(value_start));
+                }
+                Field::Version
+            }
+            (Some(Field::Version), "encoding") => {
+                let agrees = match encoding {
+                    Encoding::Utf8 { .. } => value.eq_ignore_ascii_case("UTF-8"),
+                    Encoding::Utf16Le | Encoding::Utf16Be => value.eq_ignore_ascii_case("UTF-16"),
+                };
+                if !agrees {
+                    return Err(Error::new(value_start, ErrorKind::UnsupportedEncoding));
+                }
+                declares_encoding = true;
+                Field::Encoding
+            }
+            (Some(Field::Version | Field::Encoding), "standalone") => {
+                standalone = Some(match value {
+                    "yes" => true,
+                    "no" => false,
+                    _ => return Err(malformed(value_start)),
+                });
+                Field::Standalone
+            }
+            _ => return Err(malformed(value_start)),
+        });
         position += 1;
     }
-    let mut fields = fields.into_iter().peekable();
-    match fields.next() {
-        Some(("version", "1.0", _)) => {}
-        Some((_, _, offset)) => return Err(malformed(offset)),
-        None => return Err(malformed(0)),
-    }
-    let mut declares_encoding = false;
-    if let Some(&("encoding", name, offset)) = fields.peek() {
-        fields.next();
-        let agrees = match encoding {
-            Encoding::Utf8 { .. } => name.eq_ignore_ascii_case("UTF-8"),
-            Encoding::Utf16Le | Encoding::Utf16Be => name.eq_ignore_ascii_case("UTF-16"),
-        };
-        if !agrees {
-            return Err(Error::new(offset, ErrorKind::UnsupportedEncoding));
-        }
-        declares_encoding = true;
-    }
-    let mut standalone = None;
-    if let Some(&("standalone", value, offset)) = fields.peek() {
-        fields.next();
-        standalone = Some(match value {
-            "yes" => true,
-            "no" => false,
-            _ => return Err(malformed(offset)),
-        });
-    }
-    if let Some((_, _, offset)) = fields.next() {
-        return Err(malformed(offset));
+    if last.is_none() {
+        return Err(malformed(0));
     }
     Ok(Some(Declaration {
         span: 0..position,

@@ -494,6 +494,25 @@ fn refuses_entities_that_are_not_predefined() {
 }
 
 #[test]
+fn refuses_a_run_of_text_at_its_first_problem() {
+    // Each run has two problems, and is refused at the first, because the reader checks each piece of a run as soon as it reads it; a reader that collected the pieces before checking them would report the later one (finding M3 of the architecture review of 2026-10-27).
+    for (text, kind, offset) in [
+        // `]]>` after an undefined entity,
+        ("<a>&nbsp;]]></a>", ErrorKind::UndefinedEntity, 3),
+        // a reference cut short by the end of the text after one,
+        ("<a>&nbsp;x &", ErrorKind::UndefinedEntity, 3),
+        // and one cut short by markup after a reference to a character XML does not allow.
+        (
+            "<a>&lt;&#0;x &amp</a>",
+            ErrorKind::InvalidCharacterReference,
+            7,
+        ),
+    ] {
+        assert_eq!(refusal(text), (kind, offset), "{text}");
+    }
+}
+
+#[test]
 fn limits_the_depth() {
     let limits = Limits {
         max_depth: 3,

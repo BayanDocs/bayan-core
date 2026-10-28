@@ -198,6 +198,56 @@ fn refuses_malformed_declarations() {
 }
 
 #[test]
+fn refuses_each_declaration_field_as_soon_as_it_is_read() {
+    // Each declaration has a field it may not have, followed by the end of the text or, in the last case, by a syntax error, so it is refused at that field's value; a reader that collected the fields before checking them would reach the later problem first and report that instead (finding M3 of the architecture review of 2026-10-27).
+    for (text, kind, offset) in [
+        ("<?xml version=\"1.1\"", ErrorKind::MalformedDeclaration, 15),
+        (
+            "<?xml encoding=\"UTF-8\"",
+            ErrorKind::MalformedDeclaration,
+            16,
+        ),
+        (
+            "<?xml version=\"1.0\" =\"\"",
+            ErrorKind::MalformedDeclaration,
+            22,
+        ),
+        (
+            "<?xml version=\"1.0\" version=\"1.0\"",
+            ErrorKind::MalformedDeclaration,
+            29,
+        ),
+        (
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"",
+            ErrorKind::UnsupportedEncoding,
+            30,
+        ),
+        (
+            "<?xml version=\"1.0\" standalone=\"maybe\"",
+            ErrorKind::MalformedDeclaration,
+            32,
+        ),
+        (
+            "<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"",
+            ErrorKind::MalformedDeclaration,
+            47,
+        ),
+        (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" standalone=\"no\"",
+            ErrorKind::MalformedDeclaration,
+            65,
+        ),
+        (
+            "<?xml version=\"1.1\" x?><a/>",
+            ErrorKind::MalformedDeclaration,
+            15,
+        ),
+    ] {
+        assert_eq!(refusal(text.as_bytes()), (kind, offset), "{text}");
+    }
+}
+
+#[test]
 fn refuses_encodings_other_than_the_bytes() {
     for text in [
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>",

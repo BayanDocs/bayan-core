@@ -162,7 +162,6 @@ pub struct Reader<'a> {
     current: Current<'a>,
     attributes: Vec<AttributeData<'a>>,
     duplicates: Vec<(Option<NamespaceId>, &'a str, usize)>,
-    pieces: Vec<(bool, Range<usize>)>,
     text_buffer: String,
     end_of_empty_element: bool,
     initial_space: Space,
@@ -204,7 +203,6 @@ impl<'a> Reader<'a> {
             current: Current::Nothing,
             attributes: Vec::new(),
             duplicates: Vec::new(),
-            pieces: Vec::new(),
             text_buffer: String::new(),
             end_of_empty_element: false,
             initial_space: Space::Default,
@@ -938,57 +936,54 @@ impl<'a> Reader<'a> {
     }
 
     /// A run of text and references that starts with the token at `span` (a reference if `reference`). Returns whether it is an event: white space outside the root element is skipped.
+    ///
+    /// Each piece is checked and decoded as soon as it is read, so that the run keeps nothing for each piece: its text is borrowed from the document as long as decoding leaves it unchanged, and from the first piece that decoding changes (a reference, or line ends to normalize) on, it is decoded into one copy of the run.
     fn text_run(&mut self, reference: bool, span: Range<usize>) -> Result<bool, Error> {
-        self.pieces.clear();
-        self.pieces.push((reference, span));
+        let in_root = self.phase == Phase::InRoot;
+        let start = span.start;
+        let mut end = span.end;
+        let mut buffered = false;
+        let mut piece = (reference, span);
         loop {
-            let (token, span) = self.token()?;
-            match token {
-                Token::Text(_) => self.pieces.push((false, span)),
-                Token::GeneralRef(_) => self.pieces.push((true, span)),
-                other => {
-                    self.lookahead = Some((other, span));
-                    break;
-                }
-            }
-        }
-        if self.phase != Phase::InRoot {
-            for (reference, span) in &self.pieces {
-                let blank = self.slice(span).bytes().all(is_space);
-                if *reference || !blank {
+            let (reference, span) = piece;
+            let raw = self.slice(&span);
+            if !in_root {
+                if reference || !raw.bytes().all(is_space) {
                     return Err(Error::new(span.start, ErrorKind::ContentOutsideRoot));
                 }
-            }
-            return Ok(false);
-        }
-        let mut owned = self.pieces.len() > 1;
-        for (reference, span) in &self.pieces {
-            let raw = self.slice(span);
-            if *reference {
-                owned = true;
+            } else if reference {
+                let name = raw.get(1..raw.len().saturating_sub(1)).unwrap_or_default();
+                let character = markup::reference(name, span.start, &self.limits)?;
+                if !buffered {
+                    self.start_copy(start, span.start);
+                    buffered = true;
+                }
+                self.text_buffer.push(character);
             } else {
                 if let Some(offset) = raw.find("]]>") {
                     return Err(Error::new(span.start + offset, ErrorKind::CDataEndInText));
                 }
-                owned |= raw.contains('\r');
-            }
-        }
-        let start = self.pieces.first().map_or(0, |(_, span)| span.start);
-        let end = self.pieces.last().map_or(start, |(_, span)| span.end);
-        if owned {
-            // Decoding never makes text longer, so the run's own length is all the copy can need.
-            self.text_buffer.clear();
-            self.text_buffer.reserve_exact(end - start);
-            for (reference, span) in &self.pieces {
-                let raw = self.slice(span);
-                if *reference {
-                    let name = raw.get(1..raw.len().saturating_sub(1)).unwrap_or_default();
-                    self.text_buffer
-                        .push(markup::reference(name, span.start, &self.limits)?);
-                } else {
+                if !buffered && raw.contains('\r') {
+                    self.start_copy(start, span.start);
+                    buffered = true;
+                }
+                if buffered {
                     markup::push_normalized_line_ends(raw, &mut self.text_buffer);
                 }
             }
+            let (token, next) = self.token()?;
+            piece = match token {
+                Token::Text(_) => (false, next),
+                Token::GeneralRef(_) => (true, next),
+                other => {
+                    self.lookahead = Some((other, next));
+                    break;
+                }
+            };
+            end = piece.1.end;
+        }
+        if !in_root {
+            return Ok(false);
         }
         let space = self
             .elements
@@ -996,10 +991,19 @@ impl<'a> Reader<'a> {
             .map_or(self.initial_space, |frame| frame.element.space);
         self.current = Current::Text {
             span: start..end,
-            buffered: owned,
+            buffered,
             space,
         };
         Ok(true)
+    }
+
+    /// Starts the copy of the run of text that begins at `start` with `piece`, the first of its pieces that decoding changes: the text before it is the same decoded. The copy gets room for the whole run, which ends at the next `<` (neither character data nor a reference contains one), because decoding never makes text longer, so it needs no more and is never moved.
+    fn start_copy(&mut self, start: usize, piece: usize) {
+        let rest = self.text.get(piece..).unwrap_or_default();
+        let end = piece + rest.find('<').unwrap_or(rest.len());
+        self.text_buffer.clear();
+        self.text_buffer.reserve_exact(end - start);
+        self.text_buffer.push_str(self.slice(&(start..piece)));
     }
 
     /// A processing instruction at `span`.
@@ -1033,5 +1037,111 @@ impl<'a> Reader<'a> {
             span,
         };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The most that the reader's buffers may hold, in bytes for every byte of the part, for the parts this test reads: the bound it holds the reader to (ADR-0006 §5; "Time and memory" in the crate documentation). Their text is ASCII, in runs about as long as the part, and the reader keeps one copy of a run, never longer than the run itself, so at most the part's size. Memory kept for every piece of a run goes far beyond this.
+    const AT_MOST: usize = 2;
+
+    /// About the size of the crafted parts: large enough that memory kept for every piece of a run shows far above the bound, small enough to read quickly in a debug build and in WebAssembly.
+    const SIZE: usize = 1 << 20;
+
+    /// The bytes that the reader's own buffers hold, by their capacity: the attributes of the current start tag and their decoded values, the list for finding duplicate attributes, the open elements, the bindings in scope, and the decoded copy of a run of text or of a CDATA section. Every field of the reader and of its scope is named, so that a field added to either does not compile here until it is counted or the comment beside it says why it need not be; the test program `memory_runs` measures all the memory in WebAssembly.
+    fn kept(reader: &Reader<'_>) -> usize {
+        let Reader {
+            text_buffer,
+            attributes,
+            duplicates,
+            elements,
+            scope,
+            current,
+            // The distinct namespace names, which the limits bound (`max_namespaces`, `max_namespace_name_length`).
+            namespaces: _,
+            // quick-xml's tokenizer, which does not show its own list of the names of open elements.
+            tokens: _,
+            // Fixed in size, or borrowed from the document or from the context the reader was given.
+            text: _,
+            declaration_end: _,
+            limits: _,
+            phase: _,
+            lookahead: _,
+            end_of_empty_element: _,
+            initial_space: _,
+            base: _,
+        } = reader;
+        let Scope {
+            bindings,
+            // The index of the bindings by prefix, with no more entries than there are bindings, which the limits bound (`max_depth`, `max_attributes`, `max_name_length`).
+            by_prefix: _,
+        } = scope;
+        let owned = |value: &Cow<'_, str>| match value {
+            Cow::Owned(value) => value.capacity(),
+            Cow::Borrowed(_) => 0,
+        };
+        let values: usize = attributes
+            .iter()
+            .map(|attribute| owned(&attribute.value))
+            .sum();
+        let prefixes: usize = bindings.iter().map(|binding| owned(&binding.prefix)).sum();
+        let cdata = match current {
+            Current::CData(value, _) => owned(value),
+            _ => 0,
+        };
+        text_buffer.capacity()
+            + attributes.capacity() * size_of::<AttributeData<'_>>()
+            + values
+            + duplicates.capacity() * size_of::<(Option<NamespaceId>, &str, usize)>()
+            + elements.capacity() * size_of::<Frame<'_>>()
+            + bindings.capacity() * size_of::<Binding<'_>>()
+            + prefixes
+            + cdata
+    }
+
+    /// Reads `part` to its end and returns the most that the reader's buffers held after any event.
+    fn most_kept(part: &[u8]) -> usize {
+        let limits = Limits::default();
+        let source = Source::new(part, &limits).unwrap();
+        let mut reader = Reader::new(&source, &limits);
+        let mut most = 0;
+        while reader.next_event().unwrap().is_some() {
+            most = most.max(kept(&reader));
+        }
+        most
+    }
+
+    /// About `SIZE` bytes of `unit` repeated, as the text of a root element.
+    fn run(unit: &str) -> String {
+        format!("<r>{}</r>", unit.repeat(SIZE / unit.len()))
+    }
+
+    /// `text` in UTF-16, little-endian, with a byte order mark.
+    fn utf16(text: &str) -> Vec<u8> {
+        [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    }
+
+    // Finding M3 of the architecture review of 2026-10-27: the reader listed every piece of a run of text before decoding any, and every reference is a piece of its own, so that its buffers held seven times a run of `&lt;` on 64-bit platforms, and thirteen times a run of `x&#9;`, two pieces every five bytes. Decoded as they are read, the pieces keep one copy of the run, never longer than the run itself. On the host and in WebAssembly alike; the test program `memory_runs` measures the same runs' memory in WebAssembly.
+    #[test]
+    fn keeps_one_copy_of_a_run_of_text_however_many_references_it_holds() {
+        for part in [
+            run("&lt;").into_bytes(),
+            run("x&#9;").into_bytes(),
+            run("\r\n&#9;").into_bytes(),
+            run("&#x10FFFF;").into_bytes(),
+            utf16(&run("&lt;")),
+        ] {
+            let most = most_kept(&part);
+            assert!(
+                most <= AT_MOST * part.len(),
+                "kept {most} bytes for a part of {} bytes",
+                part.len()
+            );
+        }
     }
 }
