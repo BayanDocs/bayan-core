@@ -85,7 +85,7 @@ impl From<CompoundFileError> for Error {
 pub enum ZipError {
     /// The input has no end-of-central-directory record: it is not a ZIP archive, or it is truncated.
     NotZip,
-    /// Several end-of-central-directory records fit the end of the input, so different readers could see different contents.
+    /// The end of the archive can be read in more than one way: an end-of-central-directory signature follows the start of the record whose comment ends the input, inside its comment, where readers that take the last signature they find (such as Python's zipfile and Go's archive/zip) would read another record, with another central directory; a second record whose comment also ends the input is such a signature too.
     AmbiguousEnd,
     /// The archive claims to span several disks (a split archive); packages are always a single file.
     MultipleDisks,
@@ -182,7 +182,7 @@ impl fmt::Display for ZipError {
         match self {
             ZipError::NotZip => f.write_str("no end of central directory record"),
             ZipError::AmbiguousEnd => {
-                f.write_str("more than one end of central directory record fits")
+                f.write_str("an end of central directory signature follows the end record")
             }
             ZipError::MultipleDisks => {
                 f.write_str("archives that span several disks are not supported")

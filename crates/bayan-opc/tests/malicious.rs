@@ -868,6 +868,109 @@ fn refuses_an_ambiguous_end() {
     assert_eq!(zip_error(&archive.build()), ZipError::AmbiguousEnd);
 }
 
+/// The minimal package whose comment is a whole second archive with other entries: its own local headers, central directory and end record, followed by that archive's own comment, `inner_comment`, so that the second end record ends the input too. Readers that take the last end-of-central-directory signature they find read the second archive: Python's zipfile and Go's archive/zip find its central directory from where its end record is, as they find the directory of an archive with data in front of it, such as a self-extracting one. Returns the bytes, where the second end record starts, and where the second archive starts.
+fn with_archive_in_comment(inner_comment: &[u8]) -> (Vec<u8>, usize, usize) {
+    let mut inner = Archive::new(vec![
+        Item::deflated(
+            "[Content_Types].xml",
+            b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>",
+        ),
+        Item::deflated("word/document.xml", b"<other/>"),
+        Item::stored("word/hidden.xml", b"<hidden/>"),
+    ]);
+    inner.comment = inner_comment.to_vec();
+    let inner = inner.build();
+    let mut archive = Archive::new(package_items());
+    archive.comment.clone_from(&inner);
+    let bytes = archive.build();
+    let second_end = bytes.len() - inner_comment.len() - END;
+    let second_archive = bytes.len() - inner.len();
+    (bytes, second_end, second_archive)
+}
+
+#[test]
+fn refuses_an_end_signature_in_the_comment() {
+    // A bare end-of-central-directory signature in the comment of the record that ends the input. Readers that take the last signature they find (Python's zipfile, Go's archive/zip) take it for the end record and read whatever follows it, where this reader used to skip the signature and read the archive.
+    let signature = [0x50, 0x4B, 0x05, 0x06];
+    for (case, comment) in [
+        (
+            "at the start of the comment",
+            [&signature[..], b" and some text after it"].concat(),
+        ),
+        (
+            "in the middle of the comment",
+            [&b"some text, "[..], &signature, b", and more text"].concat(),
+        ),
+        // Too close to the end for a whole record, but Python's zipfile still takes it for the end record (and then refuses the archive).
+        (
+            "in the last four bytes",
+            [&b"some text, and then "[..], &signature].concat(),
+        ),
+    ] {
+        let mut archive = Archive::new(package_items());
+        archive.comment = comment;
+        assert_eq!(
+            zip_error(&archive.build()),
+            ZipError::AmbiguousEnd,
+            "{case}"
+        );
+    }
+    // A signature that starts inside the record itself, across its offset field and its comment length of 0x0605 bytes. Python's zipfile takes it for the start of the record and reads the rest of that record from the comment. It is refused before the offset is read, which no longer fits the archive.
+    let mut archive = Archive::new(package_items());
+    archive.comment = craft::text(0x0605);
+    let mut bytes = archive.build();
+    let end = bytes.len() - 0x0605 - END;
+    assert_eq!(bytes[end + 20..end + 22], [0x05, 0x06]);
+    bytes[end + 18..end + 20].copy_from_slice(&[0x50, 0x4B]);
+    assert_eq!(zip_error(&bytes), ZipError::AmbiguousEnd);
+    // An ordinary comment, and one that holds the signatures of the other ZIP records and a signature cut short at the end, are fine.
+    for comment in [
+        b"an ordinary comment".to_vec(),
+        b"PK\x01\x02 PK\x03\x04 PK\x05\x05 PK\x06\x06 PK\x06\x07 PK\x07\x08 PK\x05".to_vec(),
+    ] {
+        let mut archive = Archive::new(package_items());
+        archive.comment = comment;
+        open_zip(&archive.build()).unwrap();
+    }
+}
+
+#[test]
+fn refuses_a_second_end_record_in_the_comment() {
+    // The comment holds a whole second archive, whose end record also ends the input and points to a second, different central directory: the second archive opens on its own, with three entries where the first has two.
+    let (bytes, second_end, second_archive) = with_archive_in_comment(b"its own comment");
+    let comment = usize::from(u16::from_le_bytes([
+        bytes[second_end + 20],
+        bytes[second_end + 21],
+    ]));
+    assert_eq!(second_end + END + comment, bytes.len());
+    let offset = u32::from_le_bytes(bytes[second_end + 16..second_end + 20].try_into().unwrap());
+    let directory = second_archive + usize::try_from(offset).unwrap();
+    assert_eq!(bytes[directory..directory + 4], [0x50, 0x4B, 0x01, 0x02]);
+    assert_eq!(
+        open_zip(&bytes[second_archive..]).unwrap().entries().len(),
+        3
+    );
+    assert_eq!(zip_error(&bytes), ZipError::AmbiguousEnd);
+}
+
+#[test]
+fn refuses_a_second_end_record_that_does_not_end_the_input() {
+    // The same, with the second end record's comment length changed so that its comment no longer ends the input: shorter, where Python's zipfile and Go's archive/zip still read the second archive, or longer, running past the end, where Python's zipfile still does. The reader used to skip such a record and read the first archive.
+    let own_comment = b"its own comment";
+    let (bytes, second_end, _) = with_archive_in_comment(own_comment);
+    for length in [0, own_comment.len() - 1, own_comment.len() + 1, 0xFFFF] {
+        let mut bytes = bytes.clone();
+        put16(&mut bytes, second_end + 20, u16::try_from(length).unwrap());
+        assert_ne!(second_end + END + length, bytes.len());
+        assert_eq!(zip_error(&bytes), ZipError::AmbiguousEnd, "{length}");
+        assert_eq!(
+            package_error(&bytes),
+            Error::Zip(ZipError::AmbiguousEnd),
+            "{length}"
+        );
+    }
+}
+
 #[test]
 fn refuses_split_archives() {
     let mut archive = Archive::new(package_items());
