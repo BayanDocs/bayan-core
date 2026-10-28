@@ -1050,33 +1050,53 @@ mod tests {
     /// About the size of the crafted parts: large enough that memory kept for every piece of a run shows far above the bound, small enough to read quickly in a debug build and in WebAssembly.
     const SIZE: usize = 1 << 20;
 
-    /// The bytes that the reader's own buffers hold, by their capacity: the attributes of the current start tag and their decoded values, the list for finding duplicate attributes, the open elements, the bindings in scope, and the decoded copy of a run of text or of a CDATA section. Left out are the maps of prefixes and of namespace names, which the limits bound, and quick-xml's own list of the names of open elements, which it does not show; the test program `memory_runs` measures all the memory in WebAssembly.
+    /// The bytes that the reader's own buffers hold, by their capacity: the attributes of the current start tag and their decoded values, the list for finding duplicate attributes, the open elements, the bindings in scope, and the decoded copy of a run of text or of a CDATA section. Every field of the reader and of its scope is named, so that a field added to either does not compile here until it is counted or the comment beside it says why it need not be; the test program `memory_runs` measures all the memory in WebAssembly.
     fn kept(reader: &Reader<'_>) -> usize {
+        let Reader {
+            text_buffer,
+            attributes,
+            duplicates,
+            elements,
+            scope,
+            current,
+            // The distinct namespace names, which the limits bound (`max_namespaces`, `max_namespace_name_length`).
+            namespaces: _,
+            // quick-xml's tokenizer, which does not show its own list of the names of open elements.
+            tokens: _,
+            // Fixed in size, or borrowed from the document or from the context the reader was given.
+            text: _,
+            declaration_end: _,
+            limits: _,
+            phase: _,
+            lookahead: _,
+            end_of_empty_element: _,
+            initial_space: _,
+            base: _,
+        } = reader;
+        let Scope {
+            bindings,
+            // The index of the bindings by prefix, with no more entries than there are bindings, which the limits bound (`max_depth`, `max_attributes`, `max_name_length`).
+            by_prefix: _,
+        } = scope;
         let owned = |value: &Cow<'_, str>| match value {
             Cow::Owned(value) => value.capacity(),
             Cow::Borrowed(_) => 0,
         };
-        let values: usize = reader
-            .attributes
+        let values: usize = attributes
             .iter()
             .map(|attribute| owned(&attribute.value))
             .sum();
-        let prefixes: usize = reader
-            .scope
-            .bindings
-            .iter()
-            .map(|binding| owned(&binding.prefix))
-            .sum();
-        let cdata = match &reader.current {
+        let prefixes: usize = bindings.iter().map(|binding| owned(&binding.prefix)).sum();
+        let cdata = match current {
             Current::CData(value, _) => owned(value),
             _ => 0,
         };
-        reader.text_buffer.capacity()
-            + reader.attributes.capacity() * size_of::<AttributeData<'_>>()
+        text_buffer.capacity()
+            + attributes.capacity() * size_of::<AttributeData<'_>>()
             + values
-            + reader.duplicates.capacity() * size_of::<(Option<NamespaceId>, &str, usize)>()
-            + reader.elements.capacity() * size_of::<Frame<'_>>()
-            + reader.scope.bindings.capacity() * size_of::<Binding<'_>>()
+            + duplicates.capacity() * size_of::<(Option<NamespaceId>, &str, usize)>()
+            + elements.capacity() * size_of::<Frame<'_>>()
+            + bindings.capacity() * size_of::<Binding<'_>>()
             + prefixes
             + cdata
     }
