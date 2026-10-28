@@ -98,14 +98,14 @@ pub const CLIPPY_RUNS: [ClippyRun; 4] = [
 /// A check that plugs into one of the hook steps.
 type Check = (&'static str, fn(&Path) -> Result<(), String>);
 
-/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to `Cargo.lock` is at least 24 hours old. The second compares with the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when `Cargo.lock` changed.
+/// The supply-chain checks of ADR-0017 that Cargo and cargo-deny do not make (work package X-003, `supply_chain/`), also available as `cargo xtask` commands: every dependency is pinned exactly, and every package version that the change adds to a `Cargo.lock` is at least 24 hours old. Both read every Cargo workspace of the repository: the main one, and every folder below it where Git tracks a `Cargo.lock`, today the fuzz workspace (`fuzz/`, bayan-core#22), which may depend by path on members of the main workspace. The second compares each `Cargo.lock` with its own version at the merge base of the branch the change goes into (`origin/<GITHUB_BASE_REF>` in a pull request on GitHub Actions, otherwise `origin/main`), so it needs the full Git history; it uses the network only when a `Cargo.lock` changed.
 const SUPPLY_CHAIN_CHECKS: &[Check] = &[
     (
-        "check-exact-pins: every dependency is pinned exactly (ADR-0017 rule 5)",
+        "check-exact-pins: every dependency of every workspace (the main one and fuzz/) is pinned exactly (ADR-0017 rule 5)",
         exact_pins,
     ),
     (
-        "check-lockfile-age: Cargo builds exactly what Cargo.lock lists, and every package version added to it was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
+        "check-lockfile-age: Cargo builds exactly what each Cargo.lock lists (the main workspace's and fuzz/Cargo.lock), and every package version added to one was published at least 24 hours before it was added (ADR-0017 rule 4), with the checksum crates.io published",
         lockfile_age,
     ),
 ];
@@ -822,6 +822,29 @@ mod tests {
                 || workflow.contains(&format!("CARGO_DENY_VERSION: {CARGO_DENY_VERSION}\r\n")),
             "the CI workflow must install cargo-deny {CARGO_DENY_VERSION}"
         );
+    }
+
+    /// The fuzzing workflow builds the fuzz workspace's dependencies, whose build scripts and procedural macros run code, in parallel with the gate, so it runs the gate's supply-chain checks first, after checking out the full history that the age check needs (bayan-core#22).
+    #[test]
+    fn the_fuzz_workflow_runs_the_supply_chain_checks_before_it_builds() {
+        let workflow = include_str!("../../.github/workflows/fuzz.yml");
+        let position = |text: &str| {
+            workflow
+                .find(text)
+                .unwrap_or_else(|| panic!("fuzz.yml no longer contains `{text}`; update this test"))
+        };
+        let first_build = position("\"+$FUZZ_TOOLCHAIN\" fetch --locked")
+            .min(position("\"+$FUZZ_TOOLCHAIN\" fuzz build"));
+        for check in [
+            "run: cargo xtask check-exact-pins",
+            "run: cargo xtask check-lockfile-age",
+        ] {
+            assert!(
+                position(check) < first_build,
+                "fuzz.yml must run `{check}` before it fetches or builds the fuzz workspace"
+            );
+        }
+        assert!(position("fetch-depth: 0") < position("run: cargo xtask check-lockfile-age"));
     }
 
     #[test]
