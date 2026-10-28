@@ -423,29 +423,26 @@ fn find_directory(data: &[u8]) -> Result<Directory, ZipError> {
     })
 }
 
-/// Finds the one end-of-central-directory record whose comment ends exactly at the end of the input. More than one such record means readers could disagree about the archive, so it is refused.
+/// Finds the end-of-central-directory record: the one whose comment ends exactly at the end of the input, which must also be the last end-of-central-directory signature in the input. A comment may hold any bytes (APPNOTE 4.3.16), the signature among them, and other readers search for the record differently: Python's zipfile takes the last signature in the input, and Go's archive/zip the last one that leaves room for a whole record. A signature after the start of the record, inside its comment, could therefore show them another record, with another central directory, so the archive is refused as ambiguous, before anything else is read. A second record whose comment also ends the input is such a signature too: the first is taken, and the second refuses the archive.
 fn find_end(data: &[u8]) -> Result<usize, ZipError> {
     let last = data
         .len()
         .checked_sub(END_OF_CENTRAL_DIRECTORY_SIZE)
         .ok_or(ZipError::NotZip)?;
     let first = last.saturating_sub(MAX_COMMENT);
-    let mut found = None;
-    for at in (first..=last).rev() {
-        if u32_at(data, at) != Some(END_OF_CENTRAL_DIRECTORY) {
-            continue;
-        }
-        let Some(comment) = u16_at(data, at + 20) else {
-            continue;
-        };
-        if at + END_OF_CENTRAL_DIRECTORY_SIZE + usize::from(comment) == data.len() {
-            if found.is_some() {
-                return Err(ZipError::AmbiguousEnd);
-            }
-            found = Some(at);
-        }
+    let signature_at = |at| u32_at(data, at) == Some(END_OF_CENTRAL_DIRECTORY);
+    let end = (first..=last)
+        .find(|&at| {
+            signature_at(at)
+                && u16_at(data, at + 20).is_some_and(|comment| {
+                    at + END_OF_CENTRAL_DIRECTORY_SIZE + usize::from(comment) == data.len()
+                })
+        })
+        .ok_or(ZipError::NotZip)?;
+    if (end + 1..data.len()).any(signature_at) {
+        return Err(ZipError::AmbiguousEnd);
     }
-    found.ok_or(ZipError::NotZip)
+    Ok(end)
 }
 
 /// A central directory header that has been read, and where the next one starts.
