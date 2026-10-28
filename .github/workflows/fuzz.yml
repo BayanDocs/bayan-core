@@ -5,6 +5,7 @@
 # It is not a required check: a path filter skips it on most pull requests, and a required check that never runs would block merging forever (docs/scripts/github-settings.py), as for text-pipeline.yml.
 # GitHub notifies the person who last changed the cron schedule below when a scheduled run fails. Agents push and merge under the owner's account, so that is the owner; whoever else changes the schedule receives the notifications instead. GitHub also switches scheduled workflows off after 60 days without activity in the repository; re-enabling one makes its notifications go to whoever re-enabled it.
 # Workflow conventions (AGENTS.md): GitHub's own actions only, pinned to full commit SHAs with the version in a comment; no permissions beyond reading the repository; no credentials kept after checkout; a timeout; one concurrency group; tools at pinned versions, checked against SHA-256 checksums; no secrets. A pull request never saves a cache, and GitHub lets it read only the caches of its base branch and of main, so a pull request against main reads only corpora that runs on main saved.
+# Before anything of the fuzz workspace is fetched or built, the job runs the supply-chain checks of the gate's first step, as the CodeQL job does (bayan-core#22): building the targets runs their dependencies' build scripts and procedural macros, among them libfuzzer-sys's, which compiles C++, and the gate checks a pull request's fuzz/Cargo.lock only in parallel with this job.
 name: Fuzzing
 
 on:
@@ -56,7 +57,23 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for a scheduled or manual run, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
+
+      # The toolchain that xtask builds with. rustup checks every component against the SHA-256 in the toolchain's release manifest.
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install
+          rustc --version
+
+      # They read every Cargo workspace of the repository, fuzz/ included, and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       # The minimal profile: rustc, Cargo and the standard library are all that cargo-fuzz needs. rustup checks every component against the SHA-256 in the toolchain's release manifest.
       - name: Install the pinned nightly toolchain
@@ -80,7 +97,7 @@ jobs:
       - name: Test the fuzzing helper (fuzz/test_ci.py)
         run: python3 -I -m unittest discover --start-directory fuzz --pattern 'test_*.py'
 
-      # From fuzz/Cargo.lock as it is: `cargo fetch --locked` fails if the lockfile would have to change, and Cargo checks every crate against the checksum the lockfile records. --target names the host, because this cargo-fuzz would otherwise build for its own musl target.
+      # From fuzz/Cargo.lock as it is, which the supply-chain checks above have read: `cargo fetch --locked` fails if the lockfile would have to change, and Cargo checks every crate against the checksum the lockfile records. --target names the host, because this cargo-fuzz would otherwise build for its own musl target.
       - name: Build every fuzz target
         run: |
           cargo "+$FUZZ_TOOLCHAIN" fetch --locked --manifest-path fuzz/Cargo.toml

@@ -824,6 +824,29 @@ mod tests {
         );
     }
 
+    /// The fuzzing workflow builds the fuzz workspace's dependencies, whose build scripts and procedural macros run code, in parallel with the gate, so it runs the gate's supply-chain checks first, after checking out the full history that the age check needs (bayan-core#22).
+    #[test]
+    fn the_fuzz_workflow_runs_the_supply_chain_checks_before_it_builds() {
+        let workflow = include_str!("../../.github/workflows/fuzz.yml");
+        let position = |text: &str| {
+            workflow
+                .find(text)
+                .unwrap_or_else(|| panic!("fuzz.yml no longer contains `{text}`; update this test"))
+        };
+        let first_build = position("\"+$FUZZ_TOOLCHAIN\" fetch --locked")
+            .min(position("\"+$FUZZ_TOOLCHAIN\" fuzz build"));
+        for check in [
+            "run: cargo xtask check-exact-pins",
+            "run: cargo xtask check-lockfile-age",
+        ] {
+            assert!(
+                position(check) < first_build,
+                "fuzz.yml must run `{check}` before it fetches or builds the fuzz workspace"
+            );
+        }
+        assert!(position("fetch-depth: 0") < position("run: cargo xtask check-lockfile-age"));
+    }
+
     #[test]
     fn formats_durations() {
         assert_eq!(duration(Duration::from_millis(4_250)), "4.2 s");
