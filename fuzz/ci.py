@@ -312,7 +312,9 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
             reports = [line for line in text.splitlines() if "ERROR: libFuzzer" in line or "==ERROR:" in line]
             if code != 0 or not merged or reports:
                 result.status = "failed"
-                result.problems = [f"merging exited with {code}"] + reports[:3]
+                result.problems = [f"merging exited with {code}"] if code != 0 else []
+                result.problems += [] if merged else ["merging printed no MERGE-OUTER summary"]
+                result.problems += reports[:3]
             else:
                 inputs, features, edges = (int(value) for value in merged[-1])
                 result.stats.update(after=inputs, features=features, edges=edges)

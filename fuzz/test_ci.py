@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from unittest import mock
 
 import ci
 
-# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, keeps a crash input and exits with libFuzzer's error code when its name says so, and in merge mode copies the corpus into the output folder.
+# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, keeps a crash input and exits with libFuzzer's error code when its name says so, and in merge mode copies the corpus into the output folder and prints libFuzzer's summary, or when its name says so a sanitizer's or libFuzzer's report, or no summary.
 FAKE_TARGET = """#!/bin/sh
 prefix=
 merge=
@@ -29,7 +30,14 @@ if [ -n "$merge" ]; then
   output="$(eval echo "\\${$(($# - 1))}")"
   input="$(eval echo "\\${$#}")"
   cp "$input"/* "$output"/
-  echo "MERGE-OUTER: $(ls "$output" | wc -l) new files with 34 new features added; 12 new coverage edges"
+  case "$0" in
+    *sanitizer*) echo "==1==ERROR: AddressSanitizer: heap-use-after-free" ;;
+    *signal*) echo "==1== ERROR: libFuzzer: deadly signal" ;;
+  esac
+  case "$0" in
+    *silent*) ;;
+    *) echo "MERGE-OUTER: $(ls "$output" | wc -l) new files with 34 new features added; 12 new coverage edges" ;;
+  esac
   exit 0
 fi
 echo "INFO: Seed: 1"
@@ -206,6 +214,64 @@ class Runs(Isolated):
         self.assertEqual(sorted(path.name for path in corpus.iterdir()), ["input-0", "input-1", "input-2"])
         self.assertFalse((self.folder / "minimized" / "zip_archive").exists())
         self.assertIn("| `zip_archive` | passed | 3 | 3 | 12 / 34 |", ci.minimize_table(results))
+
+    def fake_named(self, word: str) -> Path:
+        """A folder whose fake zip_archive behaves as `word` says (see FAKE_TARGET)."""
+        folder = self.folder / word
+        folder.mkdir()
+        (folder / "zip_archive").symlink_to(self.fake_targets(["zip_archive"]) / "zip_archive")
+        return folder
+
+    def test_minimizing_fails_on_a_report_and_keeps_the_corpus(self) -> None:
+        corpus = self.folder / "corpus" / "zip_archive"
+        corpus.mkdir(parents=True)
+        (corpus / "input").write_bytes(b"x")
+        # The merge finishes and prints its summary, but a report in its log means that an input crashed the process that merging restarted.
+        for word, report in (("sanitizer", "==1==ERROR: AddressSanitizer: heap-use-after-free"), ("signal", "==1== ERROR: libFuzzer: deadly signal")):
+            results = ci.minimize(["zip_archive"], 1, self.folder, self.fake_named(word))
+            self.assertEqual((results[0].status, results[0].problems), ("failed", [report]), word)
+            self.assertEqual([path.name for path in corpus.iterdir()], ["input"], word)
+
+    def test_minimizing_fails_without_the_merge_summary_and_keeps_the_corpus(self) -> None:
+        corpus = self.folder / "corpus" / "zip_archive"
+        corpus.mkdir(parents=True)
+        (corpus / "input").write_bytes(b"x")
+        results = ci.minimize(["zip_archive"], 1, self.folder, self.fake_named("silent"))
+        self.assertEqual((results[0].status, results[0].problems), ("failed", ["merging printed no MERGE-OUTER summary"]))
+        self.assertEqual([path.name for path in corpus.iterdir()], ["input"])
+
+
+class Output(Isolated):
+    def test_switches_workflow_commands_off_around_a_targets_log_in_github_actions(self) -> None:
+        os.environ["GITHUB_ACTIONS"] = "true"
+        # A target's output can quote its input, and an input can hold a workflow command.
+        quoted = "::error::quoted from an input"
+        log = self.folder / "zip_archive.log"
+        log.write_text(f"#2\tINITED cov: 10 ft: 30 corp: 1/10b exec/s: 0 rss: 30Mb\n{quoted}\n")
+        for status, problems, commands in (
+            ("passed", [], ["::group::zip_archive: passed", "::endgroup::"]),
+            ("failed", ["libFuzzer exited with 77"], ["::group::zip_archive: failed", "::endgroup::", "::error title=Fuzzing zip_archive::libFuzzer exited with 77"]),
+        ):
+            self.output.seek(0)
+            self.output.truncate()
+            ci.show(ci.Result("zip_archive", status=status, problems=problems, log=log), f"zip_archive: {status}")
+            # Outside the parts that `::stop-commands::<token>` and `::<token>::` enclose, only ci.py's own commands may stand; the token must resume what it stopped.
+            outside, quotes, token = [], 0, None
+            for line in self.output.getvalue().splitlines():
+                if token is None:
+                    stop = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", line)
+                    if stop:
+                        token = stop.group(1)
+                    elif line:
+                        outside.append(line)
+                elif line == f"::{token}::":
+                    token = None
+                else:
+                    quotes += line == quoted
+            self.assertIsNone(token, status)
+            self.assertEqual(outside, commands, status)
+            # The log once in its group, and a failure's last lines once more.
+            self.assertEqual(quotes, 1 if status == "passed" else 2, status)
 
 
 if __name__ == "__main__":
