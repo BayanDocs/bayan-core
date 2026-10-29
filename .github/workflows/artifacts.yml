@@ -1,10 +1,14 @@
 # Builds the engine's artifacts for the shells and runs the test drivers against them (work package CORE-007):
 # - the C SDK for Linux x86-64, Windows x86-64 and macOS arm64, each tested by the C driver, linked statically and dynamically;
-# - the WebAssembly package, tested by the Node.js driver on all three operating systems;
+# - the WebAssembly package, whose module may import only what WASM_IMPORTS in xtask/src/artifacts.rs lists (cargo xtask wasm-package
+#   checks it), tested by the Node.js driver on all three operating systems;
 # - bayan-ffi's unit tests under Miri;
 # - a check that every C and Node.js run rendered the same tile, byte for byte (ADR-0004, ADR-0005).
 # The SDKs and the WebAssembly package are uploaded as workflow artifacts with a SHA-256 checksum of every file (SHA256SUMS inside the
 # artifact) and of the artifact itself (in the job summary). There are no releases yet.
+# It runs for every pull request, in the merge queue and for every push to main. The merge queue (the merge_group event) waits for every
+# required check of main's ruleset on the commit it is about to merge, so `Same tile everywhere` and `Miri (bayan-ffi)` can be required
+# only if they run there too (the architecture review of 2026-10-27, finding H1).
 # Workflow rules (ADR-0017), as in verify.yml: actions pinned to full commit SHAs with the version in a comment, minimal permissions, no
 # credentials kept after checkout, a timeout on every job, and tools downloaded at pinned versions and checked against SHA-256 checksums.
 # Unlike verify.yml, nothing here uses a cache: the artifacts are distributed, so they are built from a fresh checkout and fresh downloads,
@@ -13,6 +17,8 @@ name: artifacts
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   workflow_dispatch:

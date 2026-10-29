@@ -4,6 +4,8 @@
 //!
 //! WebAssembly in a browser has no such thread: the web binding feeds the [`Engine`] directly, inside the Web Worker.
 //!
+//! The engine thread's stack has the fixed size [`ENGINE_THREAD_STACK_BYTES`], whatever the environment of the process says, so how deeply an input may nest before it exhausts the stack does not depend on the machine.
+//!
 //! [spec]: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md
 
 use std::cell::Cell;
@@ -23,6 +25,11 @@ pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The name of every engine thread, as debuggers and crash reports show it.
 pub const ENGINE_THREAD_NAME: &str = "bayan-engine";
+
+/// The size of every engine thread's stack, in bytes: 2 MiB.
+///
+/// It is set explicitly because, without a size, Rust's standard library takes the stack size of a new thread from the `RUST_MIN_STACK` environment variable, so the environment would decide how deeply an input may nest before it overflows the stack, and the engine reads no environment variables (architecture §12, ADR-0005 §5). 2 MiB is the size that the engine's thread had by default and that Rust gives each test's thread: CORE-004 fuzzed the CRDT import on stacks of this size and measured its stack-overflow finding F5 on one (a value nested about 21,800 levels deep overflows it in a release build, 6,000 levels in a debug build). A larger stack would only raise that depth: the 1 MiB that an update may hold can nest values deeper than about 50 MiB of stack can free, so imports from untrusted peers need isolation instead (CORE-004 report §8.3).
+pub const ENGINE_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 thread_local! {
     /// Whether the current thread is an engine thread; set when it starts.
@@ -149,7 +156,7 @@ fn perform(engine: &mut Engine, job: Job) -> Vec<String> {
 }
 
 impl EngineThread {
-    /// Starts an engine on a new thread named `bayan-engine`.
+    /// Starts an engine on a new thread named `bayan-engine`, with a stack of [`ENGINE_THREAD_STACK_BYTES`].
     ///
     /// # Errors
     ///
@@ -165,6 +172,7 @@ impl EngineThread {
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name(ENGINE_THREAD_NAME.to_owned())
+            .stack_size(ENGINE_THREAD_STACK_BYTES)
             .spawn(move || run(engine, &receiver, &thread_shared))?;
         let thread_id = thread.thread().id();
         Ok(Self {
@@ -297,207 +305,4 @@ impl Drop for EngineThread {
 // Host only: these tests start the engine thread, and WebAssembly (wasm32-wasip1, where the gate also runs the tests) has no threads. The condition is a second attribute, not part of `cfg(all(test, …))`, because Clippy treats a module as test code, where `unwrap()` is allowed, only under a plain `#[cfg(test)]`.
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
-mod tests {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Duration;
-
-    use super::*;
-
-    const WAIT: Duration = Duration::from_secs(10);
-
-    fn started() -> (EngineThread, Receiver<String>) {
-        started_with(Arc::new(BlobStore::new()))
-    }
-
-    fn started_with(blobs: Arc<BlobStore>) -> (EngineThread, Receiver<String>) {
-        let thread = EngineThread::spawn(Config::default(), blobs).unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let sender = Mutex::new(sender);
-        thread
-            .set_sink(Arc::new(move |message: &str| {
-                let _ignored = sender.lock().unwrap().send(message.to_owned());
-            }))
-            .unwrap();
-        (thread, receiver)
-    }
-
-    #[test]
-    fn handles_messages_in_order_and_answers_through_the_sink() {
-        let (thread, messages) = started();
-        thread
-            .post(
-                br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#.to_vec(),
-                0,
-            )
-            .unwrap();
-        thread
-            .post(br#"{"v":0,"id":2,"type":"nope"}"#.to_vec(), 0)
-            .unwrap();
-        let first = messages.recv_timeout(WAIT).unwrap();
-        let second = messages.recv_timeout(WAIT).unwrap();
-        assert!(
-            first.contains(r#""re":1"#) && first.contains(r#""type":"welcome""#),
-            "{first}"
-        );
-        assert!(
-            second.contains(r#""re":2"#) && second.contains("unsupported_message"),
-            "{second}"
-        );
-        thread.stop();
-    }
-
-    #[test]
-    fn the_engine_thread_knows_itself() {
-        assert!(!on_engine_thread());
-        let thread = EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let sender = Mutex::new(sender);
-        thread
-            .set_sink(Arc::new(move |_message: &str| {
-                let _ignored = sender.lock().unwrap().send(on_engine_thread());
-            }))
-            .unwrap();
-        thread.post(b"{}".to_vec(), 0).unwrap();
-        assert_eq!(receiver.recv_timeout(WAIT), Ok(true));
-        thread.stop();
-    }
-
-    #[test]
-    fn rendering_from_any_engine_s_sink_is_refused() {
-        // Two engines whose sinks rendered on each other would wait for each other forever.
-        let other =
-            Arc::new(EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap());
-        let thread = EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let sender = Mutex::new(sender);
-        let target = Arc::clone(&other);
-        thread
-            .set_sink(Arc::new(move |_message: &str| {
-                let result = target.render_tile(b"{}".to_vec(), 1, 1, 0);
-                let _ignored = sender.lock().unwrap().send(result);
-            }))
-            .unwrap();
-        thread.post(b"{}".to_vec(), 0).unwrap();
-        assert_eq!(receiver.recv_timeout(WAIT), Ok(Err(TileError::WrongThread)));
-        thread.stop();
-        other.stop();
-    }
-
-    #[test]
-    fn a_panic_outside_the_engine_s_own_recovery_does_not_end_the_thread() {
-        let (thread, messages) = started();
-        let hello = |id: u64| {
-            format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#)
-                .into_bytes()
-        };
-        thread.post(hello(1), 0).unwrap();
-        assert!(messages.recv_timeout(WAIT).unwrap().contains(r#""re":1"#));
-        let (answer, waiting) = mpsc::sync_channel(1);
-        thread.jobs.send(Job::Panic { answer }).unwrap();
-        // The shell learns that the session is gone, and a waiting tile request fails instead of waiting forever.
-        let error = messages.recv_timeout(WAIT).unwrap();
-        assert!(
-            error.contains(r#""type":"engine.error""#) && error.contains(r#""recoverable":false"#),
-            "{error}"
-        );
-        assert!(waiting.recv_timeout(WAIT).is_err());
-        // The thread goes on: a new handshake works.
-        thread.post(hello(2), 0).unwrap();
-        let welcome = messages.recv_timeout(WAIT).unwrap();
-        assert!(
-            welcome.contains(r#""re":2"#) && welcome.contains(r#""ok":true"#),
-            "{welcome}"
-        );
-        thread.stop();
-    }
-
-    #[test]
-    fn the_sink_cannot_change_after_the_first_post() {
-        let (thread, _messages) = started();
-        thread.post(b"{}".to_vec(), 0).unwrap();
-        assert_eq!(thread.set_sink(Arc::new(|_: &str| {})), Err(AlreadyPosted));
-    }
-
-    #[test]
-    fn the_sink_cannot_change_after_the_first_tile_either() {
-        let (thread, _messages) = started();
-        assert_eq!(
-            thread.render_tile(b"{}".to_vec(), 1, 1, 0),
-            Err(TileError::InvalidArgument)
-        );
-        assert_eq!(thread.set_sink(Arc::new(|_: &str| {})), Err(AlreadyPosted));
-    }
-
-    #[test]
-    fn rendering_from_inside_the_sink_is_refused_instead_of_waiting_forever() {
-        let thread =
-            Arc::new(EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap());
-        let (sender, results) = mpsc::channel();
-        let sender = Mutex::new(sender);
-        let inner = Arc::downgrade(&thread);
-        thread
-            .set_sink(Arc::new(move |_: &str| {
-                if let Some(thread) = inner.upgrade() {
-                    let result = thread.render_tile(b"{}".to_vec(), 1, 1, 0);
-                    let _ignored = sender.lock().unwrap().send(result);
-                }
-            }))
-            .unwrap();
-        thread.post(b"[]".to_vec(), 0).unwrap();
-        assert_eq!(
-            results.recv_timeout(WAIT).unwrap(),
-            Err(TileError::WrongThread)
-        );
-    }
-
-    #[test]
-    fn nothing_reaches_the_sink_after_stop_returns() {
-        let (thread, messages) = started();
-        for _ in 0..100 {
-            thread.post(b"[]".to_vec(), 0).unwrap();
-        }
-        thread.stop();
-        // Drain whatever arrived before stop returned; nothing arrives after it.
-        while messages.try_recv().is_ok() {}
-        assert_eq!(
-            messages.recv_timeout(Duration::from_millis(50)),
-            Err(RecvTimeoutError::Timeout)
-        );
-        // Dropping the stopped engine drops the sink, and with it the channel's sender.
-        drop(thread);
-        assert_eq!(
-            messages.recv_timeout(Duration::from_millis(50)),
-            Err(RecvTimeoutError::Disconnected)
-        );
-    }
-
-    #[test]
-    fn renders_tiles_in_order_with_messages() {
-        let blobs = Arc::new(BlobStore::new());
-        let blob = blobs.put_shell(b"").unwrap();
-        let (thread, messages) = started_with(blobs);
-        thread
-            .post(
-                br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#.to_vec(),
-                0,
-            )
-            .unwrap();
-        thread
-            .post(
-                format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#)
-                    .into_bytes(),
-                0,
-            )
-            .unwrap();
-        // The tile request waits for the document opened by the message before it.
-        let request =
-            br#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":15544800,"height":20116800}}"#;
-        let pixels = thread.render_tile(request.to_vec(), 17, 22, 0).unwrap();
-        assert_eq!(pixels.len(), 17 * 22 * 4);
-        assert_eq!(
-            messages.recv_timeout(WAIT).map(|m| m.contains("welcome")),
-            Ok(true)
-        );
-        thread.stop();
-    }
-}
+mod tests;

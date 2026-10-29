@@ -1,7 +1,7 @@
 //! `cargo xtask sdk`, `cargo xtask wasm-package` and `cargo xtask c-driver`: the engine's artifacts for the shells, and the C test driver (work package CORE-007).
 //!
 //! - `sdk` builds the C SDK for one target, the host by default: the engine as a static and a dynamic library, its C header and the protocol's JSON Schema, in the layout that bayan-desktop expects (its `src/engine/README.md`).
-//! - `wasm-package` builds the WebAssembly package for the web shell: the engine module with wasm-bindgen's JavaScript glue and TypeScript declarations, the worker host `bayan-worker.js`, the protocol's JSON Schema and TypeScript declarations, and a test page.
+//! - `wasm-package` builds the WebAssembly package for the web shell: the engine module with wasm-bindgen's JavaScript glue and TypeScript declarations, the worker host `bayan-worker.js`, the protocol's JSON Schema and TypeScript declarations, and a test page. It fails if the module imports anything that [`WASM_IMPORTS`] does not list (`wasm_imports.rs`).
 //! - `c-driver` compiles the C test driver, `crates/bayan-ffi/c-driver/driver.c`, against an SDK twice, linked with the static and with the dynamic library, and runs both.
 //! - `miri` runs bayan-ffi's unit tests under Miri, which detects undefined behaviour in its pointer handling (ADR-0006 §2).
 //!
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use crate::process::{self, cargo};
+use crate::wasm_imports::{self, Allowed, Kind};
 use crate::{json, notices};
 
 /// The WebAssembly target of the web shell's engine (ADR-0014).
@@ -36,6 +37,31 @@ const WASM_PACKAGE_SCRIPTS: [&str; 4] = [
     "test-page.css",
     "test-page.js",
 ];
+
+/// The imports that the engine's WebAssembly module may have, after wasm-bindgen, each with what it does and why the module needs it. Every import is a way out of the module to its JavaScript host, and the engine never touches the outside world itself (ADR-0012 §5), so `cargo xtask wasm-package` fails on any import that is not listed here, and on any listed import that the module no longer has (`wasm_imports.rs`). Reviewers read every change to this list: an import that reaches the outside world, such as a clock or the browser's randomness, needs an ADR that accepts it (ADR-0012's amendment of 2026-10-08 accepts Loro's randomness and clock, which arrive with bayan-crdt). The names can change while the engine's code does not: a name that ends in a hash (`…_41e9ee4f547fc59a`) is computed by wasm-bindgen's macro, while the crates are compiled, with std's `DefaultHasher`, whose algorithm Rust does not promise to keep, so a new Rust toolchain can rename such an import, not only a new wasm-bindgen; and a numbered intrinsic (`…_0000000000000001`) can change its number when the module needs another one. The monthly dependency session then reads the new glue, `bayan_wasm.js`, and updates the list (AGENTS.md, "Dependency mechanisms").
+pub const WASM_IMPORTS: [Allowed; 3] = [
+    Allowed {
+        module: GLUE,
+        name: "__wbg___wbindgen_throw_41e9ee4f547fc59a",
+        kind: Kind::Function,
+        reason: "wasm-bindgen's glue: throws a JavaScript `Error` with a message from the module's memory, how wasm-bindgen reports an error inside its own code to the caller",
+    },
+    Allowed {
+        module: GLUE,
+        name: "__wbindgen_init_externref_table",
+        kind: Kind::Function,
+        reason: "wasm-bindgen's glue: when the module starts, grows the module's own table of JavaScript values and fills its first slots with `undefined`, `null`, `true` and `false`",
+    },
+    Allowed {
+        module: GLUE,
+        name: "__wbindgen_generic_0000000000000001",
+        kind: Kind::Function,
+        reason: "wasm-bindgen's glue: a numbered cast intrinsic, `Ref(String) -> Externref` in the glue, which turns a string in the module's memory into a JavaScript string, as the engine's replies and events return to the worker host; wasm-bindgen numbers its cast intrinsics, so the number can change when the module needs another cast",
+    },
+];
+
+/// The module under which wasm-bindgen's glue, `bayan_wasm.js`, hands its functions to the engine's module.
+const GLUE: &str = "./bayan_wasm_bg.js";
 
 /// `cargo xtask sdk [--target <triple>] [--out <folder>]`.
 pub fn sdk(args: &[&str]) -> ExitCode {
@@ -382,6 +408,13 @@ fn build_wasm_package(args: &[&str]) -> Result<(), String> {
         .arg(&out)
         .arg(&module);
     process::run(&mut command)?;
+
+    // The module that ships, as wasm-bindgen wrote it, with the imports that its glue provides.
+    let packaged = out.join("bayan_wasm_bg.wasm");
+    let bytes = std::fs::read(&packaged)
+        .map_err(|error| format!("cannot read {}: {error}", packaged.display()))?;
+    let line = wasm_imports::check(&bytes, &WASM_IMPORTS)?;
+    println!("cargo xtask wasm-package: {line}");
 
     let scripts = root.join("crates").join("bayan-wasm").join("js");
     for file in WASM_PACKAGE_SCRIPTS {

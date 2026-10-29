@@ -502,6 +502,68 @@ pub fn packages(metadata: &str) -> Result<Vec<Package>, String> {
     Ok(packages)
 }
 
+/// A dependency of one workspace member on another, as `cargo metadata` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDependency {
+    /// The member that has the dependency.
+    pub from: String,
+    /// The member it depends on.
+    pub on: String,
+    /// Whether it is a dev-dependency, which only the member's tests, benchmarks and examples use.
+    pub dev: bool,
+}
+
+/// The dependencies of the workspace members (`packages`) on each other, from the JSON of [`metadata`]: every dependency whose `path` is a member's folder. A normal dependency and a build dependency count alike; only a dev-dependency is marked as one.
+pub fn member_dependencies(
+    metadata: &str,
+    packages: &[Package],
+) -> Result<Vec<MemberDependency>, String> {
+    let invalid = |what: &str| format!("unexpected `cargo metadata` output: {what}");
+    let value = json::parse(metadata).map_err(|error| invalid(&error))?;
+    let list = value
+        .get("packages")
+        .and_then(json::Value::as_array)
+        .ok_or_else(|| invalid("no `packages` list"))?;
+    let mut found = Vec::new();
+    for package in list {
+        let name = package
+            .get("name")
+            .and_then(json::Value::as_str)
+            .ok_or_else(|| invalid("a package without a name"))?;
+        let dependencies = package
+            .get("dependencies")
+            .and_then(json::Value::as_array)
+            .ok_or_else(|| invalid(&format!("no `dependencies` for {name}")))?;
+        for dependency in dependencies {
+            let Some(path) = dependency.get("path").and_then(json::Value::as_str) else {
+                continue;
+            };
+            let Some(on) = packages
+                .iter()
+                .find(|member| member.folder == Path::new(path))
+            else {
+                continue;
+            };
+            let dev = match dependency.get("kind") {
+                Some(json::Value::String(kind)) => kind == "dev",
+                Some(json::Value::Null) => false,
+                _ => {
+                    return Err(invalid(&format!(
+                        "the dependency of {name} on {} has no `kind`",
+                        on.name
+                    )));
+                }
+            };
+            found.push(MemberDependency {
+                from: name.to_owned(),
+                on: on.name.clone(),
+                dev,
+            });
+        }
+    }
+    Ok(found)
+}
+
 /// A kind of code that a workspace member runs during the build, which xtask must list with a reason before the gate accepts it (`BUILD_SCRIPTS` and `PROC_MACROS` in verify.rs).
 pub struct BuildTimeCode {
     /// The `kind` that `cargo metadata` reports for such a target.
@@ -746,6 +808,69 @@ unwrap_used = "warn"
         }
         assert!(packages("{\"packages\":[]}").is_err());
         assert!(packages("not json").is_err());
+    }
+
+    #[test]
+    fn reads_the_dependencies_of_members_on_members() {
+        // The dependencies as Cargo 1.99 prints them: a path dependency has a `path`, one from crates.io has none, and `kind` is null for a normal dependency.
+        let dependency = |name: &str, kind: &str, path: Option<&str>| {
+            let path = path.map_or_else(String::new, |path| format!(r#","path":"{path}""#));
+            format!(
+                r#"{{"name":"{name}","source":null,"req":"*","kind":{kind},"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null{path}}}"#
+            )
+        };
+        let json = metadata_json(&[
+            ("bayan-engine", &["lib"]),
+            ("bayan-cli", &["bin"]),
+            ("text-pipeline", &["lib"]),
+        ])
+        .replacen(
+            r#""dependencies":[]"#,
+            &format!(
+                r#""dependencies":[{},{}]"#,
+                dependency("serde", "null", None),
+                dependency("bayan-cli", r#""dev""#, Some("/repo/crates/bayan-cli"))
+            ),
+            1,
+        )
+        .replacen(
+            r#""dependencies":[]"#,
+            &format!(
+                r#""dependencies":[{}]"#,
+                dependency("bayan-engine", "null", Some("/repo/crates/bayan-engine"))
+            ),
+            1,
+        )
+        .replacen(
+            r#""dependencies":[]"#,
+            &format!(
+                r#""dependencies":[{},{}]"#,
+                dependency(
+                    "bayan-engine",
+                    r#""build""#,
+                    Some("/repo/crates/bayan-engine")
+                ),
+                dependency("fuzzed", "null", Some("/repo/fuzz"))
+            ),
+            1,
+        );
+        let members = packages(&json).unwrap();
+        let edge = |from: &str, on: &str, dev: bool| MemberDependency {
+            from: from.to_owned(),
+            on: on.to_owned(),
+            dev,
+        };
+        assert_eq!(
+            member_dependencies(&json, &members).unwrap(),
+            [
+                edge("bayan-engine", "bayan-cli", true),
+                edge("bayan-cli", "bayan-engine", false),
+                edge("text-pipeline", "bayan-engine", false),
+            ]
+        );
+        let without_kind = json.replacen(r#""kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null,"path""#, r#""rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null,"path""#, 1);
+        let problem = member_dependencies(&without_kind, &members).unwrap_err();
+        assert!(problem.contains("has no `kind`"), "{problem}");
     }
 
     #[test]
