@@ -448,6 +448,16 @@ struct Attribute {
     content: Range<usize>,
 }
 
+/// The positions of the tokens between the brackets of every group that this check reads as an attribute: every attribute written in full (`#[…]` or `#![…]`, also nested in other attributes or in macros) and every `[…]` after a macro substitution that could expand to `#` or `#!` (`$name [ … ]`). The outside-world check reads the strings in them (`outside_world.rs`).
+pub fn attribute_contents(tokens: &[Token<'_>], closing: &[Option<usize>]) -> Vec<Range<usize>> {
+    let opening = opening_brackets(closing);
+    attributes(tokens, closing)
+        .into_iter()
+        .chain(substitution_groups(tokens, closing, &opening))
+        .map(|attribute| attribute.content)
+        .collect()
+}
+
 /// Every attribute written in full in `tokens`, `#[…]` or `#![…]`, also those nested in other attributes or in macros.
 fn attributes(tokens: &[Token<'_>], closing: &[Option<usize>]) -> Vec<Attribute> {
     let kind = |at: usize| tokens.get(at).map(|token| token.kind);

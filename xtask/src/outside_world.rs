@@ -1,6 +1,6 @@
-//! The engine never reaches the outside world through Rust's standard library.
+//! The code that ships of the engine's crates names none of the five modules of Rust's standard library that exist for the outside world.
 //!
-//! The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets and other processes are the host's, and the host passes the engine what it needs through the protocol's host services. Nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5), and the engine reads no environment variables (architecture §12). Rust's standard library reaches all of these through five modules: `std::env` (environment variables, the command line, the current folder), `std::fs` (files), `std::net` (sockets), `std::process` (other processes, and ending this one) and `std::time` (clocks). So the code that ships may name none of them, except in the workspace members that `OUTSIDE_WORLD` in `verify.rs` lists, with the modules that each may use and the reason.
+//! The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets and other processes are the host's, and the host passes the engine what it needs through the protocol's host services. Nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5), and the engine reads no environment variables (architecture §12). This check enforces the part of those rules that the source text shows: the code that ships may name none of the five modules of Rust's standard library that exist for the outside world, `std::env` (environment variables, the command line, the current folder), `std::fs` (files), `std::net` (sockets), `std::process` (other processes, and ending this one) and `std::time` (clocks), except in the workspace members that `OUTSIDE_WORLD` in `verify.rs` lists, with the modules that each may use and the reason. Other parts of std, and dependencies, reach the outside world too (see "Known limitations" below), so passing it means that the code names none of these modules, not that the code cannot reach the outside world.
 //!
 //! # Why it is not a lint
 //!
@@ -8,7 +8,9 @@
 //!
 //! # The code it reads
 //!
-//! It reads exactly the Rust files that the compiler compiled into code that ships. After its runs, the Clippy step hands it, for every member, the files that the dependency files list for the member's units that are not tests (not compiled as unit tests, and not a test, benchmark, example or build-script target), among the files that the source check read (`dep_info.rs`). A module that only the tests use, declared with `#[cfg(test)] mod name;`, is left out by that record itself, because the compiler does not read its file for those units. Inside the files that remain, a module written in place under `#[cfg(test)]`, as in `#[cfg(test)] mod tests { … }`, is skipped too; every other item counts, also one under `#[cfg(test)]`. So tests may still measure time, read fixtures and run programs.
+//! It reads every line of exactly the Rust files that the compiler compiled into code that ships. After its runs, the Clippy step hands it, for every member, the files that the dependency files list for the member's units that are not tests (not compiled as unit tests, and not a test, benchmark, example or build-script target), among the files that the source check read (`dep_info.rs`). A module that only the tests use, declared with `#[cfg(test)] mod name;`, is left out by that record itself, because the compiler does not read its file for those units. That, or an integration test, is where tests that measure time, read fixtures or run programs belong. Inside the files that remain, nothing is skipped, also not a module written in place under `#[cfg(test)]`: the check reads the source text, and a macro can drop that condition from a module it is handed and ship the module's code, as in `macro_rules! shipped { (#[cfg(test)] mod $name:ident { $($body:tt)* }) => { $($body)* }; }`, so only the compiler's record can tell which code only the tests compile.
+//!
+//! It also reads the strings in attributes, because a derive macro can read a string of its attribute as Rust and make it code that ships: `#[serde(default = "path")]` makes serde's derive call the function at `path`. Each such string is decoded as the compiler decodes it (escapes, raw strings) and checked by the same rules as code, also for the ways of naming std below. Prose in an attribute, such as the `reason` of an `#[expect]`, is checked the same way, since most prose reads as a series of Rust tokens: it names these modules in words, not as paths, and does not write `std` on its own. A string that cannot be read as Rust at all (an unclosed quote, comment or bracket) is skipped, because a derive macro that reads its string as Rust, as serde's and schemars' do, rejects it too. Documentation is left out (`#[doc = "…"]`, which `///` and `//!` comments become, and `#[doc(…)]`): nothing compiles it into code that ships, and its examples are compiled only as doctests.
 //!
 //! # What it rejects
 //!
@@ -28,7 +30,17 @@
 //!
 //! The list cannot go stale: an entry for a member that does not exist, an entry without modules, a module that is not one of the five, and a module that the member's code that ships no longer uses all fail.
 //!
-//! **Known limitations.** These rules model Rust's paths; they are not the compiler's name resolution. A path that never writes the module's name is not seen: a dependency that re-exports a module of std under another name, or a macro of a dependency that expands to such a path. Dependencies are reviewed when they are added (ADR-0017). In the WebAssembly build, where std has no clock, files or environment of its own, the import check of `cargo xtask wasm-package` (`wasm_imports.rs`) shows every function that the module asks of its JavaScript host, whoever calls it.
+//! # Known limitations
+//!
+//! These rules model Rust's tokens and paths; they are not the compiler's name resolution, and they read only the workspace's own code.
+//!
+//! - A path that never writes the module's name is not seen: a dependency that re-exports a module of std under another name, or a macro of a dependency that expands to such a path. Dependencies are reviewed when they are added (ADR-0017).
+//! - Functions of dependencies that reach the outside world themselves are not seen either, such as cfb's `cfb::open(path)`, `open_rw(path)` and `create(path)`, which open files with `std::fs`; bayan-opc calls only `CompoundFile::open` on the bytes it is handed (a `Cursor`).
+//! - Other parts of std reach the outside world without naming one of the five modules: the methods of `std::path::Path` that ask the file system (`exists`, `try_exists`, `is_file`, `is_dir`, `is_symlink`, `metadata`, `symlink_metadata`, `read_dir`, `read_link` and `canonicalize`), and `std::hash::RandomState` (also named `std::collections::hash_map::RandomState`), which seeds itself from the operating system's randomness. `std::path` as a whole cannot be banned, because bayan-opc uses its `Component` and `PathBuf` (`compound_file.rs`).
+//! - An attribute macro on an enclosing module, or any other procedural macro, receives the code it is applied to and can write different code: it could drop `#[cfg(test)]` from a module as `shipped!` does above, or write a path that the source does not show. No workspace member is a procedural-macro crate (`PROC_MACROS` in `verify.rs` is empty), and no dependency of the members offers an attribute macro for modules today (wasm-bindgen's `#[wasm_bindgen]`, the only attribute macro among them, refuses modules); the macros of dependencies are reviewed with them (ADR-0017).
+//! - A string in an attribute that a macro assembles from a split form, keeping the `#` of one attribute and writing it before a bracket group handed in separately (AGENTS.md, "Lint rules and exceptions"), is not read as an attribute's string, because the source does not show that bracket group as an attribute. Reviewers check every macro that takes a `#` or a bracket group as a `tt`, as AGENTS.md asks.
+//!
+//! In the WebAssembly build, where std has no clock, files or environment of its own, the import check of `cargo xtask wasm-package` (`wasm_imports.rs`) shows every function that the module asks of its JavaScript host, whoever calls it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,7 +48,7 @@ use std::path::{Path, PathBuf};
 use crate::policy::MemberDependency;
 use crate::sources::{self, Kind, Token};
 
-/// The modules of Rust's standard library that reach the outside world, as code writes them.
+/// The five modules of Rust's standard library that exist for the outside world, as code writes them.
 pub const MODULES: [&str; 5] = [
     "std::env",
     "std::fs",
@@ -60,11 +72,11 @@ pub struct Exemption {
 }
 
 /// Why the modules are rejected, and what to do instead.
-const WHY: &str = "The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets and other processes are the host's, which passes the engine what it needs through the protocol's host services, and nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5; the engine reads no environment variables, architecture §12). Rust's standard library reaches the outside world through std::env, std::fs, std::net, std::process and std::time, so the code that ships may name none of them, except in the members that OUTSIDE_WORLD in xtask/src/verify.rs lists, each with the modules it may use. Ask the host for what the code needs instead (a time, the bytes of a file, a setting), or, if only tests need it, move it into a test: integration tests, and modules written in place under #[cfg(test)], may use these modules. A member that really needs one is added to OUTSIDE_WORLD, with the module and the reason, in a reviewed pull request.";
+const WHY: &str = "The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets and other processes are the host's, which passes the engine what it needs through the protocol's host services, and nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5; the engine reads no environment variables, architecture §12). So the code that ships may name none of the five modules of Rust's standard library that exist for the outside world, std::env, std::fs, std::net, std::process and std::time, except in the members that OUTSIDE_WORLD in xtask/src/verify.rs lists, each with the modules it may use; this includes the strings of attributes, which a derive macro such as serde's can read as paths. Ask the host for what the code needs instead (a time, the bytes of a file, a setting). For a length of time without a clock, use core::time::Duration, the same type as std::time::Duration. If only tests need the module, move them out of the files that ship: into an integration test (tests/), or into a module declared with `#[cfg(test)] mod name;` and written in its own file, which the compiler does not read for the code that ships. A test module written in place, `#[cfg(test)] mod tests { … }`, counts as code that ships, because a macro could drop its condition. A member that really needs a module is added to OUTSIDE_WORLD, with the module and the reason, in a reviewed pull request.";
 
 /// How the uses of the modules are reported: the heading of their list.
 const USED: &str =
-    "the code that ships uses modules of the standard library that reach the outside world";
+    "the code that ships names modules of the standard library that exist for the outside world";
 
 /// How the ways of naming std that the check cannot follow are reported: the heading of their list, and what to do.
 const HIDDEN: (&str, &str) = (
@@ -108,6 +120,9 @@ const MACRO_PATH: &str =
 /// `use` or `extern crate` with a metavariable.
 const MACRO_USE: &str = "a `use` or `extern crate` declaration with a macro's metavariable in it";
 
+/// The attribute of documentation, whose strings are never code (`#[doc = "…"]`, `#[doc(…)]`).
+const DOC: &str = "doc";
+
 /// The module of [`MODULES`] whose last word is `name`, if there is one.
 fn module(name: &str) -> Option<&'static str> {
     MODULES
@@ -116,21 +131,15 @@ fn module(name: &str) -> Option<&'static str> {
         .find(|module| module.strip_prefix("std::") == Some(name))
 }
 
-/// Finds in Rust source the uses of [`MODULES`] and the ways of naming std, or of building a path in a macro, that could reach them unseen, outside the modules written in place under `#[cfg(test)]`. Comments, strings and character literals are skipped, as the source check skips them. Source the reader cannot follow is an error.
+/// Finds in Rust source the uses of [`MODULES`] and the ways of naming std, or of building a path in a macro, that could reach them unseen, in every line, and in the strings of attributes other than documentation, each decoded and read as Rust (see the module's documentation). Comments, other strings and character literals are skipped, as the source check skips them. Source the reader cannot follow is an error.
 fn scan(source: &str) -> Result<Found, String> {
     let tokens = sources::tokenize(source)?;
     let closing = sources::closing_brackets(&tokens)?;
-    let skipped = test_modules(&tokens, &closing);
     let kind = |at: usize| tokens.get(at).map(|token| token.kind);
     let mut found = Found::default();
-    let mut at = 0;
-    while at < tokens.len() {
-        if let Some(&end) = skipped.get(&at) {
-            at = end + 1;
-            continue;
-        }
-        let line = tokens[at].line;
-        match tokens[at].kind {
+    for (at, token) in tokens.iter().enumerate() {
+        let line = token.line;
+        match token.kind {
             Kind::Ident(STD) if kind(at + 1) == Some(Kind::PathSeparator) => {
                 after_std(&tokens, &closing, at + 2, &mut found);
             }
@@ -168,9 +177,83 @@ fn scan(source: &str) -> Result<Found, String> {
             }
             _ => {}
         }
-        at += 1;
     }
+    // Each string once, also when attributes nest.
+    let strings: BTreeSet<usize> = sources::attribute_contents(&tokens, &closing)
+        .into_iter()
+        .filter(|content| kind(content.start) != Some(Kind::Ident(DOC)))
+        .flatten()
+        .filter(|&at| matches!(tokens[at].kind, Kind::Str(_)))
+        .collect();
+    for at in strings {
+        let Kind::Str(literal) = tokens[at].kind else {
+            continue;
+        };
+        // A string that is not Rust is skipped: whatever reads it as Rust rejects it too.
+        let Some(Ok(inner)) = string_value(literal).map(|text| scan(&text)) else {
+            continue;
+        };
+        // Reported on the line where the string starts.
+        let line = tokens[at].line;
+        found
+            .uses
+            .extend(inner.uses.into_iter().map(|(_, module)| (line, module)));
+        found
+            .hidden
+            .extend(inner.hidden.into_iter().map(|(_, what)| (line, what)));
+    }
+    found.uses.sort_by_key(|&(line, _)| line);
+    found.hidden.sort_by_key(|&(line, _)| line);
     Ok(found)
+}
+
+/// The text of a string literal, written as in the source with its prefix and quotes (`"…"`, `b"…"`, `c"…"`, `r#"…"#`, `br"…"`, `cr"…"`), with its escapes decoded as the compiler decodes them. `None` for an escape that this reader does not know; the compiler rejects every such escape.
+fn string_value(literal: &str) -> Option<String> {
+    let literal = literal.strip_prefix(['b', 'c']).unwrap_or(literal);
+    if let Some(raw) = literal.strip_prefix('r') {
+        // A raw string: its text is exactly what stands between `r#…#"` and `"#…#`.
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        return raw
+            .get(hashes + 1..raw.len().checked_sub(hashes + 1)?)
+            .map(str::to_owned);
+    }
+    let mut characters = literal.strip_prefix('"')?.strip_suffix('"')?.chars();
+    let mut text = String::new();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            text.push(character);
+            continue;
+        }
+        match characters.next()? {
+            'n' => text.push('\n'),
+            'r' => text.push('\r'),
+            't' => text.push('\t'),
+            '0' => text.push('\0'),
+            escaped @ ('\\' | '\'' | '"') => text.push(escaped),
+            'x' => {
+                let digits: String = characters.by_ref().take(2).collect();
+                text.push(char::from(u8::from_str_radix(&digits, 16).ok()?));
+            }
+            'u' => {
+                if characters.next()? != '{' {
+                    return None;
+                }
+                let digits: String = characters
+                    .by_ref()
+                    .take_while(|&digit| digit != '}')
+                    .filter(|&digit| digit != '_')
+                    .collect();
+                text.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+            }
+            // A line break after a backslash continues the string on the next line, without the break and the spaces that begin that line.
+            '\n' => {
+                let rest = characters.as_str();
+                characters = rest.trim_start_matches([' ', '\t', '\n', '\r']).chars();
+            }
+            _ => return None,
+        }
+    }
+    Some(text)
 }
 
 /// Reads what follows `std::`, starting at `tokens[at]`: a name, which may be one of [`MODULES`], or a group, whose entries are read by [`group`]. Anything else is reported.
@@ -226,59 +309,6 @@ fn group(tokens: &[Token<'_>], closing: &[Option<usize>], open: usize, found: &m
     }
 }
 
-/// The modules written in place under `#[cfg(test)]` (`#[cfg(test)] mod name { … }`, with any other attributes before or after it and any visibility), as the position of the `#` of the first attribute before each, mapped to the position of its closing `}`. Only the plain condition counts, as only it makes Clippy treat a module as test code (AGENTS.md).
-fn test_modules(tokens: &[Token<'_>], closing: &[Option<usize>]) -> BTreeMap<usize, usize> {
-    let kind = |at: usize| tokens.get(at).map(|token| token.kind);
-    let test_condition = [
-        Kind::Ident("cfg"),
-        Kind::Punct(b'('),
-        Kind::Ident("test"),
-        Kind::Punct(b')'),
-    ];
-    let mut found = BTreeMap::new();
-    let mut at = 0;
-    while at < tokens.len() {
-        // A run of outer attributes, `#[…] #[…] …`.
-        let start = at;
-        let mut test = false;
-        while kind(at) == Some(Kind::Punct(b'#')) && kind(at + 1) == Some(Kind::Punct(b'[')) {
-            let Some(close) = closing[at + 1] else {
-                break;
-            };
-            test |= tokens[at + 2..close]
-                .iter()
-                .map(|token| token.kind)
-                .eq(test_condition);
-            at = close + 1;
-        }
-        if at == start {
-            at += 1;
-            continue;
-        }
-        if !test {
-            continue;
-        }
-        let mut item = at;
-        if kind(item) == Some(Kind::Ident("pub")) {
-            item += 1;
-            if kind(item) == Some(Kind::Punct(b'('))
-                && let Some(close) = closing[item]
-            {
-                item = close + 1;
-            }
-        }
-        if kind(item) == Some(Kind::Ident("mod"))
-            && matches!(kind(item + 1), Some(Kind::Ident(_)))
-            && kind(item + 2) == Some(Kind::Punct(b'{'))
-            && let Some(close) = closing[item + 2]
-        {
-            found.insert(start, close);
-            at = close + 1;
-        }
-    }
-    found
-}
-
 /// Checks `OUTSIDE_WORLD` (`exemptions`) before anything is built: each entry names a workspace member (of `members`) once, and lists at least one module, each one of [`MODULES`] and only once; and no member that the list does not name depends on one that it names (`dependencies`, from `cargo metadata`), except as a dev-dependency. Returns one line describing what was checked, or every problem found.
 pub fn check_list(
     members: &[&str],
@@ -320,7 +350,7 @@ pub fn check_list(
     }
     if !problems.is_empty() {
         return Err(format!(
-            "OUTSIDE_WORLD in xtask/src/verify.rs is not right:\n{}\nEach entry names a workspace member, the modules of the standard library that reach the outside world ({}) that its code that ships may use, and the reason.",
+            "OUTSIDE_WORLD in xtask/src/verify.rs is not right:\n{}\nEach entry names a workspace member, the modules of the standard library that exist for the outside world ({}) that its code that ships may use, and the reason.",
             problems.join("\n"),
             MODULES.join(", ")
         ));
@@ -436,7 +466,7 @@ pub fn check_code(
         })
         .collect();
     Ok(format!(
-        "outside world: the code that ships of the members that OUTSIDE_WORLD does not name ({}; {} files) uses none of {}, and that of the members it names ({} files) uses exactly the modules it lists for them",
+        "outside world: the code that ships of the members that OUTSIDE_WORLD does not name ({}; {} files) names none of {}, and that of the members it names ({} files) names exactly the modules it lists for them",
         others.join(", "),
         files_read.0,
         MODULES.join(", "),
@@ -528,27 +558,93 @@ mod tests {
     }
 
     #[test]
-    fn skips_the_modules_written_in_place_under_cfg_test() {
-        let source = "use std::sync::Arc;\n#[cfg(test)]\n#[cfg(not(target_arch = \"wasm32\"))]\nmod tests {\n    use std::time::Duration;\n    #[test] fn waits() { std::thread::sleep(Duration::from_millis(1)); }\n}\n#[doc = \"helpers\"]\n#[cfg(test)]\npub(crate) mod helpers { use std::fs; }\nfn after() { std::env::args(); }\n";
-        assert_eq!(uses(source), ["std::env"]);
-    }
-
-    #[test]
-    fn counts_everything_else_under_cfg_test() {
-        // Only a module written in place counts as test code; other items under the condition, and other conditions, do not.
-        assert_eq!(uses("#[cfg(test)] use std::time::Instant;"), ["std::time"]);
+    fn reads_every_line_also_under_cfg_test() {
+        // The compiler's record leaves out the files of the modules that only the tests declare (`#[cfg(test)] mod name;`); in the files that ship, every line counts, also a test module written in place.
         assert_eq!(
-            uses("#[cfg(test)] fn clock() { std::time::Instant::now(); }"),
-            ["std::time"]
+            uses(
+                "use std::sync::Arc;\n#[cfg(test)]\n#[cfg(not(target_arch = \"wasm32\"))]\nmod tests {\n    use std::time::Duration;\n}\nfn after() { std::env::args(); }\n"
+            ),
+            ["std::time", "std::env"]
         );
+        assert_eq!(uses("#[cfg(test)] use std::time::Instant;"), ["std::time"]);
         assert_eq!(
             uses("#[cfg(any(test, debug_assertions))] mod checks { use std::env; }"),
             ["std::env"]
         );
+    }
+
+    #[test]
+    fn reads_the_test_modules_that_a_macro_could_ship() {
+        // A macro can drop `#[cfg(test)]` from the module it is handed and ship the module's code, so the test module in its call counts.
+        let shipped = "macro_rules! shipped {\n    (#[cfg(test)] mod $name:ident { $($body:tt)* }) => { $($body)* };\n}\nshipped! {\n    #[cfg(test)]\n    mod tests {\n        pub fn now() -> std::time::Instant { std::time::Instant::now() }\n    }\n}\n";
+        assert_eq!(uses(shipped), ["std::time", "std::time"]);
+        // The same with a matcher that takes any attributes.
+        let any_attributes = "macro_rules! shipped {\n    ($(#[$meta:meta])* mod $name:ident { $($body:tt)* }) => { $($body)* };\n}\nshipped! { #[cfg(test)] mod tests { pub use std::env::var; } }\n";
+        assert_eq!(uses(any_attributes), ["std::env"]);
+    }
+
+    #[test]
+    fn reads_the_strings_of_attributes_as_code() {
+        // serde's derive reads these strings as paths: the first names no module of std, the second calls `std::process::id`.
         assert_eq!(
-            uses("#[cfg(not(test))] mod real { use std::fs; }"),
-            ["std::fs"]
+            uses(
+                "#[derive(Serialize)]\nstruct Answer {\n    #[serde(default, skip_serializing_if = \"std::ops::Not::not\")]\n    flag: bool,\n}\n"
+            ),
+            Vec::<&str>::new()
         );
+        assert_eq!(
+            scanned(
+                "#[derive(Deserialize)]\nstruct Request {\n    #[serde(default = \"std::process::id\")]\n    id: u32,\n}\n"
+            ),
+            Found {
+                uses: vec![(3, "std::process")],
+                hidden: Vec::new(),
+            }
+        );
+        // Escapes, raw strings, a line continued after a backslash, an attribute inside `cfg_attr` and an inner attribute are read as the compiler reads them.
+        assert_eq!(
+            uses(
+                "#[serde(default = \"std\\x3a\\x3aprocess::id\")]\n#[serde(with = r#\"std::time\"#)]\n#[cfg_attr(test, serde(default = \"std::\\\n    env::args\"))]\n#![serde(default = \"\\u{73}td::fs::read\")]\n"
+            ),
+            ["std::process", "std::time", "std::env", "std::fs"]
+        );
+        // So are the ways of naming std, also in a `[…]` after a metavariable, which can become an attribute.
+        assert_eq!(hidden("#[serde(with = \"std\")]"), [BARE_STD]);
+        assert_eq!(
+            hidden("macro_rules! m { ($hash:tt) => { $hash[serde(with = \"std::*\")] }; }"),
+            [STD_GLOB]
+        );
+        // Prose that reads as Rust is checked like code; a string that cannot be read as Rust, documentation and the strings outside attributes are not.
+        assert_eq!(
+            uses("#[expect(dead_code, reason = \"never calls std::process::exit\")]"),
+            ["std::process"]
+        );
+        assert_eq!(
+            uses(
+                "#[expect(dead_code, reason = \"it's 'quoted' prose about std::fs, which no derive reads\")]\n#[doc = \"Calls std::env::var.\"]\n/// Calls std::time::Instant::now.\n#[doc(alias = \"std::net\")]\nconst PATH: &str = \"std::process::id\";\n"
+            ),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn decodes_strings_as_the_compiler_does() {
+        for (literal, text) in [
+            ("\"plain\"", "plain"),
+            ("\"a\\n\\r\\t\\0\\\\\\'\\\"z\"", "a\n\r\t\0\\'\"z"),
+            ("\"\\x41\\u{1F600}\\u{6_1}\"", "A\u{1F600}a"),
+            ("\"one \\\n      two\"", "one two"),
+            ("b\"bytes\"", "bytes"),
+            ("c\"text\"", "text"),
+            ("r\"no \\n escape\"", "no \\n escape"),
+            ("r##\"a \"# quote\"##", "a \"# quote"),
+            ("br#\"raw bytes\"#", "raw bytes"),
+            ("cr\"raw text\"", "raw text"),
+        ] {
+            assert_eq!(string_value(literal).as_deref(), Some(text), "{literal}");
+        }
+        // An escape the compiler does not know is not read.
+        assert_eq!(string_value("\"\\q\""), None);
     }
 
     #[test]
@@ -724,6 +820,8 @@ mod tests {
         for expected in [
             USED,
             "  engine.rs:2: std::time\n",
+            // A test module written in place ships as far as the check can tell.
+            "  engine.rs:4: std::fs\n",
             "  tool.rs:2: std::net (OUTSIDE_WORLD lists only std::env, std::fs, std::process for tool)",
             HIDDEN.0,
             "  hiding.rs:1: `std` on its own",
@@ -732,8 +830,6 @@ mod tests {
         ] {
             assert!(problem.contains(expected), "{expected}:\n{problem}");
         }
-        // The test module of engine.rs is not code that ships.
-        assert!(!problem.contains("std::fs\n"), "{problem}");
     }
 
     #[test]
@@ -756,7 +852,7 @@ mod tests {
         .unwrap_or_else(|problem| panic!("{problem}"));
         assert!(
             line.contains(
-                "the members that OUTSIDE_WORLD does not name (engine; 1 files) uses none of std::env, std::fs, std::net, std::process, std::time, and that of the members it names (1 files) uses exactly"
+                "the members that OUTSIDE_WORLD does not name (engine; 1 files) names none of std::env, std::fs, std::net, std::process, std::time, and that of the members it names (1 files) names exactly"
             ),
             "{line}"
         );

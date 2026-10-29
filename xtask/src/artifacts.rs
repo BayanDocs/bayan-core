@@ -38,7 +38,7 @@ const WASM_PACKAGE_SCRIPTS: [&str; 4] = [
     "test-page.js",
 ];
 
-/// The imports that the engine's WebAssembly module may have, after wasm-bindgen, each with what it does and why the module needs it. Every import is a way out of the module to its JavaScript host, and the engine never touches the outside world itself (ADR-0012 §5), so `cargo xtask wasm-package` fails on any import that is not listed here, and on any listed import that the module no longer has (`wasm_imports.rs`). Reviewers read every change to this list: an import that reaches the outside world, such as a clock or the browser's randomness, needs an ADR that accepts it (ADR-0012's amendment of 2026-10-08 accepts Loro's randomness and clock, which arrive with bayan-crdt).
+/// The imports that the engine's WebAssembly module may have, after wasm-bindgen, each with what it does and why the module needs it. Every import is a way out of the module to its JavaScript host, and the engine never touches the outside world itself (ADR-0012 §5), so `cargo xtask wasm-package` fails on any import that is not listed here, and on any listed import that the module no longer has (`wasm_imports.rs`). Reviewers read every change to this list: an import that reaches the outside world, such as a clock or the browser's randomness, needs an ADR that accepts it (ADR-0012's amendment of 2026-10-08 accepts Loro's randomness and clock, which arrive with bayan-crdt). The names can change while the engine's code does not: a name that ends in a hash (`…_41e9ee4f547fc59a`) is computed by wasm-bindgen's macro, while the crates are compiled, with std's `DefaultHasher`, whose algorithm Rust does not promise to keep, so a new Rust toolchain can rename such an import, not only a new wasm-bindgen; and a numbered intrinsic (`…_0000000000000001`) can change its number when the module needs another one. The monthly dependency session then reads the new glue, `bayan_wasm.js`, and updates the list (AGENTS.md, "Dependency mechanisms").
 pub const WASM_IMPORTS: [Allowed; 3] = [
     Allowed {
         module: GLUE,
@@ -56,7 +56,7 @@ pub const WASM_IMPORTS: [Allowed; 3] = [
         module: GLUE,
         name: "__wbindgen_generic_0000000000000001",
         kind: Kind::Function,
-        reason: "wasm-bindgen's glue: turns a string in the module's memory into a JavaScript string, as the engine's replies and events return to the worker host",
+        reason: "wasm-bindgen's glue: a numbered cast intrinsic, `Ref(String) -> Externref` in the glue, which turns a string in the module's memory into a JavaScript string, as the engine's replies and events return to the worker host; wasm-bindgen numbers its cast intrinsics, so the number can change when the module needs another cast",
     },
 ];
 
