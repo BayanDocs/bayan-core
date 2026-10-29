@@ -2,10 +2,13 @@
 //!
 //! The gate runs the same steps, in the same order, on a developer's machine and in CI on Linux, Windows and macOS. It stops at the first failing step. Each command is printed before it runs, so a failing step can be re-run by itself.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::dep_info::{self, DataFiles};
+use crate::policy::Package;
 use crate::process::{self, cargo};
 use crate::sources::{self, Condition};
 use crate::{canary, flags, policy};
@@ -36,11 +39,91 @@ pub const NATIVE_ONLY: [(&str, &str); 4] = [
     ("xtask", "this build automation"),
 ];
 
-/// Workspace members that may have a build script, with the reason. A build script runs code during the build and can change how its crate is compiled (for example, setting `CLIPPY_CONF_DIR` through `cargo::rustc-env` would switch off the bans of the root `clippy.toml` for that crate), so the preflight rejects every build script that is not listed here (ADR-0017 asks to keep them to a minimum). Reviewers read every listed script, and a build script must never set Clippy or compiler variables.
+/// Workspace members that may have a build script, with the reason. A build script runs code during the build and can change how its crate is compiled (for example, setting `CLIPPY_CONF_DIR` through `cargo::rustc-env` would switch off the bans of the root `clippy.toml` for that crate), so the preflight rejects every build script that is not listed here (ADR-0017 asks to keep them to a minimum). Reviewers read every listed script, and a build script must never set Clippy or compiler variables. The unit that Cargo builds to run a build script, an executable, has no `.rmeta` file, so the Clippy step would fail on it until `dep_info::units` learns where its dependency file is (`dep_info.rs`).
 pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 
-/// Workspace members that may be procedural-macro crates (`proc-macro = true` in `[lib]`), with the reason. A procedural macro runs code during the build and can produce any code, hidden conditions included, without that code appearing in a source file, so the source check cannot see what it writes; the preflight therefore rejects every procedural-macro crate of the workspace that is not listed here. Reviewers read every listed macro in full. Procedural macros from dependencies, such as serde's derive, are not affected.
+/// Workspace members that may be procedural-macro crates (`proc-macro = true` in `[lib]`), with the reason. A procedural macro runs code during the build and can produce any code, hidden conditions included, without that code appearing in a source file, so the source check cannot see what it writes; the preflight therefore rejects every procedural-macro crate of the workspace that is not listed here. Reviewers read every listed macro in full. Procedural macros from dependencies, such as serde's derive, are not affected. The unit that Cargo builds to run a procedural macro, a shared library, has no `.rmeta` file, so the Clippy step would fail on it until `dep_info::units` learns where its dependency file is (`dep_info.rs`).
 pub const PROC_MACROS: [(&str, &str); 0] = [];
+
+/// Files that workspace members read as data, with `include_str!` or `include_bytes!`, although the source check does not read them, with the members that read them and the reason. After each Clippy run, the Clippy step compares the files that the compiler read for every unit of a workspace member, as the dependency file it wrote for the unit lists them, with the files that the source check read (`dep_info.rs`). Any other file fails the step, unless it is one of Clippy's own two (the root clippy.toml and Cargo.toml, named as Clippy names them) or listed here for the unit's member. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every file listed here is data, never Rust code. A file that a member it is listed for read in none of the runs, a file that the source check reads anyway, and a member that does not exist fail the step too, so the list cannot go stale.
+pub const DATA_FILES: [DataFiles; 8] = [
+    DataFiles {
+        files: &[
+            "crates/bayan-crdt/tests/fixtures/loro-panic-base.bin",
+            "crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin",
+            "crates/bayan-crdt/tests/fixtures/loro-panic-update.bin",
+        ],
+        members: &["bayan-crdt"],
+        reason: "the snapshot and updates with which CORE-004's fuzzer made Loro panic, which the test `import_panic` replays to show that the panic is contained",
+    },
+    DataFiles {
+        files: &[
+            "crates/bayan-opc/tests/fixtures/python-docx/default.docx",
+            "crates/bayan-opc/tests/fixtures/python-docx/doc-coreprops.docx",
+            "crates/bayan-opc/tests/fixtures/python-docx/doc-word-default-blank.docx",
+            "crates/bayan-opc/tests/fixtures/python-docx/hdr-header-footer.docx",
+            "crates/bayan-opc/tests/fixtures/python-docx/par-hyperlinks.docx",
+        ],
+        members: &["bayan-opc", "bayan-xml"],
+        reason: "real .docx files from python-docx's tests (MIT; their source and checksums are in the README.md next to them), compiled into bayan-opc's round-trip tests and bayan-xml's document tests, so that those tests read no files and also run in WebAssembly",
+    },
+    DataFiles {
+        files: &[
+            "crates/bayan-xml/tests/fixtures/strict-document.xml",
+            "crates/bayan-xml/tests/fixtures/word-shapes.xml",
+        ],
+        members: &["bayan-xml"],
+        reason: "synthetic document parts written for bayan-xml's tests, a document in the Strict conformance class and shapes in nested Markup Compatibility alternate content, compiled in like the .docx files",
+    },
+    DataFiles {
+        files: &[
+            "spikes/text-pipeline/fonts/NotoSansHebrew-Regular.ttf",
+            "spikes/text-pipeline/fonts/NotoSansThai-Regular.ttf",
+            "spikes/text-pipeline/fonts/manifest.txt",
+        ],
+        members: &["text-pipeline"],
+        reason: "the CORE-003 spike's font manifest, compiled in so that every build checks fonts against the same pins, and the two committed fonts that its tests and the gate's determinism step lay out",
+    },
+    DataFiles {
+        files: &["spikes/text-pipeline/results/expected.json"],
+        members: &["text-pipeline"],
+        reason: "the layout and raster hashes that the spike's determinism test, which the gate's determinism step runs, compares the probes with",
+    },
+    DataFiles {
+        files: &[
+            ".cargo/config.toml",
+            "Cargo.toml",
+            "clippy.toml",
+            "crates/bayan-ffi/Cargo.toml",
+            "crates/bayan-wasm/Cargo.toml",
+            "deny.toml",
+            "fuzz/deny.toml",
+        ],
+        members: &["xtask"],
+        reason: "the configuration that the gate enforces, which xtask's tests check as it is committed: the compiler flags of .cargo/config.toml, the lint tables of the root manifest and their copies in the binding crates, the bans of clippy.toml, and the license policies of the two deny.toml files (Clippy's own reading of the root Cargo.toml and clippy.toml is allowed separately)",
+    },
+    DataFiles {
+        files: &[
+            ".github/workflows/artifacts.yml",
+            ".github/workflows/fuzz.yml",
+            ".github/workflows/text-pipeline.yml",
+            ".github/workflows/verify.yml",
+            "scripts/dev-setup.sh",
+        ],
+        members: &["xtask"],
+        reason: "the workflows and the setup script, whose tool pins and order of steps xtask's tests compare with xtask's own",
+    },
+    DataFiles {
+        files: &[
+            "xtask/src/supply_chain/fixtures/crates.io/api/v1/crates/serde/1.0.228",
+            "xtask/src/supply_chain/fixtures/index.crates.io/hy/pe/hyper",
+            "xtask/src/supply_chain/fixtures/index.crates.io/se/rd/serde",
+            "xtask/src/supply_chain/fixtures/index.crates.io/ze/ro/zerocopy",
+        ],
+        members: &["xtask"],
+        reason: "recorded answers of crates.io that the tests of `cargo xtask check-lockfile-age` replay, so that they never use the network (see the README.md next to them)",
+    },
+];
 
 /// The conditions that code may use in `cfg(…)`, `cfg!(…)` and the first argument of `cfg_attr(…)`, combined with `all`, `any`, `not`, `true` and `false`, each with the reason it is approved. The Clippy step compiles the code under every combination of their values ([`CLIPPY_RUNS`]), so no code can choose a configuration that Clippy does not check (ADR-0005 §4 and §5, ADR-0025); the preflight rejects every other condition (`sources.rs`). A condition is added only in a reviewed pull request, together with the Clippy runs that check the code with it both on and off: the test `the_clippy_runs_check_every_combination_of_the_approved_conditions` fails otherwise.
 pub const APPROVED_CONDITIONS: [Condition; 3] = [
@@ -122,13 +205,23 @@ const DETERMINISM_CHECKS: &[Check] = &[
     ),
 ];
 
+/// What the steps work with: the workspace root, and what the preflight found there.
+struct Gate {
+    /// The root of the workspace.
+    root: PathBuf,
+    /// The workspace members and their targets, from `cargo metadata`.
+    packages: Vec<Package>,
+    /// Every Rust file that the source check read (`sources.rs`), which the Clippy step compares with the files that the compiler read (`dep_info.rs`).
+    sources: BTreeSet<PathBuf>,
+}
+
 /// One step of the gate.
 pub struct Step {
     /// A short, stable name.
     pub name: &'static str,
     /// What the step checks.
     pub title: &'static str,
-    run: fn(&Path) -> Result<(), String>,
+    run: fn(&Gate) -> Result<(), String>,
 }
 
 /// The steps, in order. The supply-chain checks come first, so that no code of a dependency they reject is compiled or run (build scripts, procedural macros, tests) before they fail; they build nothing themselves. The next six are the ones work package CORE-001 lists, in its order.
@@ -185,9 +278,10 @@ pub fn run() -> ExitCode {
     let root = crate::workspace_root();
     let started = Instant::now();
     println!("cargo xtask verify: the bayan-core verification gate");
-    if let Err(problem) = preflight(&root) {
-        return fail("preflight", &problem);
-    }
+    let gate = match preflight(&root) {
+        Ok(gate) => gate,
+        Err(problem) => return fail("preflight", &problem),
+    };
     for (index, step) in STEPS.iter().enumerate() {
         let heading = format!(
             "[{}/{}] {}: {}",
@@ -198,7 +292,7 @@ pub fn run() -> ExitCode {
         );
         group_start(&heading);
         let step_started = Instant::now();
-        let result = (step.run)(&root);
+        let result = (step.run)(&gate);
         group_end();
         match result {
             Ok(()) => println!("    ok ({})", duration(step_started.elapsed())),
@@ -213,8 +307,8 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script or procedural-macro crate, and that the Rust sources use only the approved conditions, written out in full, and do not make the compiler read a file that the source check does not (`sources.rs`), so that a pass means the same thing everywhere. Everything here is checked before anything is built.
-fn preflight(root: &Path) -> Result<(), String> {
+/// Checks that the gate runs with the pinned tools, with the root Clippy configuration only, with no compiler flag that lowers lint levels and no unlisted build script or procedural-macro crate, and that the Rust sources use only the approved conditions, written out in full, and do not make the compiler read a file that the source check does not (`sources.rs`), so that a pass means the same thing everywhere. Everything here is checked before anything is built. Returns what the steps work with, among them the files that the source check read.
+fn preflight(root: &Path) -> Result<Gate, String> {
     let toolchain_toml = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
     let channel = policy::toolchain_channel(&toolchain_toml)?;
@@ -294,17 +388,28 @@ fn preflight(root: &Path) -> Result<(), String> {
         canary_switch: CANARY_SWITCH,
         canary_package: CANARY_PACKAGE,
     };
-    let line = sources::check(root, &packages, &allowed)?;
-    println!("    {line}");
-    Ok(())
+    let checked = sources::check(root, &packages, &allowed)?;
+    println!("    {}", checked.summary);
+    Ok(Gate {
+        root: root.to_path_buf(),
+        packages,
+        sources: checked.files,
+    })
 }
 
-fn fmt(root: &Path) -> Result<(), String> {
-    process::run(cargo(root).args(["fmt", "--all", "--check"]))
+fn fmt(gate: &Gate) -> Result<(), String> {
+    process::run(cargo(&gate.root).args(["fmt", "--all", "--check"]))
 }
 
-/// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails.
-fn clippy_step(root: &Path) -> Result<(), String> {
+/// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails. After each run, compares the files that the compiler read for every unit of a workspace member, as its dependency files list them, with the files that the source check read, Clippy's own two and [`DATA_FILES`] (`dep_info.rs`); after the last, checks that every member named in [`DATA_FILES`] read its files.
+fn clippy_step(gate: &Gate) -> Result<(), String> {
+    let members: Vec<&str> = gate
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let mut comparison =
+        dep_info::Comparison::new(&gate.root, &gate.sources, &DATA_FILES, &members)?;
     for (index, run) in CLIPPY_RUNS.iter().enumerate() {
         let heading = format!(
             "Clippy run {} of {}: {}",
@@ -318,9 +423,25 @@ fn clippy_step(root: &Path) -> Result<(), String> {
                 println!("    not checked for WebAssembly: {name} ({reason})");
             }
         }
-        process::run(cargo(root).args(clippy_args(run)))
+        // A unit that Cargo compiles in the run must have a dependency file written since this moment.
+        let run_started = SystemTime::now();
+        let messages = process::run_and_read_output(cargo(&gate.root).args(clippy_args(run)))
             .map_err(|problem| format!("{heading}: {problem}"))?;
+        // The members that the run checks, each of which must have a unit; units of the others count too, should Cargo compile them as dependencies.
+        let checked: Vec<&str> = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                run.target.is_none() || !NATIVE_ONLY.iter().any(|(name, _)| name == member)
+            })
+            .collect();
+        let line = dep_info::units(&messages, &gate.packages, &checked)
+            .and_then(|units| comparison.check(&units, run_started))
+            .map_err(|problem| format!("{heading}: {problem}"))?;
+        println!("    {line}");
     }
+    let line = comparison.check_stale()?;
+    println!("    {line}");
     Ok(())
 }
 
@@ -337,7 +458,7 @@ fn describe(run: &ClippyRun) -> String {
     )
 }
 
-/// The arguments after `cargo` for one Clippy run.
+/// The arguments after `cargo` for one Clippy run. With `--message-format=json-render-diagnostics`, Cargo prints the diagnostics for people on standard error as usual, and on standard output one JSON message per line, which name every unit it compiled (`dep_info.rs`).
 fn clippy_args(run: &ClippyRun) -> Vec<String> {
     let mut args = vec!["clippy".to_owned(), "--workspace".to_owned()];
     if run.target.is_some() {
@@ -352,12 +473,21 @@ fn clippy_args(run: &ClippyRun) -> Vec<String> {
     if let Some(target) = run.target {
         args.extend(["--target".to_owned(), target.to_owned()]);
     }
-    args.extend(["--", "-D", "warnings"].map(str::to_owned));
+    args.extend(
+        [
+            "--message-format=json-render-diagnostics",
+            "--",
+            "-D",
+            "warnings",
+        ]
+        .map(str::to_owned),
+    );
     args
 }
 
 /// Runs the tests on the host, then the same tests in WebAssembly (CORE-002, acceptance criterion 2), where they run as WASI programs in Node.js.
-fn test(root: &Path) -> Result<(), String> {
+fn test(gate: &Gate) -> Result<(), String> {
+    let root = &gate.root;
     process::run(cargo(root).args(["test", "--workspace", "--locked"]))?;
     println!(
         "    The same tests in WebAssembly ({WASM_TEST_TARGET}), run by Node.js {NODE_VERSION} through xtask/wasi-runner.mjs:"
@@ -392,11 +522,11 @@ fn host_and_wasm_test(root: &Path, test: &[&str]) -> Result<(), String> {
     process::run(cargo(root).args(wasm_test_args(root, test, &[])?))
 }
 
-fn wasm32(root: &Path) -> Result<(), String> {
+fn wasm32(gate: &Gate) -> Result<(), String> {
     for (name, reason) in NATIVE_ONLY {
         println!("    not built for WebAssembly: {name} ({reason})");
     }
-    let mut command = cargo(root);
+    let mut command = cargo(&gate.root);
     command.args(["build", "--workspace"]);
     for (name, _) in NATIVE_ONLY {
         command.args(["--exclude", name]);
@@ -409,16 +539,17 @@ fn wasm32(root: &Path) -> Result<(), String> {
     process::run(&mut command)
 }
 
-fn doc(root: &Path) -> Result<(), String> {
+fn doc(gate: &Gate) -> Result<(), String> {
     process::run(
-        cargo(root)
+        cargo(&gate.root)
             .args(["doc", "--workspace", "--no-deps", "--locked"])
             .env("RUSTDOCFLAGS", "-D warnings")
             .env_remove("CARGO_ENCODED_RUSTDOCFLAGS"),
     )
 }
 
-fn deny(root: &Path) -> Result<(), String> {
+fn deny(gate: &Gate) -> Result<(), String> {
+    let root = &gate.root;
     process::run(cargo(root).args(["deny", "--locked", "check"]))?;
     println!(
         "    The fuzz workspace (fuzz/), with its own deny.toml: the main policy plus the NCSA license of libFuzzer, which ADR-0017's amendment of 2026-10-08 allows for fuzzing dependencies only:"
@@ -437,17 +568,17 @@ const FUZZ_DENY: [&str; 7] = [
     "check",
 ];
 
-fn guardrails(root: &Path) -> Result<(), String> {
-    let workspace = policy::Workspace::load(root)?;
+fn guardrails(gate: &Gate) -> Result<(), String> {
+    let workspace = policy::Workspace::load(&gate.root)?;
     let native_only: Vec<&str> = NATIVE_ONLY.iter().map(|(name, _)| *name).collect();
     for line in policy::check(&workspace, &native_only)? {
         println!("    ok: {line}");
     }
-    canary::check_all(root, &workspace.clippy_config)
+    canary::check_all(&gate.root, &workspace.clippy_config)
 }
 
-fn supply_chain(root: &Path) -> Result<(), String> {
-    run_hook(SUPPLY_CHAIN_CHECKS, root, "none are configured")
+fn supply_chain(gate: &Gate) -> Result<(), String> {
+    run_hook(SUPPLY_CHAIN_CHECKS, &gate.root, "none are configured")
 }
 
 fn exact_pins(root: &Path) -> Result<(), String> {
@@ -458,10 +589,10 @@ fn lockfile_age(root: &Path) -> Result<(), String> {
     crate::supply_chain::lockfile_age::check(root, None, &mut |line| println!("      {line}"))
 }
 
-fn determinism(root: &Path) -> Result<(), String> {
+fn determinism(gate: &Gate) -> Result<(), String> {
     run_hook(
         DETERMINISM_CHECKS,
-        root,
+        &gate.root,
         "they arrive with the first layout and rendering code",
     )
 }
@@ -638,10 +769,10 @@ mod tests {
         assert_eq!(
             commands,
             [
-                "clippy --workspace --all-targets --all-features --locked -- -D warnings",
-                "clippy --workspace --all-targets --all-features --locked --release -- -D warnings",
-                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --target wasm32-unknown-unknown -- -D warnings",
-                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --release --target wasm32-unknown-unknown -- -D warnings",
+                "clippy --workspace --all-targets --all-features --locked --message-format=json-render-diagnostics -- -D warnings",
+                "clippy --workspace --all-targets --all-features --locked --release --message-format=json-render-diagnostics -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --target wasm32-unknown-unknown --message-format=json-render-diagnostics -- -D warnings",
+                "clippy --workspace --exclude bayan-cli --exclude bayan-ffi --exclude bayan-lab --exclude xtask --all-targets --all-features --locked --release --target wasm32-unknown-unknown --message-format=json-render-diagnostics -- -D warnings",
             ]
         );
         let described: Vec<String> = CLIPPY_RUNS.iter().map(describe).collect();

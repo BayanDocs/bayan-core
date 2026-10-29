@@ -18,6 +18,7 @@
 
 mod artifacts;
 mod canary;
+mod dep_info;
 mod flags;
 mod json;
 mod notices;

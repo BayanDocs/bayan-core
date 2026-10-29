@@ -23,7 +23,7 @@
 //! - A `[…]` written directly after a metavariable (`$name [ … ]`), a repetition (`$( … )* [ … ]`), or either with a `!` between (`$name ![ … ]`), is read as an attribute, because the substitution before it could expand to `#` or `#!`. This catches the bracket even when its `#` is supplied separately, as when a benign attribute at the call site gives up its `#` to a `$name:tt` and the macro writes `$name [path = "…"]`.
 //! - The pass-on exception above still holds: `$(#[$name])*`, written against its bracket and bound by `#[$name:meta]`, passes on the caller's attribute, which this check reads where it is written.
 //!
-//! **Known limitation (follow-up: issue #7).** These rules model how the compiler assembles attributes; they do not prove that no other form exists, and one is known to pass. A macro can keep the `#` of an attribute written in full where it is called, drop that attribute's bracket, and write the `#` before a bracket group it was handed separately: `($hash:tt $dropped:tt, $bracket:tt) => { $hash $bracket mod hidden; }`, called as `m!(#[doc = "…"], [path = "…"])`, or the same without the comma. The macro's code holds neither a `#` nor a `[`, and where the macro is called the `[path = …]` follows a comma or a `]`, not a `#`, so no rule reads it as an attribute, and the compiler reads a file this check never sees. Issue #7 closes this for every form that makes the compiler read a file: the gate compares the files listed in the dependency files the compiler writes during the Clippy runs with the files this check read. Until then, reviewers check every macro that takes a `#` or a bracket group as a `tt`.
+//! **Known limitation, backed by the compiler's record for files (issue #7).** These rules model how the compiler assembles attributes; they do not prove that no other form exists, and one is known to pass them. A macro can keep the `#` of an attribute written in full where it is called, drop that attribute's bracket, and write the `#` before a bracket group it was handed separately: `($hash:tt $dropped:tt, $bracket:tt) => { $hash $bracket mod hidden; }`, called as `m!(#[doc = "…"], [path = "…"])`, or the same without the comma. The macro's code holds neither a `#` nor a `[`, and where the macro is called the `[path = …]` follows a comma or a `]`, not a `#`, so no rule reads it as an attribute. The compiler's own record closes this for every form that makes the compiler read a file: after each Clippy run, the Clippy step reads the dependency file that the compiler wrote for every unit of a workspace member, which lists every file it read, and fails if one of them is not a file that this check read, Clippy's own configuration or a data file that `DATA_FILES` in `verify.rs` lists for the member (`dep_info.rs`). The `#[path]` above fails there, naming the file it reads. Such a form cannot choose code either, because conditions are checked wherever `cfg` and `cfg_attr` stand, inside an attribute or not, and the bare identifier `clippy` is rejected anywhere. But it can still write a lint attribute that neither this check nor Clippy sees: handed `[allow(clippy::disallowed_types)]`, it switches off the hash-map ban of ADR-0005 §5 for the item it precedes, and Clippy's `allow_attributes` lint, which rejects an `#[allow]` written out, does not report one that a macro assembles; an `#[expect(…)]` passes the same way. That works for every lint that is not set to `forbid`, such as `clippy::disallowed_types` or `clippy::unwrap_used`; only the forbidden ones, the float bans among them, cannot be lowered (error E0453). So reviewers still check every macro that takes a `#` or a bracket group as a `tt`, until a check closes this too.
 //!
 //! # The files it reads
 //!
@@ -31,8 +31,8 @@
 //!
 //! - The only folder the walk skips is the workspace's build folder, `<root>/target`, and no member's folder may contain that.
 //! - Every target's root file (`src_path` in `cargo metadata`, which a path in `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]`, or `build = "…"`, can move) must be a `.rs` file inside its crate's folder. From there, `mod name;` reaches only `name.rs` or `name/mod.rs` below it.
-//! - `include!` is rejected: the identifier `include` anywhere, so that a macro cannot be handed it either. `include_str!` and `include_bytes!` read data, not code, and stay allowed.
-//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`, and in every attribute that the rules above find a macro building from its arguments (not yet every such attribute: see the known limitation above).
+//! - `include!` is rejected: the identifier `include` anywhere, so that a macro cannot be handed it either. `include_str!` and `include_bytes!` read data, not code, and stay allowed; the Clippy step accepts the files they read only where `DATA_FILES` in `verify.rs` lists them for the member (`dep_info.rs`).
+//! - So is the attribute `#[path = "…"]`, wherever `path =` stands inside an attribute, also in `cfg_attr`, and in every attribute that the rules above find a macro building from its arguments (an attribute that they miss is caught by the compiler's record: see above).
 //! - So are a symbolic link in a member's folder, and a file that the file system also finds under a name ending in `.rs` although its own name does not end so, as Windows and macOS give the compiler `sine.RS` when it asks for `sine.rs`.
 //!
 //! Procedural macros can write any code without it appearing in a source file; the preflight rejects every procedural-macro crate in the workspace that xtask does not list (`PROC_MACROS` in `verify.rs`).
@@ -838,8 +838,17 @@ fn quote_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read, and that none of the files it reads writes a `#` apart from its bracket, uses the bare identifier `clippy`, a condition outside `allowed` or not written out in full, or an attribute that a macro builds from its arguments. Returns one line describing what was checked, or every problem found.
-pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result<String, String> {
+/// What a passing check reports.
+#[derive(Debug)]
+pub struct Checked {
+    /// One line describing what was checked.
+    pub summary: String,
+    /// Every file it read. The Clippy step compares them with the files that the compiler read (`dep_info.rs`).
+    pub files: BTreeSet<PathBuf>,
+}
+
+/// Checks the Rust sources of the workspace members (`packages`, from `cargo metadata`): that the compiler is not made to read a Rust file of theirs that this check does not read, and that none of the files it reads writes a `#` apart from its bracket, uses the bare identifier `clippy`, a condition outside `allowed` or not written out in full, or an attribute that a macro builds from its arguments. Returns one line describing what was checked and every file read, or every problem found.
+pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result<Checked, String> {
     let build_folder = root.join(BUILD_FOLDER);
     let misplaced = misplaced_roots(root, &build_folder, packages);
     let mut walk = Walk::default();
@@ -921,11 +930,15 @@ pub fn check(root: &Path, packages: &[Package], allowed: &Allowed<'_>) -> Result
     .collect();
     if problems.is_empty() {
         let approved: Vec<String> = allowed.conditions.iter().map(Condition::written).collect();
-        return Ok(format!(
+        let summary = format!(
             "Rust sources: the {} `.rs` files below the members' folders use only the approved conditions ({}), written out in full; every `#` opens an attribute and no macro builds a condition or an attribute from its arguments; none uses the bare identifier `clippy`, `include!` or `#[path]`; every target starts from one of them, and no member's folder holds a symbolic link",
             walk.files.len(),
             approved.join(", ")
-        ));
+        );
+        return Ok(Checked {
+            summary,
+            files: walk.files,
+        });
     }
     Err(problems.join("\n"))
 }
@@ -1646,8 +1659,9 @@ macro_rules! outer {
             scratch.member("a", "src/lib.rs"),
             scratch.member("a/inner", "src/lib.rs"),
         ];
-        let line =
+        let checked =
             check(&scratch.0, &packages, &ALLOWED).unwrap_or_else(|problem| panic!("{problem}"));
+        let line = &checked.summary;
         assert!(line.contains("the 4 `.rs` files"), "{line}");
         assert!(
             line.contains(
@@ -1655,6 +1669,21 @@ macro_rules! outer {
             ),
             "{line}"
         );
+        // The files it read, which the Clippy step compares with the files that the compiler read.
+        let read: Vec<PathBuf> = [
+            &["crates", "a", "inner", "src", "lib.rs"][..],
+            &["crates", "a", "src", "lib.rs"],
+            &["crates", "a", "src", "target", "sine.rs"],
+            &["crates", "a", "tests", "t.rs"],
+        ]
+        .iter()
+        .map(|parts| {
+            parts
+                .iter()
+                .fold(scratch.0.clone(), |path, part| path.join(part))
+        })
+        .collect();
+        assert_eq!(checked.files.into_iter().collect::<Vec<_>>(), read);
 
         scratch.write(
             &["crates", "a", "src", "target", "hidden.rs"],
