@@ -4,6 +4,8 @@
 //!
 //! WebAssembly in a browser has no such thread: the web binding feeds the [`Engine`] directly, inside the Web Worker.
 //!
+//! The engine thread's stack has the fixed size [`ENGINE_THREAD_STACK_BYTES`], whatever the environment of the process says, so how deeply an input may nest before it exhausts the stack does not depend on the machine.
+//!
 //! [spec]: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md
 
 use std::cell::Cell;
@@ -23,6 +25,11 @@ pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The name of every engine thread, as debuggers and crash reports show it.
 pub const ENGINE_THREAD_NAME: &str = "bayan-engine";
+
+/// The size of every engine thread's stack, in bytes: 2 MiB.
+///
+/// It is set explicitly because, without a size, Rust's standard library takes the stack size of a new thread from the `RUST_MIN_STACK` environment variable, so the environment would decide how deeply an input may nest before it overflows the stack, and the engine reads no environment variables (architecture §12, ADR-0005 §5). 2 MiB is the size that the engine's thread had by default and that Rust gives each test's thread: CORE-004 fuzzed the CRDT import on stacks of this size and measured its stack-overflow finding F5 on one (a value nested about 21,800 levels deep overflows it in a release build, 6,000 levels in a debug build). A larger stack would only raise that depth: the 1 MiB that an update may hold can nest values deeper than about 50 MiB of stack can free, so imports from untrusted peers need isolation instead (CORE-004 report §8.3).
+pub const ENGINE_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 thread_local! {
     /// Whether the current thread is an engine thread; set when it starts.
@@ -149,7 +156,7 @@ fn perform(engine: &mut Engine, job: Job) -> Vec<String> {
 }
 
 impl EngineThread {
-    /// Starts an engine on a new thread named `bayan-engine`.
+    /// Starts an engine on a new thread named `bayan-engine`, with a stack of [`ENGINE_THREAD_STACK_BYTES`].
     ///
     /// # Errors
     ///
@@ -165,6 +172,7 @@ impl EngineThread {
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name(ENGINE_THREAD_NAME.to_owned())
+            .stack_size(ENGINE_THREAD_STACK_BYTES)
             .spawn(move || run(engine, &receiver, &thread_shared))?;
         let thread_id = thread.thread().id();
         Ok(Self {
@@ -298,12 +306,91 @@ impl Drop for EngineThread {
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
+    use std::process::Command;
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
     use super::*;
 
     const WAIT: Duration = Duration::from_secs(10);
+
+    /// The environment variable that tells [`stack_probe`] how many bytes of the engine thread's stack to use, when [`the_environment_does_not_choose_the_engine_thread_s_stack`] runs it in a child process.
+    const PROBE_BYTES: &str = "BAYAN_ENGINE_STACK_PROBE_BYTES";
+
+    /// Uses at least `bytes` of the stack below `top`, the address of a variable where the probe began, in frames of 16 KiB that stay in use until the frames below them return, and returns how many bytes it used. Measuring the addresses makes the probe independent of how large the compiler makes each frame.
+    #[inline(never)]
+    fn use_stack(top: usize, bytes: usize) -> usize {
+        let mut frame = [0_u8; 16 * 1024];
+        std::hint::black_box(&mut frame);
+        let used = top.abs_diff(frame.as_ptr().addr());
+        if used >= bytes {
+            return used;
+        }
+        let deeper = use_stack(top, bytes);
+        std::hint::black_box(&frame);
+        deeper
+    }
+
+    /// A helper for [`the_environment_does_not_choose_the_engine_thread_s_stack`], which runs it in child processes: uses as many bytes of the engine thread's stack as [`PROBE_BYTES`] says, from inside the sink, which runs on the engine thread. Run without that variable, it does nothing.
+    #[test]
+    #[ignore = "a helper that the_environment_does_not_choose_the_engine_thread_s_stack runs in child processes"]
+    fn stack_probe() {
+        let Some(bytes) = std::env::var_os(PROBE_BYTES) else {
+            return;
+        };
+        let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+        let thread = EngineThread::spawn(Config::default(), Arc::new(BlobStore::new())).unwrap();
+        let (sender, used) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        thread
+            .set_sink(Arc::new(move |_message: &str| {
+                let top = 0_u8;
+                let used = use_stack((&raw const top).addr(), bytes);
+                let _ignored = sender.lock().unwrap().send(used);
+            }))
+            .unwrap();
+        thread.post(b"{}".to_vec(), 0).unwrap();
+        assert!(used.recv_timeout(WAIT).unwrap() >= bytes);
+        thread.stop();
+    }
+
+    #[test]
+    fn the_environment_does_not_choose_the_engine_thread_s_stack() {
+        // The probe runs in a child process, this test program itself, because a stack overflow ends the whole process, and because the standard library reads RUST_MIN_STACK only once per process.
+        let probe = |bytes: usize, min_stack: usize| {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "thread::tests::stack_probe",
+                    "--include-ignored",
+                    "--test-threads=1",
+                ])
+                .env("RUST_MIN_STACK", min_stack.to_string())
+                .env(PROBE_BYTES, bytes.to_string())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            (output.status.success(), stdout, stderr)
+        };
+        // Three quarters of the engine's stack are there, although RUST_MIN_STACK asks for a quarter.
+        let (passed, stdout, stderr) = probe(
+            ENGINE_THREAD_STACK_BYTES / 4 * 3,
+            ENGINE_THREAD_STACK_BYTES / 4,
+        );
+        assert!(passed && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        // A quarter more than the engine's stack overflows it, although RUST_MIN_STACK offers 32 times as much.
+        let (passed, stdout, stderr) = probe(
+            ENGINE_THREAD_STACK_BYTES / 4 * 5,
+            ENGINE_THREAD_STACK_BYTES * 32,
+        );
+        assert!(
+            !passed
+                && stderr.contains(&format!("thread '{ENGINE_THREAD_NAME}'"))
+                && stderr.contains("has overflowed its stack"),
+            "{stdout}\n{stderr}"
+        );
+    }
 
     fn started() -> (EngineThread, Receiver<String>) {
         started_with(Arc::new(BlobStore::new()))
