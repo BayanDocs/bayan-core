@@ -25,6 +25,22 @@ pub fn run(command: &mut Command) -> Result<(), String> {
     }
 }
 
+/// Runs `command` like [`run`], with its error output going straight to the terminal, and returns what it printed on standard output, which must be UTF-8.
+pub fn run_and_read_output(command: &mut Command) -> Result<String, String> {
+    let shown = display(command);
+    println!("    $ {shown}");
+    let output = command
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("could not start `{shown}`: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("`{shown}` failed ({})", output.status));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| format!("`{shown}` printed something that is not UTF-8 text"))
+}
+
 /// Runs `command` and returns its exit status and captured output.
 pub fn capture(command: &mut Command) -> Result<Output, String> {
     command
