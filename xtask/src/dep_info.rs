@@ -13,13 +13,15 @@
 //!
 //! The units come from Cargo, not from the build folder, which keeps the dependency files of earlier builds and of the gate's other steps. Clippy runs with `--message-format=json-render-diagnostics`: Cargo still prints the diagnostics for people on standard error, and writes one JSON message per line on standard output. A `compiler-artifact` message names each unit of the run, fresh ones included, with its target and its `.rmeta` file, and rustc writes the dependency file next to that, under the same name without the `lib` in front and with the extension `.d` (`deps/libbayan_units-<hash>.rmeta` and `deps/bayan_units-<hash>.d`). A unit that Cargo reused (`"fresh": true`) keeps the dependency file of the build that compiled it; one that Cargo compiled in the run (`"fresh": false`) must have a dependency file written since the run began, so that a file left over from an earlier build, by whatever means, can never stand in for the record of this one. The run's start is rounded down to the second, so that a file system that stores whole seconds cannot make a file written in the run's first second look older.
 //!
+//! The same record shows which files make up each member's code that ships: the comparison keeps the Rust files that the dependency files of the units that are not tests list (not compiled as unit tests, and not a test, benchmark, example or build-script target), and the outside-world check reads exactly those (`outside_world.rs`).
+//!
 //! The unit that Cargo builds to run a build script or a procedural macro of a workspace member, an executable or a shared library, has no `.rmeta` file, so it would make the step fail ("with 0 `.rmeta` files instead of one"). `BUILD_SCRIPTS` and `PROC_MACROS` in `verify.rs` are empty today; whoever lists a member in either must first teach [`units`] where that unit's dependency file is.
 //!
 //! # Failing loudly
 //!
 //! Whatever the check cannot follow is an error, never a pass: a run that reports no unit for a member it checks, a unit without a dependency file, a unit that Cargo compiled in the run whose dependency file was not written during the run, a line of one that it cannot read, a listed file that does not exist, and a unit whose list does not contain its own target's root file, which shows that the list was read.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -69,6 +71,8 @@ pub struct Unit {
     pub dep_info: PathBuf,
     /// Whether Cargo reused the unit from an earlier build (`"fresh": true`) instead of compiling it in this run, so that its dependency file dates from that build.
     pub fresh: bool,
+    /// Whether the unit is code that ships: not compiled as tests, and not a test, benchmark, example or build-script target. The outside-world check reads the Rust files of these units (`outside_world.rs`).
+    pub shipped: bool,
 }
 
 /// The units of the workspace members `members` (from `cargo metadata`) in `messages`, what Cargo printed on standard output for a run with `--message-format=json-render-diagnostics`. Units of other packages, such as dependencies from crates.io, are left out. Every line must be a JSON message, and each member named in `required`, the members that the run checks, must have a unit.
@@ -134,11 +138,22 @@ fn unit(message: &Value, package: &Package) -> Result<Unit, String> {
             ))
         })?;
     // `--all-targets` also compiles each library and binary as its own unit tests; tests and benchmarks always are.
-    let as_tests = message
+    let test = match message
         .get("profile")
         .and_then(|profile| profile.get("test"))
-        == Some(&Value::Bool(true))
-        && !kinds.iter().any(|kind| kind == "test" || kind == "bench");
+    {
+        Some(Value::Bool(test)) => *test,
+        _ => {
+            return Err(invalid(&format!(
+                "(target `{name}`) without saying whether it is compiled as tests"
+            )));
+        }
+    };
+    let as_tests = test && !kinds.iter().any(|kind| kind == "test" || kind == "bench");
+    let shipped = !test
+        && !kinds
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "test" | "bench" | "example" | "custom-build"));
     let described = format!(
         "{} target `{name}`{}",
         kinds.join(", "),
@@ -175,6 +190,7 @@ fn unit(message: &Value, package: &Package) -> Result<Unit, String> {
         root_file,
         dep_info,
         fresh,
+        shipped,
     })
 }
 
@@ -269,6 +285,8 @@ pub struct Comparison {
     data: Vec<Data>,
     /// The data files (as positions in `data`) that each member read in the runs so far.
     read: BTreeSet<(usize, String)>,
+    /// The Rust files that the compiler compiled into each member's units that ship, in the runs so far, as the file system names them.
+    shipped: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
 impl Comparison {
@@ -341,10 +359,11 @@ impl Comparison {
             clippy_config,
             data: listed,
             read: BTreeSet::new(),
+            shipped: BTreeMap::new(),
         })
     }
 
-    /// Checks the dependency file of every unit of one Clippy run, which began at `run_started`: the dependency file of a unit that Cargo compiled in the run must have been written since then, each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file. Records the data files that each member read. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, or the first thing it could not follow.
+    /// Checks the dependency file of every unit of one Clippy run, which began at `run_started`: the dependency file of a unit that Cargo compiled in the run must have been written since then, each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file. Records the data files that each member read, and the Rust files of the units that ship. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, or the first thing it could not follow.
     pub fn check(&mut self, units: &[Unit], run_started: SystemTime) -> Result<String, String> {
         // Rounded down to the second, so that a file system that stores whole seconds cannot make a file written in the run's first second look older than the run.
         let run_started = whole_second(run_started);
@@ -389,6 +408,12 @@ impl Comparison {
                 })?;
                 lists_root_file |= file == root_file;
                 if self.sources.contains(&file) {
+                    if unit.shipped {
+                        self.shipped
+                            .entry(unit.package.clone())
+                            .or_default()
+                            .insert(file);
+                    }
                     continue;
                 }
                 match self.data.iter().position(|data| data.file == file) {
@@ -450,6 +475,11 @@ impl Comparison {
                 self.data.len()
             )
         })
+    }
+
+    /// The Rust files that the compiler compiled into each member's code that ships, in the runs checked so far: the files that the dependency files of the member's units that ship list, among those that the source check read, as the file system names them.
+    pub fn shipped(&self) -> &BTreeMap<String, BTreeSet<PathBuf>> {
+        &self.shipped
     }
 
     /// Whether `name`, as a dependency file lists it, is one of Clippy's own two files, named exactly as Clippy names them.
@@ -730,6 +760,9 @@ Cargo.toml:
         let listed = units(&messages, &members, &["bayan-units", "bayan-model"]).unwrap();
         let fresh: Vec<bool> = listed.iter().map(|unit| unit.fresh).collect();
         assert_eq!(fresh, [true, true, true, true, false]);
+        // Only the libraries compiled as themselves ship: not as unit tests, and not the test or the example.
+        let shipped: Vec<bool> = listed.iter().map(|unit| unit.shipped).collect();
+        assert_eq!(shipped, [true, false, false, false, true]);
         let found: Vec<(&str, &str, PathBuf, PathBuf)> = listed
             .iter()
             .map(|unit| {
@@ -851,6 +884,17 @@ Cargo.toml:
                 ),
                 "is not named lib<name>.rmeta",
             ),
+            (
+                artifact(
+                    manifest,
+                    "lib",
+                    "a",
+                    false,
+                    "/repo/target/debug/deps/liba-1.rmeta",
+                )
+                .replace(",\"test\":false", ""),
+                "without saying whether it is compiled as tests",
+            ),
         ] {
             let error = units(&message, &members, &["a"]).unwrap_err();
             assert!(error.contains(problem), "{message}: {error}");
@@ -967,6 +1011,7 @@ Cargo.toml:
                 root_file: self.path(&format!("crates/{member}/src/lib.rs")),
                 dep_info,
                 fresh: false,
+                shipped: true,
             }
         }
 
@@ -1020,6 +1065,39 @@ Cargo.toml:
         assert!(
             line.starts_with("the 2 units of workspace members: the compiler read only files that the source check read, besides Clippy's clippy.toml and Cargo.toml and 0 data files"),
             "{line}"
+        );
+    }
+
+    #[test]
+    fn records_the_rust_files_of_the_units_that_ship() {
+        let scratch = Scratch::new("shipped");
+        let mut comparison = scratch.comparison(&[]);
+        let mut as_tests = scratch.unit("c", 2, &["crates/c/src/lib.rs", "crates/a/src/b.rs"]);
+        as_tests.shipped = false;
+        let units = [
+            scratch.unit("a", 1, &["crates/a/src/lib.rs", "crates/a/src/b.rs"]),
+            as_tests,
+            scratch.unit("c", 3, &["crates/c/src/lib.rs"]),
+        ];
+        comparison
+            .check(&units, LONG_AGO)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        let canonical = |file: &str| std::fs::canonicalize(scratch.path(file)).unwrap();
+        assert_eq!(
+            comparison.shipped(),
+            &BTreeMap::from([
+                (
+                    "a".to_owned(),
+                    BTreeSet::from([
+                        canonical("crates/a/src/lib.rs"),
+                        canonical("crates/a/src/b.rs")
+                    ])
+                ),
+                (
+                    "c".to_owned(),
+                    BTreeSet::from([canonical("crates/c/src/lib.rs")])
+                ),
+            ])
         );
     }
 

@@ -148,16 +148,18 @@ fn unapproved_why(allowed: &Allowed<'_>) -> String {
     )
 }
 
-/// A token of Rust source, as far as this check needs to tell them apart, and the line on which it starts.
+/// A token of Rust source, as far as this check needs to tell them apart, and the line on which it starts. The outside-world check reads the same tokens (`outside_world.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Token<'a> {
-    kind: Kind<'a>,
-    line: usize,
+pub struct Token<'a> {
+    /// What it is.
+    pub kind: Kind<'a>,
+    /// The line on which it starts, counting from 1.
+    pub line: usize,
 }
 
 /// The kinds of tokens this check tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind<'a> {
+pub enum Kind<'a> {
     /// An identifier, with `r#` removed from a raw identifier.
     Ident(&'a str),
     /// The path separator `::`.
@@ -637,7 +639,7 @@ fn passed_on(attribute: &Attribute, tokens: &[Token<'_>], rules: &[Rule<'_>]) ->
 }
 
 /// For each opening bracket (`(`, `[` or `{`) in `tokens`, the position of the bracket that closes it. Rust itself requires brackets to be balanced, so brackets that are not mean this reader has lost track of the source, which is an error.
-fn closing_brackets(tokens: &[Token<'_>]) -> Result<Vec<Option<usize>>, String> {
+pub fn closing_brackets(tokens: &[Token<'_>]) -> Result<Vec<Option<usize>>, String> {
     let mut closing = vec![None; tokens.len()];
     let mut open: Vec<(usize, u8)> = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -686,7 +688,7 @@ fn opening_brackets(closing: &[Option<usize>]) -> Vec<Option<usize>> {
 }
 
 /// Splits Rust source into the tokens this check needs.
-fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
+pub fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
     let bytes = source.as_bytes();
     let mut tokens = Vec::new();
     let mut position = 0;

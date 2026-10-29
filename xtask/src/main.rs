@@ -22,12 +22,14 @@ mod dep_info;
 mod flags;
 mod json;
 mod notices;
+mod outside_world;
 mod policy;
 mod process;
 mod sources;
 mod supply_chain;
 mod toml_subset;
 mod verify;
+mod wasm_imports;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -62,6 +64,7 @@ Commands:
            host, schema, TypeScript declarations, test page, licence notices), by default
            into target/artifacts/bayan-core-wasm. Needs wasm-bindgen-cli at the version of
            the wasm-bindgen crate in Cargo.lock (scripts/dev-setup.sh installs it).
+           Fails if the module imports anything that WASM_IMPORTS does not list.
   c-driver [--sdk <folder>]
            Compile the C test driver against the SDK, linked statically and dynamically,
            and run both. Uses cc (or $CC), or MSVC's cl on Windows.
