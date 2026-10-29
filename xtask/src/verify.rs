@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::dep_info::{self, DataFiles};
 use crate::policy::Package;
@@ -39,10 +39,10 @@ pub const NATIVE_ONLY: [(&str, &str); 4] = [
     ("xtask", "this build automation"),
 ];
 
-/// Workspace members that may have a build script, with the reason. A build script runs code during the build and can change how its crate is compiled (for example, setting `CLIPPY_CONF_DIR` through `cargo::rustc-env` would switch off the bans of the root `clippy.toml` for that crate), so the preflight rejects every build script that is not listed here (ADR-0017 asks to keep them to a minimum). Reviewers read every listed script, and a build script must never set Clippy or compiler variables.
+/// Workspace members that may have a build script, with the reason. A build script runs code during the build and can change how its crate is compiled (for example, setting `CLIPPY_CONF_DIR` through `cargo::rustc-env` would switch off the bans of the root `clippy.toml` for that crate), so the preflight rejects every build script that is not listed here (ADR-0017 asks to keep them to a minimum). Reviewers read every listed script, and a build script must never set Clippy or compiler variables. The unit that Cargo builds to run a build script, an executable, has no `.rmeta` file, so the Clippy step would fail on it until `dep_info::units` learns where its dependency file is (`dep_info.rs`).
 pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 
-/// Workspace members that may be procedural-macro crates (`proc-macro = true` in `[lib]`), with the reason. A procedural macro runs code during the build and can produce any code, hidden conditions included, without that code appearing in a source file, so the source check cannot see what it writes; the preflight therefore rejects every procedural-macro crate of the workspace that is not listed here. Reviewers read every listed macro in full. Procedural macros from dependencies, such as serde's derive, are not affected.
+/// Workspace members that may be procedural-macro crates (`proc-macro = true` in `[lib]`), with the reason. A procedural macro runs code during the build and can produce any code, hidden conditions included, without that code appearing in a source file, so the source check cannot see what it writes; the preflight therefore rejects every procedural-macro crate of the workspace that is not listed here. Reviewers read every listed macro in full. Procedural macros from dependencies, such as serde's derive, are not affected. The unit that Cargo builds to run a procedural macro, a shared library, has no `.rmeta` file, so the Clippy step would fail on it until `dep_info::units` learns where its dependency file is (`dep_info.rs`).
 pub const PROC_MACROS: [(&str, &str); 0] = [];
 
 /// Files that workspace members read as data, with `include_str!` or `include_bytes!`, although the source check does not read them, with the members that read them and the reason. After each Clippy run, the Clippy step compares the files that the compiler read for every unit of a workspace member, as the dependency file it wrote for the unit lists them, with the files that the source check read (`dep_info.rs`). Any other file fails the step, unless it is one of Clippy's own two (the root clippy.toml and Cargo.toml, named as Clippy names them) or listed here for the unit's member. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every file listed here is data, never Rust code. A file that a member it is listed for read in none of the runs, a file that the source check reads anyway, and a member that does not exist fail the step too, so the list cannot go stale.
@@ -423,6 +423,8 @@ fn clippy_step(gate: &Gate) -> Result<(), String> {
                 println!("    not checked for WebAssembly: {name} ({reason})");
             }
         }
+        // A unit that Cargo compiles in the run must have a dependency file written since this moment.
+        let run_started = SystemTime::now();
         let messages = process::run_and_read_output(cargo(&gate.root).args(clippy_args(run)))
             .map_err(|problem| format!("{heading}: {problem}"))?;
         // The members that the run checks, each of which must have a unit; units of the others count too, should Cargo compile them as dependencies.
@@ -434,7 +436,7 @@ fn clippy_step(gate: &Gate) -> Result<(), String> {
             })
             .collect();
         let line = dep_info::units(&messages, &gate.packages, &checked)
-            .and_then(|units| comparison.check(&units))
+            .and_then(|units| comparison.check(&units, run_started))
             .map_err(|problem| format!("{heading}: {problem}"))?;
         println!("    {line}");
     }

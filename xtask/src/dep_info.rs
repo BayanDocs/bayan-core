@@ -4,22 +4,25 @@
 //!
 //! The compiler keeps a record that settles the question for every such form. For each unit it compiles, rustc writes a dependency file (dep-info, `.d`) that lists every file it read: the crate's source files, the files read with `include_str!` and `include_bytes!`, and the files that Clippy reads for its configuration. After each Clippy run, the Clippy step reads the dependency file of every unit of a workspace member and fails if it lists a file that the source check did not read, unless that file is
 //!
-//! - one of Clippy's own two, named exactly as Clippy names them: `Cargo.toml`, relative to the compiler's working folder, which is the workspace root for members, and the root `clippy.toml`, by the absolute path that `std::fs::canonicalize` gives it. The same files named in any other way, such as `crates/bayan-units/src/../../../Cargo.toml`, count like any other file, because a file can be valid TOML and valid Rust at once;
+//! - one of Clippy's own two, named exactly as Clippy names them: `Cargo.toml`, relative to the compiler's working folder, which is the workspace root for members, and the root `clippy.toml`, by the absolute path that `std::fs::canonicalize` gives it. The same files named in any other way, such as `crates/bayan-units/src/../../../Cargo.toml`, count like any other file, because a file can be valid TOML and valid Rust at once. An absolute `#[path]` can name the root `clippy.toml` exactly as Clippy does, though, so a `clippy.toml` made valid Rust could be compiled as code and pass on the one machine whose path it names. It cannot pass CI, whose three checkouts have different roots, and `clippy.toml` is a reviewed policy file: like the data files, it is trusted by review;
 //! - or a data file that `DATA_FILES` in `verify.rs` lists for the unit's member, with the reason. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every listed file is data.
 //!
 //! Files are compared after `std::fs::canonicalize`, so that `..`, links in parent folders and the `\\?\` prefix of Windows compare equal. The source check stays the first and faster line, with the clearer messages; this record backs it wherever a form that it misses makes the compiler read a file. `DATA_FILES` cannot go stale: an entry fails when a member it names read the file in none of the runs.
 //!
 //! # Units and their dependency files
 //!
-//! The units come from Cargo, not from the build folder, which keeps the dependency files of earlier builds and of the gate's other steps. Clippy runs with `--message-format=json-render-diagnostics`: Cargo still prints the diagnostics for people on standard error, and writes one JSON message per line on standard output. A `compiler-artifact` message names each unit of the run, fresh ones included, with its target and its `.rmeta` file, and rustc writes the dependency file next to that, under the same name without the `lib` in front and with the extension `.d` (`deps/libbayan_units-<hash>.rmeta` and `deps/bayan_units-<hash>.d`).
+//! The units come from Cargo, not from the build folder, which keeps the dependency files of earlier builds and of the gate's other steps. Clippy runs with `--message-format=json-render-diagnostics`: Cargo still prints the diagnostics for people on standard error, and writes one JSON message per line on standard output. A `compiler-artifact` message names each unit of the run, fresh ones included, with its target and its `.rmeta` file, and rustc writes the dependency file next to that, under the same name without the `lib` in front and with the extension `.d` (`deps/libbayan_units-<hash>.rmeta` and `deps/bayan_units-<hash>.d`). A unit that Cargo reused (`"fresh": true`) keeps the dependency file of the build that compiled it; one that Cargo compiled in the run (`"fresh": false`) must have a dependency file written since the run began, so that a file left over from an earlier build, by whatever means, can never stand in for the record of this one. The run's start is rounded down to the second, so that a file system that stores whole seconds cannot make a file written in the run's first second look older.
+//!
+//! The unit that Cargo builds to run a build script or a procedural macro of a workspace member, an executable or a shared library, has no `.rmeta` file, so it would make the step fail ("with 0 `.rmeta` files instead of one"). `BUILD_SCRIPTS` and `PROC_MACROS` in `verify.rs` are empty today; whoever lists a member in either must first teach [`units`] where that unit's dependency file is.
 //!
 //! # Failing loudly
 //!
-//! Whatever the check cannot follow is an error, never a pass: a run that reports no unit for a member it checks, a unit without a dependency file, a line of one that it cannot read, a listed file that does not exist, and a unit whose list does not contain its own target's root file, which shows that the list was read.
+//! Whatever the check cannot follow is an error, never a pass: a run that reports no unit for a member it checks, a unit without a dependency file, a unit that Cargo compiled in the run whose dependency file was not written during the run, a line of one that it cannot read, a listed file that does not exist, and a unit whose list does not contain its own target's root file, which shows that the list was read.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::json::{self, Value};
 use crate::policy::Package;
@@ -64,6 +67,8 @@ pub struct Unit {
     pub root_file: PathBuf,
     /// The dependency file that the compiler wrote for the unit.
     pub dep_info: PathBuf,
+    /// Whether Cargo reused the unit from an earlier build (`"fresh": true`) instead of compiling it in this run, so that its dependency file dates from that build.
+    pub fresh: bool,
 }
 
 /// The units of the workspace members `members` (from `cargo metadata`) in `messages`, what Cargo printed on standard output for a run with `--message-format=json-render-diagnostics`. Units of other packages, such as dependencies from crates.io, are left out. Every line must be a JSON message, and each member named in `required`, the members that the run checks, must have a unit.
@@ -156,11 +161,20 @@ fn unit(message: &Value, package: &Package) -> Result<Unit, String> {
             "({described}) whose `.rmeta` file, {rmeta}, is not named lib<name>.rmeta"
         ))
     })?;
+    let fresh = match message.get("fresh") {
+        Some(Value::Bool(fresh)) => *fresh,
+        _ => {
+            return Err(invalid(&format!(
+                "({described}) without saying whether it is fresh"
+            )));
+        }
+    };
     Ok(Unit {
         package: package.name.clone(),
         target: described,
         root_file,
         dep_info,
+        fresh,
     })
 }
 
@@ -330,8 +344,10 @@ impl Comparison {
         })
     }
 
-    /// Checks the dependency file of every unit of one Clippy run: each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file. Records the data files that each member read. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, or the first thing it could not follow.
-    pub fn check(&mut self, units: &[Unit]) -> Result<String, String> {
+    /// Checks the dependency file of every unit of one Clippy run, which began at `run_started`: the dependency file of a unit that Cargo compiled in the run must have been written since then, each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file. Records the data files that each member read. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, or the first thing it could not follow.
+    pub fn check(&mut self, units: &[Unit], run_started: SystemTime) -> Result<String, String> {
+        // Rounded down to the second, so that a file system that stores whole seconds cannot make a file written in the run's first second look older than the run.
+        let run_started = whole_second(run_started);
         let mut unread = Vec::new();
         let mut data_read = BTreeSet::new();
         for unit in units {
@@ -342,6 +358,20 @@ impl Comparison {
                     "{unit_name}: cannot read the dependency file that the compiler wrote for it, {dep_info} ({error}), so the gate cannot tell which files the compiler read"
                 )
             })?;
+            if !unit.fresh {
+                let written = std::fs::metadata(&unit.dep_info)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| {
+                        format!(
+                            "{unit_name}: cannot tell when its dependency file, {dep_info}, was written ({error})"
+                        )
+                    })?;
+                if written < run_started {
+                    return Err(format!(
+                        "{unit_name}: Cargo compiled it in this run, but its dependency file, {dep_info}, was last written before the run began, so it is not the record of this compilation and the gate cannot tell which files the compiler read"
+                    ));
+                }
+            }
             let files = listed_files(&text).map_err(|problem| {
                 format!("{unit_name}: cannot read its dependency file, {dep_info}: {problem}")
             })?;
@@ -437,6 +467,13 @@ impl Comparison {
     }
 }
 
+/// `time` rounded down to a whole second.
+fn whole_second(time: SystemTime) -> SystemTime {
+    time.duration_since(UNIX_EPOCH).map_or(time, |since| {
+        UNIX_EPOCH + Duration::from_secs(since.as_secs())
+    })
+}
+
 /// `path`, as the file system names it.
 fn canonical(path: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|error| format!("cannot find {}: {error}", path.display()))
@@ -458,6 +495,9 @@ fn file_at(root: &Path, written: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::policy::Target;
+
+    /// The start of a run that began before every file these tests write, for the tests that are not about when a dependency file was written.
+    const LONG_AGO: SystemTime = UNIX_EPOCH;
 
     /// A dependency file as rustc 1.99 writes it for a unit that Clippy checks, on Linux: the rules of the `.d` and `.rmeta` files, one rule per file read, and the environment variables that Clippy read.
     const LINUX: &str = "/home/ana/bayan-core/target/debug/deps/bayan_units-0eb18dafa0a0f800.d: /home/ana/bayan-core/clippy.toml crates/bayan-units/src/lib.rs crates/bayan-units/src/angle.rs crates/bayan-units/src/../../../shared/sine.rs Cargo.toml
@@ -675,17 +715,21 @@ Cargo.toml:
                 false,
                 "/repo/target/debug/examples/libtour-4.rmeta",
             ),
+            // Compiled in this run, the others reused from an earlier build.
             artifact(
                 "/repo/crates/bayan-model/Cargo.toml",
                 "lib",
                 "bayan_model",
                 false,
                 &format!("{deps}/libbayan_model-5.rmeta"),
-            ),
+            )
+            .replace("\"fresh\":true", "\"fresh\":false"),
             r#"{"reason":"build-finished","success":true}"#.to_owned(),
         ]
         .join("\n");
         let listed = units(&messages, &members, &["bayan-units", "bayan-model"]).unwrap();
+        let fresh: Vec<bool> = listed.iter().map(|unit| unit.fresh).collect();
+        assert_eq!(fresh, [true, true, true, true, false]);
         let found: Vec<(&str, &str, PathBuf, PathBuf)> = listed
             .iter()
             .map(|unit| {
@@ -785,6 +829,17 @@ Cargo.toml:
                     "/repo/target/debug/deps/liba-1.rlib",
                 ),
                 "with 0 `.rmeta` files instead of one",
+            ),
+            (
+                artifact(
+                    manifest,
+                    "lib",
+                    "a",
+                    false,
+                    "/repo/target/debug/deps/liba-1.rmeta",
+                )
+                .replace(",\"fresh\":true", ""),
+                "without saying whether it is fresh",
             ),
             (
                 artifact(
@@ -911,6 +966,7 @@ Cargo.toml:
                 target: format!("lib target `{member}`"),
                 root_file: self.path(&format!("crates/{member}/src/lib.rs")),
                 dep_info,
+                fresh: false,
             }
         }
 
@@ -959,7 +1015,7 @@ Cargo.toml:
             ),
         ];
         let line = comparison
-            .check(&units)
+            .check(&units, LONG_AGO)
             .unwrap_or_else(|problem| panic!("{problem}"));
         assert!(
             line.starts_with("the 2 units of workspace members: the compiler read only files that the source check read, besides Clippy's clippy.toml and Cargo.toml and 0 data files"),
@@ -990,7 +1046,7 @@ Cargo.toml:
                 ],
             ),
         ];
-        let problem = comparison.check(&units).unwrap_err();
+        let problem = comparison.check(&units, LONG_AGO).unwrap_err();
         let expected = format!(
             "{}:\n  a, lib target `a`: {}\n  c, lib target `c`: {}\n{}",
             UNREAD.0,
@@ -1018,7 +1074,7 @@ Cargo.toml:
             scratch.unit("c", 2, &["crates/c/src/lib.rs"]),
         ];
         comparison
-            .check(&units)
+            .check(&units, LONG_AGO)
             .unwrap_or_else(|problem| panic!("{problem}"));
         // The same files named in another way may have been compiled as code, such as a module that `#[path = "../../../Cargo.toml"]` reads.
         let other_names = format!("{}/./clippy.toml", scratch.0.display());
@@ -1031,7 +1087,7 @@ Cargo.toml:
                 &other_names,
             ],
         )];
-        let problem = comparison.check(&units).unwrap_err();
+        let problem = comparison.check(&units, LONG_AGO).unwrap_err();
         assert!(
             problem.contains("  a, lib target `a`: Cargo.toml\n  a, lib target `a`: clippy.toml\n"),
             "{problem}"
@@ -1052,7 +1108,7 @@ Cargo.toml:
             ],
         );
         let line = comparison
-            .check(std::slice::from_ref(&read_by_a))
+            .check(std::slice::from_ref(&read_by_a), LONG_AGO)
             .unwrap_or_else(|problem| panic!("{problem}"));
         assert!(
             line.contains("and 1 data files that DATA_FILES lists"),
@@ -1066,7 +1122,9 @@ Cargo.toml:
                 "crates/c/src/../../../data/table.txt",
             ],
         );
-        let problem = comparison.check(&[read_by_a, read_by_c]).unwrap_err();
+        let problem = comparison
+            .check(&[read_by_a, read_by_c], LONG_AGO)
+            .unwrap_err();
         assert!(
             problem.contains(&format!(
                 "{}:\n  c, lib target `c`: data/table.txt (DATA_FILES lists it for a only)\n",
@@ -1100,7 +1158,7 @@ Cargo.toml:
         );
         // In the first run only a reads the file.
         comparison
-            .check(&[read_by_a])
+            .check(&[read_by_a], LONG_AGO)
             .unwrap_or_else(|problem| panic!("{problem}"));
         let problem = comparison.check_stale().unwrap_err();
         assert_eq!(
@@ -1112,7 +1170,7 @@ Cargo.toml:
         );
         // Once c reads it in another run, nothing is stale.
         comparison
-            .check(&[read_by_c])
+            .check(&[read_by_c], LONG_AGO)
             .unwrap_or_else(|problem| panic!("{problem}"));
         assert_eq!(
             comparison.check_stale().unwrap(),
@@ -1131,7 +1189,7 @@ Cargo.toml:
         let mut comparison = scratch.comparison(&[]);
         // A list that lacks the unit's own root file was misread, or belongs to another unit.
         let problem = comparison
-            .check(&[scratch.unit("a", 1, &["crates/a/src/b.rs"])])
+            .check(&[scratch.unit("a", 1, &["crates/a/src/b.rs"])], LONG_AGO)
             .unwrap_err();
         let dep_info = relative(&["target", "debug", "deps", "a-1.d"]);
         let root_file = relative(&["crates", "a", "src", "lib.rs"]);
@@ -1150,7 +1208,7 @@ Cargo.toml:
         // No dependency file.
         let mut missing = scratch.unit("a", 1, &["crates/a/src/lib.rs"]);
         missing.dep_info.set_file_name("a-9.d");
-        let problem = comparison.check(&[missing]).unwrap_err();
+        let problem = comparison.check(&[missing], LONG_AGO).unwrap_err();
         assert!(
             problem.contains("cannot read the dependency file that the compiler wrote for it")
                 && problem.contains("so the gate cannot tell which files the compiler read"),
@@ -1161,7 +1219,7 @@ Cargo.toml:
         let mut text = std::fs::read_to_string(&garbled.dep_info).unwrap();
         text.push_str("crates/a/src/b.rs\n");
         std::fs::write(&garbled.dep_info, text).unwrap();
-        let problem = comparison.check(&[garbled]).unwrap_err();
+        let problem = comparison.check(&[garbled], LONG_AGO).unwrap_err();
         assert!(
             problem.contains("cannot read its dependency file")
                 && problem.contains("is neither a rule nor a comment"),
@@ -1169,10 +1227,62 @@ Cargo.toml:
         );
         // A file that does not exist.
         let problem = comparison
-            .check(&[scratch.unit("a", 3, &["crates/a/src/lib.rs", "crates/a/src/gone.rs"])])
+            .check(
+                &[scratch.unit("a", 3, &["crates/a/src/lib.rs", "crates/a/src/gone.rs"])],
+                LONG_AGO,
+            )
             .unwrap_err();
         assert!(
             problem.contains("lists crates/a/src/gone.rs, which the gate cannot find"),
+            "{problem}"
+        );
+    }
+
+    /// Sets when `file` was last written.
+    fn last_written(file: &Path, time: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .and_then(|file| file.set_modified(time))
+            .unwrap();
+    }
+
+    #[test]
+    fn requires_a_dependency_file_written_in_the_run_from_a_unit_that_cargo_compiled() {
+        let scratch = Scratch::new("written-in-the-run");
+        let mut comparison = scratch.comparison(&[]);
+        let run_started = SystemTime::now();
+        let mut unit = scratch.unit("a", 1, &["crates/a/src/lib.rs"]);
+        // A dependency file left over from an earlier build, an hour before the run, is not the record of a compilation in the run.
+        last_written(&unit.dep_info, run_started - Duration::from_secs(3600));
+        let problem = comparison
+            .check(std::slice::from_ref(&unit), run_started)
+            .unwrap_err();
+        let dep_info = relative(&["target", "debug", "deps", "a-1.d"]);
+        assert_eq!(
+            problem,
+            format!(
+                "a, lib target `a`: Cargo compiled it in this run, but its dependency file, {dep_info}, was last written before the run began, so it is not the record of this compilation and the gate cannot tell which files the compiler read"
+            )
+        );
+        // A unit that Cargo reused from an earlier build keeps the dependency file of that build.
+        unit.fresh = true;
+        comparison
+            .check(std::slice::from_ref(&unit), run_started)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        // A file system that stores whole seconds gives a file written in the run's first second the start of that second, which counts as written in the run; the second before does not.
+        unit.fresh = false;
+        let second_began = whole_second(run_started);
+        last_written(&unit.dep_info, second_began);
+        comparison
+            .check(std::slice::from_ref(&unit), run_started)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        last_written(&unit.dep_info, second_began - Duration::from_secs(1));
+        let problem = comparison
+            .check(std::slice::from_ref(&unit), run_started)
+            .unwrap_err();
+        assert!(
+            problem.contains("was last written before the run began"),
             "{problem}"
         );
     }
