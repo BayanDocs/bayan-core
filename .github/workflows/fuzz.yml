@@ -1,7 +1,7 @@
 # Fuzzes every parser of untrusted input that has a fuzz target in fuzz/ (ADR-0025 §4, ADR-0006 §5; bayan-core#21, the follow-up 1 of CORE-005): the targets are built with cargo-fuzz (libFuzzer with AddressSanitizer) on the pinned nightly toolchain, and run by fuzz/ci.py, which holds each target's settings.
 # - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved, which a pull request only reads.
-# - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. The corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run. Only these runs save a corpus, each into the cache of its own branch: the scheduled runs on main, and a manual run on the branch it was started on.
-# A crash, a timeout, running out of memory or a leak fails the run, and the inputs that caused it are uploaded with every target's log as the artifact fuzzing-failures; fuzz/README.md explains how to reproduce one. Everyone who can read this repository's Actions can download that artifact, which is acceptable only because every input comes from public files (fuzz/ci.py seeds); a crash that is a security problem is then reported privately, as SECURITY.md says.
+# - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. If every target passed, the corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run; a run in which a target failed saves nothing (see the step "Minimize the corpora"). Only these runs save a corpus, each into the cache of its own branch: the scheduled runs on main, and a manual run on the branch it was started on.
+# A crash, a timeout, running out of memory or a leak fails the run. Of a target that failed, fuzz/ci.py shows only its name and the kind of failure, in the job log, an annotation and the job summary, which everyone can read: it prints no target's log, and no step uploads an input that failed or a log. libFuzzer writes the input into the log, and a crashing input that mutation found is a working proof of concept, possibly of an undisclosed vulnerability in another project's code that the targets reach, which SECURITY.md asks everyone to keep private. Both stay on the runner, which GitHub deletes after the job; fuzz/README.md explains how to reproduce a failure privately and how to report it. Never add a step that uploads or prints fuzz/artifacts/ or fuzz/logs/.
 # It is not a required check: a path filter skips it on most pull requests, and a required check that never runs would block merging forever (docs/scripts/github-settings.py), as for text-pipeline.yml.
 # GitHub notifies the person who last changed the cron schedule below when a scheduled run fails. Agents push and merge under the owner's account, so that is the owner; whoever else changes the schedule receives the notifications instead. GitHub also switches scheduled workflows off after 60 days without activity in the repository; re-enabling one makes its notifications go to whoever re-enabled it.
 # Workflow conventions (AGENTS.md): GitHub's own actions only, pinned to full commit SHAs with the version in a comment; no permissions beyond reading the repository; no credentials kept after checkout; a timeout; one concurrency group; tools at pinned versions, checked against SHA-256 checksums; no secrets. A pull request never saves a cache, and GitHub lets it read only the caches of its base branch and of main, so a pull request against main reads only corpora that runs on main saved.
@@ -119,27 +119,16 @@ jobs:
         id: fuzz
         run: python3 -I fuzz/ci.py run --all --seconds "$FUZZ_SECONDS" --seeds "$RUNNER_TEMP/seeds"
 
-      # Also after a target failed: its corpus holds only inputs that passed, and the others' progress is kept.
+      # Only when every target passed (FU-6). A run in which a target failed saves no corpus, because the corpus of a target that ran out of memory can hold the input that used the memory: libFuzzer checks the peak memory once a second and blames the input that is running at that moment, while the one that used the memory may have finished and been added to the corpus. The workflows of pull requests can read the cache, so nothing that a failing run found may reach it; the corpora grow again from the next run that passes. An xtask test (the_fuzz_workflow_saves_no_corpus_from_a_failed_run) keeps both conditions.
       - name: Minimize the corpora
         id: minimize
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.fuzz.outcome == 'success' }}
         run: python3 -I fuzz/ci.py minimize --all
 
-      # Only scheduled and manual runs save, each into its own branch's cache; never a pull request, whose code is not yet reviewed.
+      # Only scheduled and manual runs save, each into its own branch's cache; never a pull request, whose code is not yet reviewed. And only when fuzzing and minimizing passed (see above): merging runs every input of the corpus again, so a failed merge means that the corpus holds an input that fails.
       - name: Save the corpora for the next run
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.fuzz.outcome == 'success' && steps.minimize.outcome == 'success' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Upload the inputs that failed, with the logs
-        if: ${{ failure() && (steps.fuzz.outcome == 'failure' || steps.minimize.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzzing-failures
-          path: |
-            fuzz/artifacts/
-            fuzz/logs/
-          if-no-files-found: warn
-          retention-days: 30

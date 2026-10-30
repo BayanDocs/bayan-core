@@ -4,13 +4,13 @@
 Usage, from anywhere in the repository, after `cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu`:
 
   python3 -I fuzz/ci.py seeds SEEDS
-      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, and bayan-xml's two sample parts. Never add documents of the private corpus: CI uploads what fuzzing finds where everyone who can read the repository's Actions can download it.
+      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, and bayan-xml's two sample parts. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
   python3 -I fuzz/ci.py run --seconds N --seeds SEEDS [--work WORK] [--jobs J] (--all | TARGET ...)
       Runs each target for N seconds times its share (TARGETS below), J at a time (default 4), from its seeds and its corpus in WORK/corpus/<target>/, where it adds what it finds. WORK is this folder unless given, so that the corpora and artifacts are where cargo-fuzz keeps them. Inputs that crash, time out, run out of memory or leak go to WORK/artifacts/<target>/, each target's output to WORK/logs/<target>.log. Exits with 1 if any target failed.
   python3 -I fuzz/ci.py minimize [--work WORK] [--jobs J] (--all | TARGET ...)
       Keeps only the inputs of each corpus that its coverage needs (libFuzzer's -merge=1), and reports that coverage.
 
-Both run and minimize print a Markdown table, and add it to the job summary when GITHUB_STEP_SUMMARY is set. Needs Python 3.11 or later (for tomllib) and nothing outside its standard library. It runs the targets that cargo-fuzz built for x86_64-unknown-linux-gnu, so Linux on x86-64 only. The tests are in test_ci.py next to this file.
+Both run and minimize print a Markdown table, and add it to the job summary when GITHUB_STEP_SUMMARY is set. Neither prints anything of a target's output, in which libFuzzer writes the input that failed: in GitHub Actions the job log and the summary are public, and such an input can disclose a vulnerability (README.md, "When a run fails"). Of a target that failed, they show only the kind of failure (crash, timeout, out of memory or leak), in GitHub Actions also as an annotation, and elsewhere also where its log and inputs are. Needs Python 3.11 or later (for tomllib) and nothing outside its standard library. It runs the targets that cargo-fuzz built for x86_64-unknown-linux-gnu, so Linux on x86-64 only. The tests are in test_ci.py next to this file.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import dataclasses
 import hashlib
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -29,7 +28,7 @@ import time
 import tomllib
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 FUZZ = Path(__file__).resolve().parent
 REPOSITORY = FUZZ.parent
@@ -82,10 +81,11 @@ TARGETS: Dict[str, Target] = {
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
 }
 
-# How libFuzzer names the inputs it keeps, by what went wrong. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
-FAILURE_PREFIXES = ("crash-", "timeout-", "oom-", "leak-")
+# How libFuzzer names the inputs it keeps, by what went wrong, and the kind of failure that ci.py reports for each: the only thing it shows about a failure. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
+FAILURE_PREFIXES = {"crash-": "crash", "timeout-": "timeout", "oom-": "out of memory", "leak-": "leak"}
 
-STATUS_LINE = re.compile(r"^#(\d+)\s+\S+\s+cov: (\d+) ft: (\d+) corp: (\d+)/(\S+)", re.MULTILINE)
+# libFuzzer writes the corpus size in bytes, KiB or MiB (b, Kb or Mb), so nothing else of a log can reach the summary through it.
+STATUS_LINE = re.compile(r"^#(\d+)\s+\S+\s+cov: (\d+) ft: (\d+) corp: (\d+)/(\d+(?:b|Kb|Mb))\b", re.MULTILINE)
 FINAL_STAT = re.compile(r"^stat::(\w+):\s+(\d+)$", re.MULTILINE)
 MERGE_RESULT = re.compile(r"MERGE-OUTER: (\d+) new files with (\d+) new features added; (\d+) new coverage edges")
 
@@ -145,6 +145,8 @@ class Result:
     stats: Dict[str, int] = dataclasses.field(default_factory=dict)
     corpus: str = ""
     log: Optional[Path] = None
+    # The folder where libFuzzer keeps the inputs that fail.
+    artifacts: Optional[Path] = None
 
 
 def parse_log(text: str) -> Dict[str, int]:
@@ -169,7 +171,12 @@ def failures(artifacts: Path) -> List[str]:
     """The inputs that libFuzzer kept in `artifacts` because they crashed, timed out, ran out of memory or leaked."""
     if not artifacts.is_dir():
         return []
-    return sorted(path.name for path in artifacts.iterdir() if path.name.startswith(FAILURE_PREFIXES))
+    return sorted(path.name for path in artifacts.iterdir() if path.name.startswith(tuple(FAILURE_PREFIXES)))
+
+
+def kinds(inputs: Sequence[str]) -> List[str]:
+    """The kinds of failure that the names of the inputs libFuzzer kept give, in the order of FAILURE_PREFIXES. libFuzzer chooses the start of a name by what went wrong; the rest is the input's SHA-1, which is not shown."""
+    return [kind for prefix, kind in FAILURE_PREFIXES.items() if any(name.startswith(prefix) for name in inputs)]
 
 
 def environment() -> Dict[str, str]:
@@ -235,22 +242,15 @@ def in_github_actions() -> bool:
 
 
 def show(result: Result, line: str) -> None:
-    """Prints a target's result and its log, folded in GitHub Actions; a failure's last lines are also printed unfolded, so that its report is in view."""
-    log = result.log.read_text(errors="replace") if result.log and result.log.is_file() else ""
-    if not in_github_actions():
-        print(line, flush=True)
-        if result.status not in ("passed", "empty"):
-            print(log, flush=True)
+    """Prints a target's result, which for a failure is the kind of failure and nothing else; in GitHub Actions a failure also becomes an annotation of the run, and elsewhere ci.py says where its log and inputs are. It never prints a log, because the job log of GitHub Actions is public: libFuzzer writes the input that failed into the log (in hex, as text and in Base64, if it has at most 256 bytes), and an input that ran slowly too (in Base64)."""
+    print(line, flush=True)
+    if result.status in ("passed", "empty"):
         return
-    # A target's output can quote parts of its input. Workflow commands are switched off while it is printed, so that it cannot add annotations or change the job.
-    token = secrets.token_hex(16)
-    print(f"::group::{line}", flush=True)
-    print(f"::stop-commands::{token}\n{log}\n::{token}::", flush=True)
-    print("::endgroup::", flush=True)
-    if result.status not in ("passed", "empty"):
-        tail = "\n".join(log.splitlines()[-80:])
+    if in_github_actions():
+        # Nothing in it comes from the target's output, so it needs no protection from workflow commands.
         print(f"::error title=Fuzzing {result.target}::{'; '.join(result.problems)}", flush=True)
-        print(f"::stop-commands::{token}\n{tail}\n::{token}::", flush=True)
+    else:
+        print(f"  the log is {result.log}, the inputs that failed are in {result.artifacts}/", flush=True)
 
 
 def run(names: Sequence[str], seconds: int, jobs: int, seeds_dir: Path, work: Path, binaries: Path) -> List[Result]:
@@ -268,17 +268,19 @@ def run(names: Sequence[str], seconds: int, jobs: int, seeds_dir: Path, work: Pa
         for future in concurrent.futures.as_completed(running):
             name = running[future]
             code, elapsed = future.result()
-            result = Result(name, round(elapsed), log=work / "logs" / f"{name}.log")
-            text = result.log.read_text(errors="replace")
-            result.stats = parse_log(text)
-            result.corpus = last_corpus_size(text)
-            kept = failures(work / "artifacts" / name)
+            result = Result(name, round(elapsed), log=work / "logs" / f"{name}.log", artifacts=work / "artifacts" / name)
+            kept = failures(result.artifacts)
             if code != 0 or kept:
+                # The log of a target that failed is not even read: libFuzzer wrote the input into it.
                 result.status = "failed"
-                result.problems = [f"libFuzzer exited with {code}"] if code != 0 else []
-                result.problems += [f"kept artifacts/{name}/{input_name}" for input_name in kept]
+                result.problems = kinds(kept) or [f"libFuzzer exited with {code} and kept no input"]
+                show(result, f"{name}: {status_of(result)}")
+            else:
+                text = result.log.read_text(errors="replace")
+                result.stats = parse_log(text)
+                result.corpus = last_corpus_size(text)
+                show(result, f"{name}: {result.status} after {result.seconds} s, {result.stats.get('runs', 0):,} runs, coverage {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
             results[name] = result
-            show(result, f"{name}: {result.status} after {result.seconds} s, {result.stats.get('runs', 0):,} runs, coverage {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
     return [results[name] for name in TARGETS if name in results]
 
 
@@ -287,9 +289,11 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
     (work / "logs").mkdir(parents=True, exist_ok=True)
     results = {}
     pending = {}
+    # The inputs that had failed before, such as in this job's fuzzing: only those that merging keeps are its own.
+    failed_before: Dict[str, Set[str]] = {}
     for name in names:
         corpus = work / "corpus" / name
-        result = Result(name, log=work / "logs" / f"{name}-minimize.log")
+        result = Result(name, log=work / "logs" / f"{name}-minimize.log", artifacts=work / "artifacts" / name)
         if not corpus.is_dir() or not any(corpus.iterdir()):
             result.status = "empty"
             results[name] = result
@@ -298,7 +302,8 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
         minimized = work / "minimized" / name
         shutil.rmtree(minimized, ignore_errors=True)
         minimized.mkdir(parents=True)
-        (work / "artifacts" / name).mkdir(parents=True, exist_ok=True)
+        result.artifacts.mkdir(parents=True, exist_ok=True)
+        failed_before[name] = set(failures(result.artifacts))
         pending[name] = result
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         running = {pool.submit(run_one, merge_command(name, work, binaries), result.log): name for name, result in pending.items()}
@@ -308,13 +313,15 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
             text = result.log.read_text(errors="replace")
             merged = MERGE_RESULT.findall(text)
             code, _ = future.result()
-            # Merging runs the inputs in a process that it restarts after a crash, so a report in its log is a failure too.
-            reports = [line for line in text.splitlines() if "ERROR: libFuzzer" in line or "==ERROR:" in line]
-            if code != 0 or not merged or reports:
+            kept = [input_name for input_name in failures(result.artifacts) if input_name not in failed_before[name]]
+            # Merging runs the inputs in a process that it restarts after a crash, so a report in its log is a failure too. The report is never shown: libFuzzer writes the input that caused it next to it.
+            reported = any("ERROR: libFuzzer" in line or "==ERROR:" in line for line in text.splitlines())
+            if code != 0 or not merged or reported or kept:
                 result.status = "failed"
-                result.problems = [f"merging exited with {code}"] if code != 0 else []
-                result.problems += [] if merged else ["merging printed no MERGE-OUTER summary"]
-                result.problems += reports[:3]
+                problems = [f"merging exited with {code}"] if code != 0 else []
+                problems += [] if merged else ["merging printed no MERGE-OUTER summary"]
+                problems += ["merging reported a failure"] if reported else []
+                result.problems = kinds(kept) or problems
             else:
                 inputs, features, edges = (int(value) for value in merged[-1])
                 result.stats.update(after=inputs, features=features, edges=edges)
@@ -322,7 +329,10 @@ def minimize(names: Sequence[str], jobs: int, work: Path, binaries: Path) -> Lis
                 shutil.rmtree(corpus)
                 (work / "minimized" / name).rename(corpus)
             results[name] = result
-            show(result, f"{name}: corpus {result.status}, {result.stats.get('before', 0):,} inputs before and {result.stats.get('after', 0):,} after, coverage without the seeds {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
+            if result.status == "failed":
+                show(result, f"{name}: minimizing {status_of(result)}")
+            else:
+                show(result, f"{name}: corpus {result.status}, {result.stats.get('before', 0):,} inputs before and {result.stats.get('after', 0):,} after, coverage without the seeds {result.stats.get('edges', 0):,} edges and {result.stats.get('features', 0):,} features")
     return [results[name] for name in TARGETS if name in results]
 
 
@@ -336,6 +346,10 @@ def run_table(results: Sequence[Result]) -> str:
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
+        if result.status == "failed":
+            # Of a failure, only the target and the kind (README.md, "When a run fails").
+            rows.append(f"| `{result.target}` | {status_of(result)} |" + " |" * 7)
+            continue
         stats = result.stats
         rows.append(
             f"| `{result.target}` | {status_of(result)} | {result.seconds} s | {stats.get('number_of_executed_units', stats.get('runs', 0)):,} | {stats.get('average_exec_per_sec', 0):,} "
@@ -348,14 +362,27 @@ def minimize_table(results: Sequence[Result]) -> str:
     # libFuzzer never copies the seeds into the corpus, and every run reads them again, so a minimized corpus can reach less than the run that fuzzed with the seeds.
     rows = ["| Target | Result | Inputs before | Inputs after | Coverage without the seeds (edges / features) |", "|---|---|---|---|---|"]
     for result in results:
+        if result.status == "failed":
+            rows.append(f"| `{result.target}` | {status_of(result)} |" + " |" * 3)
+            continue
         stats = result.stats
         rows.append(f"| `{result.target}` | {status_of(result)} | {stats.get('before', 0):,} | {stats.get('after', 0):,} | {stats.get('edges', 0):,} / {stats.get('features', 0):,} |")
     return "\n".join(rows)
 
 
-def summarize(title: str, table: str) -> None:
-    """Prints the table, and adds it to the job summary in GitHub Actions."""
+# Below the table of a run in GitHub Actions in which a target failed.
+KEPT_PRIVATE = (
+    "Of a target that failed, only the kind of failure is shown. Its input and its log, which holds the input, can disclose a vulnerability, "
+    "so they are neither uploaded nor printed, and GitHub deletes them with the runner after the job. "
+    'Reproduce the failure privately and report it as fuzz/README.md explains ("When a run fails").'
+)
+
+
+def summarize(title: str, table: str, failed: bool) -> None:
+    """Prints the table, and adds it to the job summary in GitHub Actions, with KEPT_PRIVATE if a target failed."""
     text = f"### {title}\n\n{table}\n"
+    if failed and in_github_actions():
+        text += f"\n{KEPT_PRIVATE}\n"
     print(text, flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -403,11 +430,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if arguments.seconds < 1:
             raise SystemExit("ci.py: --seconds must be at least 1")
         results = run(names, arguments.seconds, arguments.jobs, arguments.seeds, arguments.work, arguments.binaries)
-        summarize("Fuzzing", run_table(results))
+        table = run_table(results)
     else:
         results = minimize(names, arguments.jobs, arguments.work, arguments.binaries)
-        summarize("Corpora, minimized", minimize_table(results))
-    return 0 if all(result.status in ("passed", "empty") for result in results) else 1
+        table = minimize_table(results)
+    passed = all(result.status in ("passed", "empty") for result in results)
+    summarize("Fuzzing" if arguments.command == "run" else "Corpora, minimized", table, not passed)
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
