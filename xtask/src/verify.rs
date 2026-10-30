@@ -1032,6 +1032,38 @@ mod tests {
         assert!(position("fetch-depth: 0") < position("run: cargo xtask check-lockfile-age"));
     }
 
+    /// A fuzzing run in which a target failed saves no corpus, because the workflows of pull requests can read the cache and the corpus of a target that ran out of memory can hold the input that used the memory: libFuzzer checks the peak memory once a second and blames the input that is running then (FU-6). So the corpora are minimized only when fuzzing passed, and saved only when minimizing passed too.
+    #[test]
+    fn the_fuzz_workflow_saves_no_corpus_from_a_failed_run() {
+        let workflow = include_str!("../../.github/workflows/fuzz.yml").replace("\r\n", "\n");
+        let condition = |step: &str| {
+            let start = workflow
+                .find(&format!("- name: {step}\n"))
+                .unwrap_or_else(|| panic!("fuzz.yml has no step `{step}`; update this test"));
+            let rest = &workflow[start..];
+            let end = rest[1..]
+                .find("- name: ")
+                .map_or(rest.len(), |next| next + 1);
+            rest[..end]
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("if: "))
+                .unwrap_or_else(|| panic!("the step `{step}` of fuzz.yml has no condition"))
+                .to_owned()
+        };
+        let scheduled =
+            "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')";
+        assert_eq!(
+            condition("Minimize the corpora"),
+            format!("${{{{ {scheduled} && steps.fuzz.outcome == 'success' }}}}")
+        );
+        assert_eq!(
+            condition("Save the corpora for the next run"),
+            format!(
+                "${{{{ {scheduled} && steps.fuzz.outcome == 'success' && steps.minimize.outcome == 'success' }}}}"
+            )
+        );
+    }
+
     /// The jobs of these workflows are, or are to become, required checks of `main`'s ruleset, and the merge queue waits for every required check on the commit it is about to merge, so they must run there too (AGENTS.md, "Workflow conventions"; the review of 2026-10-27, finding H1).
     #[test]
     fn the_workflows_with_required_checks_run_in_the_merge_queue() {

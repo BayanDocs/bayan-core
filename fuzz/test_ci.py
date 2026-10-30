@@ -10,6 +10,8 @@ import io
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,8 +22,10 @@ import ci
 # The input that the fake targets below fail on, or run slowly on. It holds a workflow command, which must never reach the job log as one, and like every input that fails it must not reach the job log or summary at all.
 INPUT = "::error::quoted from an input"
 
-# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, and the folder that holds it says how it behaves. Named crash, timeout, oom or leak, it fails as libFuzzer does: it prints libFuzzer's report and the input (in hex, as text and in Base64), keeps the input in a file named by what went wrong, and exits with libFuzzer's code; named broken, it exits with an error without keeping an input. Otherwise it passes, after keeping an input that ran slowly, which libFuzzer also prints in Base64. In merge mode it copies the corpus into the output folder and prints libFuzzer's summary; named sanitizer or signal, a merge prints a sanitizer's or libFuzzer's report and keeps the input that caused it, named report-only it prints a report without keeping an input, and named silent it prints no summary, and these four copy nothing, so that a test sees whether the corpus was replaced by what a failed merge left.
+# A stand-in for a fuzz target built with libFuzzer: it prints a status line and final statistics as libFuzzer does, to standard error, where libFuzzer writes everything, and the folder that holds it says how it behaves. Named crash, timeout, oom or leak, it fails as libFuzzer does: it prints libFuzzer's report and the input (in hex, as text and in Base64), keeps the input in a file named by what went wrong, and exits with libFuzzer's code; named crash, it also prints a panic message that quotes the input, as Rust does, to standard error, and a line to standard output, as a target that prints something itself would; named broken, it exits with an error without keeping an input. Otherwise it passes, after keeping an input that ran slowly, which libFuzzer also prints in Base64. In merge mode it copies the corpus into the output folder and prints libFuzzer's summary; named sanitizer or signal, a merge prints a sanitizer's or libFuzzer's report and keeps the input that caused it, named report-only it prints a report without keeping an input, and named silent it prints no summary, and these four copy nothing, so that a test sees whether the corpus was replaced by what a failed merge left.
 FAKE_TARGET = """#!/bin/sh
+# Everything goes to standard error, as from libFuzzer, except what goes to file descriptor 3, the standard output.
+exec 3>&1 1>&2
 mode="$(basename "$(dirname "$0")")"
 prefix=
 merge=
@@ -64,6 +68,7 @@ case "$mode" in
   crash)
     echo "thread '<unnamed>' panicked at fuzz_targets/zip_archive.rs:9:5:"
     echo 'a message that quotes the input: @INPUT@'
+    echo 'a line that the target printed itself: @INPUT@' >&3
     echo "==1== ERROR: libFuzzer: deadly signal"
     echo "    #0 0x55555555 in __sanitizer_print_stack_trace"
     dump crash-0123
@@ -356,6 +361,29 @@ class Output(Isolated):
         self.assertNotIn("::", log)
         self.assertNotIn(ci.KEPT_PRIVATE, log)
         self.assert_shows_nothing_of([work / "logs" / "zip_archive.log"], log)
+
+
+class Process(Isolated):
+    """Runs ci.py as a process of its own, as the workflow does, and reads what it really writes to standard output and standard error. A target's output that escaped its log, through a change to run_one for example, would show only there: the tests above read Python's sys.stdout, which a target never writes to."""
+
+    def ci(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        environment = dict(os.environ, GITHUB_ACTIONS="true", GITHUB_STEP_SUMMARY=str(self.folder / "summary.md"))
+        return subprocess.run([sys.executable, "-I", str(ci.FUZZ / "ci.py"), *arguments], capture_output=True, text=True, env=environment, check=False)
+
+    def test_in_github_actions_nothing_a_target_writes_reaches_the_job_log(self) -> None:
+        work, seeds = self.folder / "work", str(self.folder / "seeds")
+        passed = self.ci("run", "package", "--seconds", "1", "--seeds", seeds, "--work", str(work), "--binaries", str(self.fake_targets(["package"])))
+        failed = self.ci("run", "zip_archive", "--seconds", "1", "--seeds", seeds, "--work", str(work), "--binaries", str(self.fake_named("crash")))
+        (work / "corpus" / "zip_archive" / "input").write_bytes(b"x")
+        merged = self.ci("minimize", "zip_archive", "--work", str(work), "--binaries", str(self.fake_named("signal")))
+        self.assertEqual([process.returncode for process in (passed, failed, merged)], [0, 1, 1])
+        # ci.py writes nothing to standard error itself, so anything there would have come from a target.
+        self.assertEqual([process.stderr for process in (passed, failed, merged)], ["", "", ""])
+        self.assertIn("package: passed after", passed.stdout)
+        self.assertIn("zip_archive: failed: crash\n", failed.stdout)
+        self.assertIn("zip_archive: minimizing failed: crash\n", merged.stdout)
+        logs = [work / "logs" / name for name in ("package.log", "zip_archive.log", "zip_archive-minimize.log")]
+        self.assert_shows_nothing_of(logs, passed.stdout, failed.stdout, merged.stdout, (self.folder / "summary.md").read_text())
 
 
 if __name__ == "__main__":
