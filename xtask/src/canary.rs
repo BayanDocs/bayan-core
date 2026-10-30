@@ -1,10 +1,14 @@
 //! The lint canaries: deliberately broken code in `xtask/lint-canary` that must be rejected (CORE-001, acceptance criterion AC-2).
 //!
+//! Most cases are judged by the exit status and the messages of Clippy or the compiler. Three are lint exceptions that no one wrote out in full, which Clippy and the compiler accept, so the lint audit of the Clippy step judges them (CORE-009): the case is compiled with the audit's force-warned lints, and the audit must find the lints that the case silences where no exception written out in full covers them (`lint_audit/`).
+//!
 //! Each case is compiled on its own, in its own build folder, by passing `--cfg bayan_lint_canary="<case>"` to the compiler after `--`. That adds the switch without replacing any other compiler flag, so the cases are compiled with the project's real flags, from `.cargo/config.toml`, the Cargo configuration outside the repository and the environment. A configuration mistake that silently switches a rule off, such as a misspelled path in `clippy.toml` (which Clippy ignores without a word) or a flag such as `--cap-lints=allow`, makes a canary compile cleanly, and the gate fails.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use crate::policy::ClippyConfig;
+use crate::lint_audit::{self, Guarded};
+use crate::policy::{ClippyConfig, Package};
 use crate::{json, process};
 
 /// Which program compiles a case.
@@ -14,6 +18,8 @@ pub enum Tool {
     Clippy,
     /// `cargo rustc --lib`: for the rules the compiler itself enforces, which make code fail to compile at all.
     Rustc,
+    /// `cargo clippy` with the lint audit's force-warned lints: for lint exceptions that Clippy and the compiler accept and the lint audit must reject.
+    Audit,
 }
 
 /// One case of `xtask/lint-canary/src/lib.rs`.
@@ -25,7 +31,7 @@ pub struct Case {
 }
 
 /// Every case, in the order they run.
-pub const CASES: [Case; 10] = [
+pub const CASES: [Case; 13] = [
     Case {
         name: "disallowed_methods",
         tool: Tool::Clippy,
@@ -66,7 +72,38 @@ pub const CASES: [Case; 10] = [
         name: "unsafe_expect",
         tool: Tool::Rustc,
     },
+    Case {
+        name: "split_allow",
+        tool: Tool::Audit,
+    },
+    Case {
+        name: "split_expect",
+        tool: Tool::Audit,
+    },
+    Case {
+        name: "allow_in_foreign_macro",
+        tool: Tool::Audit,
+    },
 ];
+
+/// The lints that each case of the lint audit silences, which the audit must find where no exception written out in full covers them: the hash-map ban that the lint tables turn on, and `unused_must_use`, which the compiler turns on by default.
+fn silenced(case: &str) -> &'static [&'static str] {
+    match case {
+        "split_allow" => &["clippy::disallowed_types", "unused_must_use"],
+        "split_expect" | "allow_in_foreign_macro" => &["clippy::disallowed_types"],
+        _ => &[],
+    }
+}
+
+/// What the lint audit needs to judge its cases: the workspace members, the files that the source check read, and the force-warned lints.
+pub struct AuditInputs<'a> {
+    /// The workspace members.
+    pub packages: &'a [Package],
+    /// The Rust files that the source check read.
+    pub sources: &'a BTreeSet<PathBuf>,
+    /// The lints that the audit force-warns.
+    pub guarded: &'a Guarded,
+}
 
 /// What compiling a case produced.
 pub struct Outcome {
@@ -74,10 +111,16 @@ pub struct Outcome {
     pub success: bool,
     /// Everything it printed: Cargo's JSON messages and its error output.
     pub text: String,
+    /// What it printed on standard output: Cargo's JSON messages only.
+    pub messages: String,
 }
 
 /// Compiles every case and checks the result, printing one line per case.
-pub fn check_all(root: &Path, clippy_config: &ClippyConfig) -> Result<(), String> {
+pub fn check_all(
+    root: &Path,
+    clippy_config: &ClippyConfig,
+    audit: &AuditInputs<'_>,
+) -> Result<(), String> {
     // The canaries have their own build directory, so they never disturb the normal build, and each case has its own folder in it, so no case can reuse another's result. It is emptied first: Cargo replays the result of an earlier compilation when it believes nothing changed, and a guardrail must not depend on that belief.
     let target_dir = root.join("target").join(CANARY_DIR);
     match std::fs::remove_dir_all(&target_dir) {
@@ -87,15 +130,20 @@ pub fn check_all(root: &Path, clippy_config: &ClippyConfig) -> Result<(), String
         _ => {}
     }
     for case in &CASES {
-        let outcome = compile(root, &target_dir.join(case.name), case)?;
-        match judge(case.name, &outcome, clippy_config) {
+        let outcome = compile(root, &target_dir.join(case.name), case, audit.guarded)?;
+        let verdict = if case.tool == Tool::Audit {
+            judge_audit(root, case.name, &outcome, audit)
+        } else {
+            judge(case.name, &outcome, clippy_config)
+        };
+        match verdict {
             Ok(summary) => println!("    ok: canary `{}`: {summary}", case.name),
             Err(problem) => {
                 let diagnostics = json::string_values(&outcome.text, "rendered").concat();
                 return Err(format!(
                     "lint canary `{}`: {problem}\nReproduce with: {}\nWhat the compiler said:\n{}",
                     case.name,
-                    reproduction(case),
+                    reproduction(case, audit.guarded),
                     if diagnostics.is_empty() {
                         &outcome.text
                     } else {
@@ -114,39 +162,48 @@ const CANARY_DIR: &str = "lint-canary";
 /// Compiles one case in its own build directory.
 ///
 /// The switch `--cfg bayan_lint_canary="<case>"` goes after `--`, so Cargo hands it to the compiler of the canary crate only, in addition to the flags from `.cargo/config.toml`, Cargo's other configuration files and the environment. (Setting `CARGO_ENCODED_RUSTFLAGS` instead, as CORE-001 did, makes Cargo ignore all of those, so a flag that weakens the lints would go unnoticed.)
-fn compile(root: &Path, target_dir: &Path, case: &Case) -> Result<Outcome, String> {
+fn compile(
+    root: &Path,
+    target_dir: &Path,
+    case: &Case,
+    guarded: &Guarded,
+) -> Result<Outcome, String> {
     let mut command = process::cargo(root);
     command.args(compile_args(case));
     command
         .args(["--locked", "--message-format=json", "--target-dir"])
         .arg(target_dir)
         .arg("--")
-        .args(case_args(case));
+        .args(case_args(case, guarded));
     let output = process::capture(&mut command)?;
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let messages = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut text = messages.clone();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(Outcome {
         success: output.status.success(),
         text,
+        messages,
     })
 }
 
 /// The Cargo command and package that compile a case.
 fn compile_args(case: &Case) -> &'static [&'static str] {
     match case.tool {
-        Tool::Clippy => &["clippy", "--package", "lint-canary"],
+        Tool::Clippy | Tool::Audit => &["clippy", "--package", "lint-canary"],
         Tool::Rustc => &["rustc", "--package", "lint-canary", "--lib"],
     }
 }
 
-/// The arguments after `--`: the switch that selects the case, and for Clippy, warnings as errors as in the gate's Clippy step.
-fn case_args(case: &Case) -> Vec<String> {
+/// The arguments after `--`: the switch that selects the case; for Clippy, warnings as errors as in the gate's Clippy step; and for the lint audit, its force-warned lints, as in its audit runs.
+fn case_args(case: &Case, guarded: &Guarded) -> Vec<String> {
     let mut args = vec![
         "--cfg".to_owned(),
         format!("bayan_lint_canary=\"{}\"", case.name),
     ];
-    if case.tool == Tool::Clippy {
-        args.extend(["-D".to_owned(), "warnings".to_owned()]);
+    match case.tool {
+        Tool::Clippy => args.extend(["-D".to_owned(), "warnings".to_owned()]),
+        Tool::Audit => args.extend(guarded.force_warn_args()),
+        Tool::Rustc => {}
     }
     args
 }
@@ -255,6 +312,54 @@ pub fn judge(
     }
 }
 
+/// Decides whether the lint audit rejects a case of its own: the case must compile, and the audit must find every lint that the case silences ([`silenced`]) in the case's file, where no exception written out in full covers it. Returns a one-line summary, or what went wrong.
+fn judge_audit(
+    root: &Path,
+    case: &str,
+    outcome: &Outcome,
+    inputs: &AuditInputs<'_>,
+) -> Result<String, String> {
+    if !outcome.success {
+        return Err(
+            "it did not compile with the lint audit's force-warned lints, which only report and never fail a compilation".to_owned(),
+        );
+    }
+    let mut audit = lint_audit::Audit::new(root, inputs.packages, inputs.sources, inputs.guarded)?;
+    let config = lint_audit::Config {
+        test: false,
+        debug_assertions: true,
+        wasm32: false,
+        canary_case: Some(case.to_owned()),
+    };
+    audit.add_compilation(&format!("lint canary `{case}`"), &config, &outcome.messages)?;
+    let uncovered = audit.uncovered()?;
+    let file = format!("{case}.rs");
+    let missing: Vec<&str> = silenced(case)
+        .iter()
+        .copied()
+        .filter(|lint| {
+            !uncovered.iter().any(|found| {
+                found.lint == *lint
+                    && found
+                        .file
+                        .file_name()
+                        .is_some_and(|name| name == file.as_str())
+            })
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(format!(
+            "the lint audit rejected what the case silences, which Clippy accepts: {}",
+            silenced(case).join(", ")
+        ))
+    } else {
+        Err(format!(
+            "the lint audit did not reject {} in {file}, although no exception written out in full covers it there; is the audit still force-warning the lints that the lint tables and the compiler turn on?",
+            missing.join(", ")
+        ))
+    }
+}
+
 /// The case failed to compile, and the diagnostic code `code` (a lint name or an error number) was among the reasons.
 fn rejected(outcome: &Outcome, code: &str) -> Result<(), String> {
     if outcome.success {
@@ -327,8 +432,8 @@ fn mentions(outcome: &Outcome, text: &str, problem: &str) -> Result<(), String> 
 }
 
 /// A command a person can paste into a shell to see a case's diagnostics.
-fn reproduction(case: &Case) -> String {
-    let args: Vec<String> = case_args(case)
+fn reproduction(case: &Case, guarded: &Guarded) -> String {
+    let args: Vec<String> = case_args(case, guarded)
         .into_iter()
         .map(|arg| {
             if arg.contains('"') {
@@ -361,7 +466,19 @@ mod tests {
         Outcome {
             success: false,
             text: text.to_owned(),
+            messages: String::new(),
         }
+    }
+
+    /// A list of force-warned lints for the tests that need one.
+    fn guarded() -> Guarded {
+        Guarded::new(
+            &[],
+            &["unused_must_use".to_owned()],
+            "2024".to_owned(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap()
     }
 
     const METHODS_REJECTED: &str = r#"{"message":{"code":{"code":"clippy::disallowed_methods","explanation":null},"message":"use of a disallowed method `f32::sin`"}}
@@ -384,8 +501,45 @@ mod tests {
     }
 
     #[test]
+    fn the_lint_audit_must_reject_its_cases() {
+        let root = crate::workspace_root();
+        let packages = crate::policy::packages(&crate::policy::metadata(&root).unwrap()).unwrap();
+        let sources = BTreeSet::new();
+        let guarded = guarded();
+        let inputs = AuditInputs {
+            packages: &packages,
+            sources: &sources,
+            guarded: &guarded,
+        };
+        let finished = r#"{"reason":"build-finished","success":true}"#;
+        // A case that did not compile, and one in which the audit found nothing.
+        let problem = judge_audit(&root, "split_allow", &failed(finished), &inputs).unwrap_err();
+        assert!(problem.contains("did not compile"), "{problem}");
+        let compiled = Outcome {
+            success: true,
+            text: finished.to_owned(),
+            messages: finished.to_owned(),
+        };
+        let problem = judge_audit(&root, "split_allow", &compiled, &inputs).unwrap_err();
+        assert!(
+            problem.contains(
+                "did not reject clippy::disallowed_types, unused_must_use in split_allow.rs"
+            ),
+            "{problem}"
+        );
+    }
+
+    #[test]
     fn every_case_has_a_verdict() {
         for case in &CASES {
+            if case.tool == Tool::Audit {
+                assert!(
+                    !silenced(case.name).is_empty(),
+                    "the lint audit's case `{}` names no lint that it silences",
+                    case.name
+                );
+                continue;
+            }
             let verdict = judge(case.name, &failed(""), &clippy_config());
             assert!(
                 verdict
@@ -422,6 +576,7 @@ mod tests {
         let outcome = Outcome {
             success: true,
             text: String::new(),
+            messages: String::new(),
         };
         let problem = judge("unsafe_block", &outcome, &clippy_config()).unwrap_err();
         assert!(problem.contains("it compiled"), "{problem}");
@@ -444,7 +599,8 @@ mod tests {
                 "expect_with_reason",
                 &Outcome {
                     success: true,
-                    text: String::new()
+                    text: String::new(),
+                    messages: String::new(),
                 },
                 &clippy_config()
             )
@@ -458,6 +614,7 @@ mod tests {
         let accepted = Outcome {
             success: true,
             text: String::new(),
+            messages: String::new(),
         };
         assert!(judge("explicit_clamp", &accepted, &clippy_config()).is_ok());
         let problem = judge("explicit_clamp", &failed(""), &clippy_config()).unwrap_err();
@@ -471,7 +628,7 @@ mod tests {
             .find(|case| case.name == "unsafe_block")
             .unwrap();
         assert_eq!(
-            reproduction(case),
+            reproduction(case, &guarded()),
             "cargo rustc --package lint-canary --lib --target-dir target/lint-canary/unsafe_block -- --cfg 'bayan_lint_canary=\"unsafe_block\"'"
         );
         let case = CASES
@@ -479,7 +636,7 @@ mod tests {
             .find(|case| case.name == "expect_lint_groups")
             .unwrap();
         assert_eq!(
-            reproduction(case),
+            reproduction(case, &guarded()),
             "cargo clippy --package lint-canary --target-dir target/lint-canary/expect_lint_groups -- --cfg 'bayan_lint_canary=\"expect_lint_groups\"' -D warnings"
         );
     }
@@ -533,6 +690,7 @@ mod tests {
         let compiled = Outcome {
             success: true,
             text: String::new(),
+            messages: String::new(),
         };
         let problem = judge("expect_lint_groups", &compiled, &clippy_config()).unwrap_err();
         assert!(problem.contains("it compiled"), "{problem}");

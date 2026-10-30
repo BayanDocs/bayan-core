@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::dep_info::{self, DataFiles};
+use crate::lint_audit::{self, Guarded};
 use crate::outside_world::{self, Exemption};
 use crate::policy::Package;
 use crate::process::{self, cargo};
@@ -258,6 +259,8 @@ struct Gate {
     packages: Vec<Package>,
     /// Every Rust file that the source check read (`sources.rs`), which the Clippy step compares with the files that the compiler read (`dep_info.rs`).
     sources: BTreeSet<PathBuf>,
+    /// The lints that the lint audit force-warns (`lint_audit/`).
+    guarded: Guarded,
 }
 
 /// One step of the gate.
@@ -442,10 +445,15 @@ fn preflight(root: &Path) -> Result<Gate, String> {
     };
     let checked = sources::check(root, &packages, &allowed)?;
     println!("    {}", checked.summary);
+
+    // Read from the manifests and the pinned compiler, so that a lint added to a lint table, or a default lint that a new toolchain brings, is guarded from the same commit.
+    let guarded = Guarded::load(root, &packages)?;
+    println!("    {}", guarded.summary());
     Ok(Gate {
         root: root.to_path_buf(),
         packages,
         sources: checked.files,
+        guarded,
     })
 }
 
@@ -454,6 +462,8 @@ fn fmt(gate: &Gate) -> Result<(), String> {
 }
 
 /// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails. After each run, compares the files that the compiler read for every unit of a workspace member, as its dependency files list them, with the files that the source check read, Clippy's own two and [`DATA_FILES`] (`dep_info.rs`); after the last, checks that every member named in [`DATA_FILES`] read its files, and that the code that ships, as the compiler's record shows it, names the modules of the standard library that exist for the outside world only as [`OUTSIDE_WORLD`] allows (`outside_world.rs`).
+///
+/// Then the lint audit (`lint_audit/`): for every entry of [`CLIPPY_RUNS`] again, with the same platform and profile, Clippy compiles the workspace with every lint that the lint tables or the compiler turn on force-warned ([`audit_args`]), so that the compiler reports each occurrence also where an attribute silences it, and the step fails on every occurrence that no `#[expect(lint, reason = "…")]` written out in full in the source covers, whatever wrote the attribute that silences it: a macro of the workspace that assembles it from its arguments, a macro of another crate or a procedural macro. The audit runs judge nothing by their exit status; the Clippy runs before them stay the first line of enforcement.
 fn clippy_step(gate: &Gate) -> Result<(), String> {
     let members: Vec<&str> = gate
         .packages
@@ -496,6 +506,78 @@ fn clippy_step(gate: &Gate) -> Result<(), String> {
     println!("    {line}");
     let line = outside_world::check_code(&gate.root, comparison.shipped(), &OUTSIDE_WORLD)?;
     println!("    {line}");
+    lint_audit_runs(gate, &members)
+}
+
+/// The lint audit of the Clippy step: checks the skip list against the pinned compiler, then runs Clippy for every entry of [`CLIPPY_RUNS`] with the guarded lints force-warned, first for the units that are not tests and then for all targets, and fails on every silenced occurrence that no exception written out in full covers (`lint_audit/`).
+fn lint_audit_runs(gate: &Gate, members: &[&str]) -> Result<(), String> {
+    let started = Instant::now();
+    let line = lint_audit::check_refusals(&gate.root, &gate.guarded)?;
+    println!("    {line}");
+    let mut audit =
+        lint_audit::Audit::new(&gate.root, &gate.packages, &gate.sources, &gate.guarded)?;
+    for (index, run) in CLIPPY_RUNS.iter().enumerate() {
+        let heading = format!(
+            "Audit run {} of {}: {}",
+            index + 1,
+            CLIPPY_RUNS.len(),
+            describe(run)
+        );
+        println!("    {heading}");
+        let checked: Vec<&str> = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                run.target.is_none() || !NATIVE_ONLY.iter().any(|(name, _)| name == member)
+            })
+            .collect();
+        // The first audit run compiles the units that are not tests, so it must report a unit for every member with a library, binary or example; the second compiles every unit of every member.
+        let with_non_tests: Vec<&str> = checked
+            .iter()
+            .copied()
+            .filter(|member| {
+                gate.packages.iter().any(|package| {
+                    package.name == *member
+                        && package.targets.iter().any(|target| {
+                            !target.kinds.iter().any(|kind| {
+                                matches!(kind.as_str(), "test" | "bench" | "custom-build")
+                            })
+                        })
+                })
+            })
+            .collect();
+        let mut outputs = Vec::new();
+        for (units, required) in [
+            (AuditUnits::NonTests, &with_non_tests),
+            (AuditUnits::All, &checked),
+        ] {
+            let output = process::run_and_read_output(cargo(&gate.root).args(audit_args(
+                run,
+                units,
+                &gate.guarded,
+            )))
+            .and_then(|output| dep_info::units(&output, &gate.packages, required).map(|_| output))
+            .map_err(|problem| format!("{heading}: {problem}"))?;
+            outputs.push(output);
+        }
+        let config = lint_audit::Config {
+            test: false,
+            debug_assertions: !run.release,
+            wasm32: run
+                .target
+                .is_some_and(|target| target.split('-').next() == Some("wasm32")),
+            canary_case: None,
+        };
+        let label = format!("audit run {}", index + 1);
+        let line = audit.add_run(&label, &config, &outputs[0], &outputs[1])?;
+        println!("    {line}");
+    }
+    let line = audit.finish()?;
+    println!("    {line}");
+    println!(
+        "    the lint audit took {} of this step",
+        duration(started.elapsed())
+    );
     Ok(())
 }
 
@@ -536,6 +618,35 @@ fn clippy_args(run: &ClippyRun) -> Vec<String> {
         ]
         .map(str::to_owned),
     );
+    args
+}
+
+/// Which units an audit run compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditUnits {
+    /// The units that are not tests: the libraries, binaries and examples.
+    NonTests,
+    /// The units of all targets, as the Clippy runs compile them.
+    All,
+}
+
+/// The arguments after `cargo` for one audit run of the lint audit: those of the Clippy run `run` ([`clippy_args`], unchanged up to the message format), compiling `units`, with `--message-format=json`, so that the diagnostics arrive as JSON messages instead of text, and with every lint of `guarded` force-warned after `--` in place of `-D warnings`. A force-warned lint is reported even where an attribute silences it, as a warning that ignores `-D warnings`, so the audit judges the messages, never the exit status.
+fn audit_args(run: &ClippyRun, units: AuditUnits, guarded: &Guarded) -> Vec<String> {
+    let mut args = Vec::new();
+    for arg in clippy_args(run) {
+        match arg.as_str() {
+            "--all-targets" if units == AuditUnits::NonTests => {
+                args.extend(["--lib", "--bins", "--examples"].map(str::to_owned));
+            }
+            "--message-format=json-render-diagnostics" => {
+                args.push("--message-format=json".to_owned());
+                break;
+            }
+            _ => args.push(arg),
+        }
+    }
+    args.push("--".to_owned());
+    args.extend(guarded.force_warn_args());
     args
 }
 
@@ -628,7 +739,12 @@ fn guardrails(gate: &Gate) -> Result<(), String> {
     for line in policy::check(&workspace, &native_only)? {
         println!("    ok: {line}");
     }
-    canary::check_all(&gate.root, &workspace.clippy_config)
+    let audit = canary::AuditInputs {
+        packages: &gate.packages,
+        sources: &gate.sources,
+        guarded: &gate.guarded,
+    };
+    canary::check_all(&gate.root, &workspace.clippy_config, &audit)
 }
 
 fn supply_chain(gate: &Gate) -> Result<(), String> {
@@ -812,6 +928,35 @@ mod tests {
                 "determinism"
             ]
         );
+    }
+
+    /// The audit runs check each Clippy run's platform and profile, as its arguments set them, with the guarded lints force-warned and the diagnostics as JSON, first for the units that are not tests and then for all targets. The Clippy runs themselves keep their arguments, so `--force-warn` never reaches them (acceptance criterion AC-5 of CORE-009).
+    #[test]
+    fn audits_each_clippy_run_with_the_guarded_lints_force_warned() {
+        let guarded = Guarded::new(
+            &[],
+            &["unknown_lints".to_owned(), "unused_must_use".to_owned()],
+            "2024".to_owned(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        for run in &CLIPPY_RUNS {
+            let normal = clippy_args(run).join(" ");
+            assert!(!normal.contains("--force-warn"), "{normal}");
+            let tail = "--message-format=json-render-diagnostics -- -D warnings";
+            let common = normal.strip_suffix(tail).unwrap();
+            let force_warned =
+                "--message-format=json -- --force-warn unknown_lints --force-warn unused_must_use";
+            assert_eq!(
+                audit_args(run, AuditUnits::All, &guarded).join(" "),
+                format!("{common}{force_warned}")
+            );
+            assert_eq!(
+                audit_args(run, AuditUnits::NonTests, &guarded).join(" "),
+                format!("{common}{force_warned}")
+                    .replace("--all-targets", "--lib --bins --examples")
+            );
+        }
     }
 
     #[test]

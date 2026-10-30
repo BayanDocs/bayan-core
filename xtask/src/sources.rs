@@ -23,7 +23,7 @@
 //! - A `[…]` written directly after a metavariable (`$name [ … ]`), a repetition (`$( … )* [ … ]`), or either with a `!` between (`$name ![ … ]`), is read as an attribute, because the substitution before it could expand to `#` or `#!`. This catches the bracket even when its `#` is supplied separately, as when a benign attribute at the call site gives up its `#` to a `$name:tt` and the macro writes `$name [path = "…"]`.
 //! - The pass-on exception above still holds: `$(#[$name])*`, written against its bracket and bound by `#[$name:meta]`, passes on the caller's attribute, which this check reads where it is written.
 //!
-//! **Known limitation, backed by the compiler's record for files (issue #7).** These rules model how the compiler assembles attributes; they do not prove that no other form exists, and one is known to pass them. A macro can keep the `#` of an attribute written in full where it is called, drop that attribute's bracket, and write the `#` before a bracket group it was handed separately: `($hash:tt $dropped:tt, $bracket:tt) => { $hash $bracket mod hidden; }`, called as `m!(#[doc = "…"], [path = "…"])`, or the same without the comma. The macro's code holds neither a `#` nor a `[`, and where the macro is called the `[path = …]` follows a comma or a `]`, not a `#`, so no rule reads it as an attribute. The compiler's own record closes this for every form that makes the compiler read a file: after each Clippy run, the Clippy step reads the dependency file that the compiler wrote for every unit of a workspace member, which lists every file it read, and fails if one of them is not a file that this check read, Clippy's own configuration or a data file that `DATA_FILES` in `verify.rs` lists for the member (`dep_info.rs`). The `#[path]` above fails there, naming the file it reads. Such a form cannot choose code either, because conditions are checked wherever `cfg` and `cfg_attr` stand, inside an attribute or not, and the bare identifier `clippy` is rejected anywhere. But it can still write a lint attribute that neither this check nor Clippy sees: handed `[allow(clippy::disallowed_types)]`, it switches off the hash-map ban of ADR-0005 §5 for the item it precedes, and Clippy's `allow_attributes` lint, which rejects an `#[allow]` written out, does not report one that a macro assembles; an `#[expect(…)]` passes the same way. That works for every lint that is not set to `forbid`, such as `clippy::disallowed_types` or `clippy::unwrap_used`; only the forbidden ones, the float bans among them, cannot be lowered (error E0453). So reviewers still check every macro that takes a `#` or a bracket group as a `tt`, until a check closes this too.
+//! **Known limitation, backed by the compiler's record for files (issue #7).** These rules model how the compiler assembles attributes; they do not prove that no other form exists, and one is known to pass them. A macro can keep the `#` of an attribute written in full where it is called, drop that attribute's bracket, and write the `#` before a bracket group it was handed separately: `($hash:tt $dropped:tt, $bracket:tt) => { $hash $bracket mod hidden; }`, called as `m!(#[doc = "…"], [path = "…"])`, or the same without the comma. The macro's code holds neither a `#` nor a `[`, and where the macro is called the `[path = …]` follows a comma or a `]`, not a `#`, so no rule reads it as an attribute. The compiler's own record closes this for every form that makes the compiler read a file: after each Clippy run, the Clippy step reads the dependency file that the compiler wrote for every unit of a workspace member, which lists every file it read, and fails if one of them is not a file that this check read, Clippy's own configuration or a data file that `DATA_FILES` in `verify.rs` lists for the member (`dep_info.rs`). The `#[path]` above fails there, naming the file it reads. Such a form cannot choose code either, because conditions are checked wherever `cfg` and `cfg_attr` stand, inside an attribute or not, and the bare identifier `clippy` is rejected anywhere. It can still write a lint attribute that neither this check nor Clippy sees: handed `[allow(clippy::disallowed_types)]`, it switches off the hash-map ban of ADR-0005 §5 for the item it precedes, and Clippy's `allow_attributes` lint, which rejects an `#[allow]` written out, does not report one that a macro assembles; an `#[expect(…)]` passes the same way. That works for every lint that is not set to `forbid`, such as `clippy::disallowed_types` or `clippy::unwrap_used`; only the forbidden ones, the float bans among them, cannot be lowered (error E0453). The compiler's own record closes this too: the lint audit at the end of the Clippy step compiles the workspace with every lint that the lint tables or the compiler turn on force-warned, so that the compiler reports each occurrence also where an attribute silences it, and fails on every one that no `#[expect(…, reason = "…")]` written out in full covers, whatever wrote the attribute (`lint_audit/`, CORE-009).
 //!
 //! # The files it reads
 //!
@@ -148,13 +148,17 @@ fn unapproved_why(allowed: &Allowed<'_>) -> String {
     )
 }
 
-/// A token of Rust source, as far as this check needs to tell them apart, and the line on which it starts. The outside-world check reads the same tokens (`outside_world.rs`).
+/// A token of Rust source, as far as this check needs to tell them apart, and where it stands. The outside-world check and the lint audit read the same tokens (`outside_world.rs`, `lint_audit/`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token<'a> {
     /// What it is.
     pub kind: Kind<'a>,
     /// The line on which it starts, counting from 1.
     pub line: usize,
+    /// The position of its first byte in the source.
+    pub start: usize,
+    /// The position after its last byte in the source.
+    pub end: usize,
 }
 
 /// The kinds of tokens this check tells apart.
@@ -283,6 +287,7 @@ fn check_condition(
     let Token {
         kind: Kind::Ident(word),
         line,
+        ..
     } = tokens[index]
     else {
         return None;
@@ -536,13 +541,23 @@ fn after_substitution(tokens: &[Token<'_>], opening: &[Option<usize>], bracket: 
 }
 
 /// A rule of a `macro_rules!` definition.
-struct Rule<'a> {
+pub struct Rule<'a> {
+    /// The position of the definition's `macro_rules` token.
+    pub definition: usize,
     /// The positions of the tokens of the pattern that the macro's input must match (the matcher), brackets excluded.
-    matcher: Range<usize>,
+    pub matcher: Range<usize>,
     /// The positions of the tokens of the code the rule writes (the transcriber), brackets excluded.
-    transcriber: Range<usize>,
+    pub transcriber: Range<usize>,
     /// The metavariables that the matcher binds to a whole attribute written where the macro is called: `name` in `#[$name:meta]` or `#![$name:meta]`.
     attributes: BTreeSet<&'a str>,
+}
+
+/// Every rule of every `macro_rules!` definition in `tokens` (whose closing brackets are `closing`), also of definitions inside other macros, or an error for a definition this reader cannot follow. The lint audit reads which code a macro writes from them (`lint_audit/`).
+pub fn macro_rules<'a>(
+    tokens: &[Token<'a>],
+    closing: &[Option<usize>],
+) -> Result<Vec<Rule<'a>>, String> {
+    rules_of_macros(tokens, closing, &attributes(tokens, closing))
 }
 
 /// Every rule of every `macro_rules!` definition in `tokens`, also of definitions inside other macros. A definition that this reader cannot follow is an error, so that no attribute can hide in it. (The word `macro_rules` without `!` defines nothing, for the compiler as here. Reading too few definitions could only make the check stricter: an attribute outside every rule may not be built from a metavariable at all.)
@@ -590,6 +605,7 @@ fn rules_of_macros<'a>(
                 .ok_or_else(unreadable)?;
             let matcher = at + 1..matcher_end;
             rules.push(Rule {
+                definition: index,
                 attributes: attribute_bindings(tokens, attributes, &matcher),
                 matcher,
                 transcriber: transcriber_start + 1..transcriber_end,
@@ -777,7 +793,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Token<'_>>, String> {
             Some(Kind::Other)
         };
         if let Some(kind) = kind {
-            tokens.push(Token { kind, line });
+            tokens.push(Token {
+                kind,
+                line,
+                start,
+                end: position,
+            });
         }
         line += breaks(start, position);
     }
