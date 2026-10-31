@@ -1521,6 +1521,28 @@ mod tests {
         assert!(scan("fn f() { (] }").is_err());
     }
 
+    #[test]
+    fn names_the_modules_that_hold_items_as_items_lists_them() {
+        // HOLDER_RENAMED and AGENTS.md name the modules by hand; they must stay the ones that ITEMS implies.
+        let holders: BTreeSet<&str> = ITEMS
+            .iter()
+            .filter(|item| item.written == Written::Path)
+            .map(Item::owner)
+            .collect();
+        assert_eq!(
+            holders,
+            BTreeSet::from(["backtrace", "hash", "hash_map", "io", "path", "thread"])
+        );
+        assert!(
+            HOLDER_RENAMED.contains("(thread, io, hash, hash_map, path or backtrace)"),
+            "{HOLDER_RENAMED}"
+        );
+        // Every path of ITEMS is written once, from std.
+        let paths: BTreeSet<&str> = ITEMS.iter().map(|item| item.path).collect();
+        assert_eq!(paths.len(), ITEMS.len());
+        assert!(ITEMS.iter().all(|item| item.path.starts_with("std::")));
+    }
+
     /// The module of `item`, as code writes it, and the last name of that module.
     fn module_of(item: &Item) -> (&'static str, &'static str) {
         let (module, _) = item.path.rsplit_once("::").unwrap();
