@@ -1,6 +1,6 @@
-//! The code that ships of the engine's crates reaches the outside world through none of the ways that Rust's standard library offers for it.
+//! The code that ships of the engine's crates reaches the outside world through none of the ways that Rust's standard library offers for it, as far as a model of the source text can tell.
 //!
-//! The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets, the console and other processes are the host's, and the host passes the engine what it needs through the protocol's host services. Nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5), and the engine reads no environment variables (architecture §12). This check enforces the part of those rules that the source text shows. The code that ships may name none of the five modules of Rust's standard library that exist for the outside world, `std::env` (environment variables, the command line, the current folder), `std::fs` (files), `std::net` (sockets), `std::process` (other processes, and ending this one) and `std::time` (clocks), and none of the items of [`ITEMS`], through which std reaches the outside world outside those modules: the file system through the methods of `std::path::Path`, the operating system's randomness through `RandomState`, the environment through threads started without a stack size and through backtraces, the clock through sleeping and waiting with a timeout, the operating system through `available_parallelism`, and the console through `std::io::stdin`, `stdout` and `stderr`. The exceptions are the workspace members that `OUTSIDE_WORLD` in `verify.rs` lists, each with the modules, or the items of them, that it may use and the reason, and the uses of items that `APPROVED_ITEMS` there approves for one file each, with the reason why that use cannot reach the outside world. Dependencies reach the outside world too (see "Known limitations" below), so passing it means that the workspace's own code reaches the outside world through none of these ways, not that nothing it calls can.
+//! The engine never touches the outside world itself (ADR-0012 §5): clocks, environment variables, files, sockets, the console and other processes are the host's, and the host passes the engine what it needs through the protocol's host services. Nothing that affects the engine's output may depend on the clock or the environment (ADR-0005 §5), and the engine reads no environment variables (architecture §12). This check enforces the part of those rules that the source text shows. The code that ships may name none of the five modules of Rust's standard library that exist for the outside world, `std::env` (environment variables, the command line, the current folder), `std::fs` (files), `std::net` (sockets), `std::process` (other processes, and ending this one) and `std::time` (clocks), and none of the items of [`ITEMS`], through which std reaches the outside world outside those modules: the file system through the methods of `std::path::Path`, the operating system's randomness through `RandomState`, the environment through threads started without a stack size and through backtraces, the clock through sleeping and waiting with a timeout, the operating system through `available_parallelism` and the errors of `std::io::Error` that come from it, and the console through `std::io::stdin`, `stdout` and `stderr`. The exceptions are the workspace members that `OUTSIDE_WORLD` in `verify.rs` lists, each with the modules, or the items of them, that it may use and the reason, and the uses of items that `APPROVED_ITEMS` there approves for one file each, counted, with the reason why those uses cannot reach the outside world. The check reads source text, not the compiler's name resolution, so its rules are a model of the forms in which code can name these modules and items, as far as they have been found, and it rejects the forms that could hide them from that model; a form that no one has found yet could still pass. Dependencies reach the outside world too. "Known limitations" below lists what the check does not see, so a pass means that the workspace's own code reaches the outside world through none of the forms that this model knows, not that nothing it calls can.
 //!
 //! The environment that the code that ships reads while it is compiled, with `env!` and `option_env!`, is checked separately, from the compiler's record of it (`dep_info.rs`).
 //!
@@ -20,9 +20,9 @@
 //!
 //! - a path from `std` into one of the five modules, such as `std::time::Instant`, `::std::env::var` or `use std::{fs, io}`, also in a group inside a group (`use std::{{net}}`), whatever spaces, comments or line breaks stand between its words, and also with raw identifiers (`r#std::r#env`). For an entry that lists items, the path must name a listed item right after its module (`std::time::Instant`, `use std::time::{Instant}`); the module on its own (`use std::time;`), any other of its items and `std::time::*` are rejected.
 //!
-//! In the code that ships of every member that `OUTSIDE_WORLD` does not list with whole modules, unless `APPROVED_ITEMS` approves the item for the file:
+//! In the code that ships of every member that `OUTSIDE_WORLD` does not list with whole modules, unless `APPROVED_ITEMS` approves the item for the file, and then beyond the number of uses that it approves:
 //!
-//! - an item of [`ITEMS`], found as [`Written`] describes for each: an item written as a path by the last name of its module, `::` and its own name, wherever that pair stands (`std::thread::spawn`, and also `thread::spawn` once `use std::thread;` has bound the module, or `crate::thread::spawn` once a re-export has), also as an entry of a `use` group (`use std::thread::{spawn}`) and when the item is renamed (`use std::thread::spawn as go;`); a method of `std::path::Path` by its name after a single `.`, so that a call on a value of any origin counts, also on the `&Path` that a dependency returns, and after `Path::` or `>::`; and a method with a name of its own (`recv_timeout`, `wait_timeout`, …) wherever its name stands.
+//! - an item of [`ITEMS`], found as [`Written`] describes for each: an item written as a path by the last name of its module, `::` and its own name, wherever that pair stands (`std::thread::spawn`, and also `thread::spawn` once `use std::thread;` has bound the module, or `crate::thread::spawn` once a re-export has), also as an entry of a `use` group (`use std::thread::{spawn}`) and when the item is renamed (`use std::thread::spawn as go;`); a method or function such as `Path`'s `exists` or `std::io::Error::last_os_error` by its name after a single `.` and after any `::` outside a `use` declaration, so that a call on a value of any origin counts, also on the `&Path` that a dependency returns, and so does a call through any name of its type (`Self::exists`, `<PathBuf as Deref>::Target::exists`, a type alias); and a method with a name of its own (`recv_timeout`, `wait_timeout`, …) wherever its name stands.
 //!
 //! In the code that ships of every member, ways to name std, or to build a path in a macro, that would let a later path reach those modules without writing `std` in front of them:
 //!
@@ -30,28 +30,37 @@
 //! - `std::*`, and `*` in a group after `std::`, which import every module of std under its own name, so that `env::var` reaches `std::env`;
 //! - `self` in a group after `std::`, as in `use std::{self as host}`, which renames std;
 //! - `std::` followed by anything but a name or a group, such as a macro's metavariable (`std::$module`);
-//! - in a macro, a path that continues from a metavariable into one of the five names or into another metavariable (`$root::env`, `$root::$module`), because a macro can be handed `std` as the first word of a longer path; and a metavariable anywhere in a `use` or `extern crate` declaration (`use $root as host;`, `use {$root as host};`, `use $root::*;`), which could rename std or import all of it. `$crate`, which always names the macro's own crate, is fine.
+//! - in a macro, a path that continues from a metavariable into one of the five names or into another metavariable (`$root::env`, `$root::$module`), because a macro can be handed `std` as the first word of a longer path; and a metavariable anywhere in a `use` or `extern crate` declaration (`use $root as host;`, `use {$root as host};`, `use $root::*;`), which could rename std or import all of it. `$crate`, which always names the macro's own crate, is fine;
+//! - a `::` directly after a `)`, which only the separator of a macro's repetition writes (`$($part)::+`), and a `::` that follows no name before a metavariable (`$($root)*::$module`, `$($root)?::$module`): either could join `std` and a module, or a module and an item, that are handed in separately.
 //!
-//! In the code that ships of every member whose code is checked for [`ITEMS`], the ways that would let a later path or call reach an item without its module's name and its own standing together, or a method's name after its `.`:
+//! In the code that ships of every member whose code is checked for [`ITEMS`], the forms found so far that would let a later path or call reach an item without its module's name and its own standing together, or a method's name after a `.` or a `::`:
 //!
-//! - a module that holds items of [`ITEMS`] (`thread`, `io`, `hash`, `hash_map`, `path` and `backtrace`, whatever path leads to it) renamed in a `use` declaration (`use std::thread as t;`, `use std::thread::{self as t};`), or followed by `*` (`use std::io::*;`), which imports its items under their own names;
-//! - in a macro, a path from a metavariable into the name of an item or of such a module (`$module::spawn`, `$root::thread`), a path from such a module into a metavariable (`thread::$item`), and a method or field named by a metavariable (`$value.$method`);
-//! - an item's name after a `::` that follows no name (`::spawn`), and a `::` or a `.` that stands on its own instead of in a path or before a method, a field or a tuple's index, as when it is handed to a macro: with them, a macro handed `thread`, `::` and `spawn` separately could put them together.
+//! - a module that holds items of [`ITEMS`] (`thread`, `io`, `hash`, `hash_map`, `path` and `backtrace`, whatever path leads to it) renamed in a `use` declaration (`use std::thread as t;`, `use std::thread::{self as t};`, also in a group inside a group, `use std::thread::{{self as t}};`), or followed by `*` (`use std::io::*;`), which imports its items under their own names;
+//! - an item of [`ITEMS`] renamed in a `use` declaration (`use std::thread::Builder as Threads;`) or named again by a type alias (`type Threads = std::thread::Builder;`, and `type Threads = Builder;` after a `use`), whose new name could carry it to other files: both count by the item's own name, whatever path leads to it;
+//! - in a macro, a path from a metavariable into the name of an item or of such a module (`$module::spawn`, `$root::thread`), a path from such a module into a metavariable (`thread::$item`), and a method, field or function named by a metavariable (`$value.$method`, `Type::$function`, `<T>::$function`);
+//! - a macro's fragment of the kind `tt` (`$name:tt`, also in `$($body:tt)*`), which can take a `::` or a `.` on its own from what the macro is handed and put it between names, also between names that the macro writes itself (`m!(:: x)` with `thread $separator spawn`), so that the path or the method call it builds is written nowhere. Bind the pieces with the fragment that matches them (`ident`, `path`, `expr`, `ty`, …): the macro cannot take such a fragment apart;
+//! - an item's name after a `::` that follows no name (`::spawn`), and a `::` or a `.` that stands on its own instead of in a path or before a method, a field or a tuple's index, as when it is handed to a macro (also a `::` before a `*` that does not end a glob import, or before the `+` or `?` of a repetition): with them, a macro of a dependency handed `thread`, `::` and `spawn` separately could put them together.
 //!
 //! In the preflight, before anything is built, a member that `OUTSIDE_WORLD` does not name may not depend on one that it names, except for its tests (`[dev-dependencies]`), so that code which ships cannot reach the outside world through a member that may.
 //!
-//! The lists cannot go stale: an entry of `OUTSIDE_WORLD` for a member that does not exist, an entry without modules or items, a module that is not one of the five, an item that is not one of a module of the five, and a module or item that the member's code that ships no longer uses all fail; so does an entry of `APPROVED_ITEMS` for a member that does not exist or whose code is not checked for [`ITEMS`], an item that is not one of [`ITEMS`], and an approved item that the file no longer uses.
+//! An entry of `APPROVED_ITEMS` approves an exact number of uses of its item in its file: a use beyond that number fails until the entry is reviewed again.
+//!
+//! The lists cannot go stale: an entry of `OUTSIDE_WORLD` for a member that does not exist, an entry without modules or items, a module that is not one of the five, an item that is not one of a module of the five, and a module or item that the member's code that ships no longer uses all fail; so does an entry of `APPROVED_ITEMS` for a member that does not exist or whose code is not checked for [`ITEMS`], an item that is not one of [`ITEMS`], and a file that makes fewer uses of its item than the entry approves.
 //!
 //! # Known limitations
 //!
-//! These rules model Rust's tokens and paths; they are not the compiler's name resolution, and they read only the workspace's own code.
+//! These rules model Rust's tokens and paths, as far as their forms have been found; they are not the compiler's name resolution, and they read only the workspace's own code.
 //!
+//! - A form of naming a module or an item that the model does not know yet is not seen. Each form found so far is either read (a pair of module and item, a method's name after `.` or `::`) or rejected (the renames, aliases and macro forms above); a new one is added here when it is found.
+//! - Within the uses that `APPROVED_ITEMS` counts, the approval relies on reviewing the whole approved file whenever it changes: a closure or a loop around the one counted use of `std::thread::Builder` could still start more threads, or threads without a stack size.
 //! - A path that never writes the module's name is not seen: a dependency that re-exports a module or an item of std under another name, or a macro of a dependency that expands to such a path. Dependencies are reviewed when they are added (ADR-0017).
 //! - Functions of dependencies that reach the outside world themselves are not seen either, such as cfb's `cfb::open(path)`, `open_rw(path)` and `create(path)`, which open files with `std::fs`, and the clock of web-time; bayan-opc calls only `CompoundFile::open` on the bytes it is handed (a `Cursor`).
-//! - A method of `std::path::Path` counts wherever its name follows a single `.`, because the check cannot tell the types of values: a method or field of another type with one of these names (`exists`, `metadata`, `is_dir`, …) fails too. Rename it; for a dependency's method that does not touch the file system, such as cfb's in-memory `CompoundFile::exists`, `APPROVED_ITEMS` can approve the name for the file, with the reason, in a reviewed pull request.
+//! - A hash map or set that an `#[expect(clippy::disallowed_types, reason = "…")]` allows still seeds itself from `RandomState` without naming it: `std::collections::HashMap::<u8, u8>::new().hasher().hash_one(1)` is a random number. The reason of such an exception has to cover that its hashes and order never reach any output (ADR-0005 §5).
+//! - A method or function of [`ITEMS`] such as `Path`'s `exists` counts wherever its name follows a single `.` or a `::` outside a `use` declaration, because the check cannot tell the types of values: a method, field or function of another type or module with one of these names (`exists`, `metadata`, `is_dir`, `canonicalize`, …) fails too. Rename it; for a dependency's method that does not touch the outside world, such as cfb's in-memory `CompoundFile::exists`, `APPROVED_ITEMS` can approve the name for the file, counted and with the reason, in a reviewed pull request.
 //! - The print macros (`print!`, `println!`, `eprint!`, `eprintln!` and `dbg!`), which write to the console without naming `std::io`, are left to the lints `print_stdout`, `print_stderr` and `dbg_macro`, whose exceptions the lint audit checks (CORE-009); a panic's message, which std's default panic hook writes to the console, is the bindings' panic hooks' concern.
 //! - Items that only the nightly toolchain offers, such as `std::thread::sleep_until` and `std::random`, are not listed, because stable code cannot use them and the gate rejects every way to unlock them (`RUSTC_BOOTSTRAP` and `-Z` options). A toolchain that makes such an item stable is adopted in the monthly dependency session, which adds it to [`ITEMS`].
 //! - An attribute macro on an enclosing module, or any other procedural macro, receives the code it is applied to and can write different code: it could drop `#[cfg(test)]` from a module as `shipped!` does above, or write a path that the source does not show. No workspace member is a procedural-macro crate (`PROC_MACROS` in `verify.rs` is empty), and no dependency of the members offers an attribute macro for modules today (wasm-bindgen's `#[wasm_bindgen]`, the only attribute macro among them, refuses modules); the macros of dependencies are reviewed with them (ADR-0017).
+//! - A macro of a dependency or of std that takes token trees (`tt`) receives what it is handed token by token. The check rejects a `::` or a `.` handed on its own and reads the name right after each one, but a macro that dropped that name and wrote another after the `::` could still join a module and an item unseen: from `m!(thread :: x, spawn)`, a macro that writes `$a $separator $b` would call `std::thread::spawn`. The workspace's own macros cannot take `tt` in code that is checked for [`ITEMS`], and std's macros that take token trees (`format_args!`, `write!`, `matches!`, `vec!`, …) read them as expressions or patterns, which they cannot take apart; the macros of dependencies are reviewed with them (ADR-0017).
 //! - A string in an attribute that a macro assembles from a split form, keeping the `#` of one attribute and writing it before a bracket group handed in separately (AGENTS.md, "Lint rules and exceptions"), is not read as an attribute's string, because the source does not show that bracket group as an attribute. Reviewers check every macro that takes a `#` or a bracket group as a `tt`, as AGENTS.md asks.
 //!
 //! In the WebAssembly build, where std has no clock, files or environment of its own, the import check of `cargo xtask wasm-package` (`wasm_imports.rs`) shows every function that the module asks of its JavaScript host, whoever calls it.
@@ -76,7 +85,7 @@ pub const MODULES: [&str; 5] = [
 pub enum Written {
     /// Named by a path: the last name of its module, `::` and its own name, wherever that pair stands, also as an entry of a `use` group (`thread::{spawn}`). So `std::thread::spawn` counts, and so does `thread::spawn` once `use std::thread;`, or a re-export anywhere, has bound the module under its own name.
     Path,
-    /// A method of a type that [`ITEMS`] forbids by name too: its name after a single `.`, which calls it on a value of any origin (also one that a dependency hands over, such as the `&Path` of cfb's `Entry::path`), or after its type's name, or a `>`, and `::` (`Path::exists(path)`, `<Path>::exists(path)`). A method or field of the same name on another type counts too, because the check cannot tell the types of values.
+    /// A method or an associated function: its name after a single `.`, which calls it on a value of any origin (also one that a dependency hands over, such as the `&Path` of cfb's `Entry::path`), and after any `::` outside a `use` declaration, which cannot import one, so that a call through any name of its type counts (`Path::exists(path)`, `<Path>::exists(path)`, `Self::exists(self)`, `<PathBuf as Deref>::Target::exists(path)`, a type alias's name). A method, field or function of the same name on another type or in another module counts too, because the check cannot tell the types of values.
     Method,
     /// A method of a type that is not forbidden, with a name that only it has: its name wherever it stands, so that neither another name for its type (`type Queue = Receiver<Job>;`) nor a macro that is handed the name can hide a call.
     Name,
@@ -120,12 +129,12 @@ const CLOCK: &str = "the clock, which it reads to know when the time is up";
 /// What the standard streams reach.
 const CONSOLE: &str = "the console: the process's standard input, output and error";
 
-/// The items of Rust's standard library that reach the outside world outside [`MODULES`], each with what it reaches. The code that ships of a member that `OUTSIDE_WORLD` lists with whole modules, a tool that reaches the outside world anyway, is not checked for them; that of every other member may use one only where `APPROVED_ITEMS` approves it for the file. `std::path::PathBuf` and `std::path::Component`, which only build paths, are not forbidden: a `PathBuf` reaches the methods of `Path` only after a `.` (`PathBuf::exists(&path)` does not compile), where they count.
-pub const ITEMS: [Item; 30] = [
+/// The items of Rust's standard library that reach the outside world outside [`MODULES`], each with what it reaches, as far as they have been found. The code that ships of a member that `OUTSIDE_WORLD` lists with whole modules, a tool that reaches the outside world anyway, is not checked for them; that of every other member may use one only where `APPROVED_ITEMS` approves it for the file, as many times as it approves. `std::path::PathBuf` and `std::path::Component`, which only build paths, are not forbidden: a `PathBuf` reaches the methods of `Path` only after a `.` (`PathBuf::exists(&path)` does not compile), or through another name of `Path` and `::`, where they count.
+pub const ITEMS: [Item; 32] = [
     Item {
         path: "std::path::Path",
         written: Written::Path,
-        reaches: "the file system, which its methods exists, try_exists, is_file, is_dir, is_symlink, metadata, symlink_metadata, read_dir, read_link and canonicalize ask about a path; it is forbidden by name so that none of them can be called as `Path::exists(path)`",
+        reaches: "the file system, which its methods exists, try_exists, is_file, is_dir, is_symlink, metadata, symlink_metadata, read_dir, read_link and canonicalize ask about a path; those methods count by their own names after a `.` or a `::`, also when they are reached through another name of the type, and the type is forbidden by name as well, so that the code that ships holds no `Path` on which a form of call that the model does not know yet could reach them",
     },
     Item {
         path: "std::path::Path::exists",
@@ -253,6 +262,16 @@ pub const ITEMS: [Item; 30] = [
         reaches: CLOCK,
     },
     Item {
+        path: "std::io::Error::last_os_error",
+        written: Written::Method,
+        reaches: "the operating system: the error code of the last call that the thread made to it",
+    },
+    Item {
+        path: "std::io::Error::from_raw_os_error",
+        written: Written::Method,
+        reaches: "the operating system's table of error messages, which formatting the error reads, and which Windows translates into the machine's language, so that the text would depend on the machine",
+    },
+    Item {
         path: "std::backtrace::Backtrace",
         written: Written::Path,
         reaches: "the environment, whose RUST_BACKTRACE and RUST_LIB_BACKTRACE decide whether `Backtrace::capture` captures, and the program's own files, which showing a backtrace reads for the names of its functions",
@@ -306,16 +325,18 @@ impl Uses {
     }
 }
 
-/// Items of [`ITEMS`] that one file of a member's code that ships may use, because that use cannot reach the outside world: one entry of `APPROVED_ITEMS` in `verify.rs`.
+/// An item of [`ITEMS`] that one file of a member's code that ships may use an exact number of times, because those uses cannot reach the outside world: one entry of `APPROVED_ITEMS` in `verify.rs`. Within its counted uses, the approval relies on reviewing the whole file whenever it changes.
 #[derive(Debug, Clone, Copy)]
 pub struct Approved {
     /// The member.
     pub member: &'static str,
     /// The file, relative to the workspace root, with `/` between folders.
     pub file: &'static str,
-    /// The items it may use, as [`ITEMS`] writes them.
-    pub items: &'static [&'static str],
-    /// Why that use cannot reach the outside world.
+    /// The item, as [`ITEMS`] writes it.
+    pub item: &'static str,
+    /// How many uses of it the file makes: a use beyond them fails until the entry is reviewed again, and a file that makes fewer leaves the entry stale.
+    pub uses: usize,
+    /// Why those uses cannot reach the outside world.
     pub reason: &'static str,
 }
 
@@ -339,25 +360,25 @@ const USED: &str = "the code that ships names modules of the standard library th
 /// How the uses of [`ITEMS`] are reported: the heading of their list, and what to do.
 const ITEMS_USED: (&str, &str) = (
     "the code that ships uses items of the standard library that reach the outside world outside those modules (ITEMS in xtask/src/outside_world.rs)",
-    "Outside the five modules, the standard library reaches the outside world through these items too, which the code that ships may not use either (ADR-0012 §5, ADR-0005 §5, architecture §12): the file system through std::path::Path and its methods, the current folder through std::path::absolute, the operating system's randomness through RandomState, the environment through threads started without a stack size (std::thread::spawn, scope and Builder) and through std::backtrace::Backtrace, the operating system through std::thread::available_parallelism, the clock through sleeping and waiting with a timeout (std::thread::sleep and park_timeout, recv_timeout, wait_timeout), and the console through std::io::stdin, stdout and stderr. Ask the host for what the code needs instead; keep maps and sets ordered (BTreeMap, BTreeSet); start engine threads with bayan-engine's EngineThread, which sets the stack size. The check reads the source text and cannot tell the types of values, so it finds a method of std::path::Path by its name after a `.`: if the name above is a method or field of another type, rename it; if you cannot, because the method belongs to a dependency and does not touch the file system, approve it for the file in APPROVED_ITEMS in xtask/src/verify.rs, with the reason, in a reviewed pull request, as for every other use that cannot reach the outside world. If only tests need the item, move them out of the files that ship: into an integration test (tests/), or into a module declared with `#[cfg(test)] mod name;` and written in its own file.",
+    "Outside the five modules, the standard library reaches the outside world through these items too, which the code that ships may not use either (ADR-0012 §5, ADR-0005 §5, architecture §12): the file system through std::path::Path and its methods, the current folder through std::path::absolute, the operating system's randomness through RandomState, the environment through threads started without a stack size (std::thread::spawn, scope and Builder) and through std::backtrace::Backtrace, the operating system through std::thread::available_parallelism and std::io::Error's last_os_error and from_raw_os_error, the clock through sleeping and waiting with a timeout (std::thread::sleep and park_timeout, recv_timeout, wait_timeout), and the console through std::io::stdin, stdout and stderr. Ask the host for what the code needs instead; keep maps and sets ordered (BTreeMap, BTreeSet); start engine threads with bayan-engine's EngineThread, which sets the stack size. The check reads the source text and cannot tell the types of values, so it finds a method or function such as Path's exists by its name after a `.` or a `::`: if the name above belongs to another type, module or field, rename it; if you cannot, because it belongs to a dependency and does not reach the outside world, approve it for the file in APPROVED_ITEMS in xtask/src/verify.rs, counted and with the reason, in a reviewed pull request, as for every other use that cannot reach the outside world. A file that APPROVED_ITEMS lists may make exactly the number of uses that its entry approves: a new use needs the entry reviewed again. If only tests need the item, move them out of the files that ship: into an integration test (tests/), or into a module declared with `#[cfg(test)] mod name;` and written in its own file.",
 );
 
 /// How the ways of naming std that the check cannot follow are reported: the heading of their list, and what to do.
 const HIDDEN: (&str, &str) = (
     "the code that ships names `std`, or builds a path in a macro, in a way that could reach those modules unseen",
-    "This check reads the source text, not the compiler's name resolution, so it finds a module of std only where a path names it after `std::`. Naming std in any other way could reach std::env, std::fs, std::net, std::process or std::time without writing that path: `use std as host;` and then `host::env::var`, `use std::*;` and then `env::var`, or a macro that is handed `std` and writes `$root::env`. So std is named only as the first word of a path written out in full, `std::name` or `std::{…}`. Write the path out in full, and rename an item or a variable that happens to be called `std`.",
+    "This check reads the source text, not the compiler's name resolution, so it finds a module of std only where a path names it after `std::`. Naming std in any other way could reach std::env, std::fs, std::net, std::process or std::time without writing that path: `use std as host;` and then `host::env::var`, `use std::*;` and then `env::var`, a macro that is handed `std` and writes `$root::env`, or one that joins the names it is handed with the `::` of a repetition (`$($part)::+`). So std is named only as the first word of a path written out in full, `std::name` or `std::{…}`. Write the path out in full, hand a macro a whole path instead of its parts, and rename an item or a variable that happens to be called `std`.",
 );
 
 /// How the ways of reaching [`ITEMS`] that the check cannot follow are reported: the heading of their list, and what to do.
 const HIDDEN_ITEMS: (&str, &str) = (
-    "the code that ships names a module that holds such items, or builds a path or a method call in a macro, in a way that could reach them unseen",
-    "This check reads the source text, not the compiler's name resolution, so it finds an item of ITEMS where the last name of its module and its own name stand together (`thread::spawn`), also after `use std::thread;`, and a method of std::path::Path where its name follows a `.`. Renaming a module that holds such items (`use std::thread as t;`, `use std::thread::{self as t};`), importing all of it (`use std::thread::*;`), and macros that build a path or a method call from what they are handed (`$module::spawn`, `thread::$item`, `$value.$method`, or a `::` or `.` handed to a macro on its own) could reach them without that text. Import such a module under its own name, name the items you use, write paths and method calls out in full, and hand a macro a whole path or expression instead of its pieces.",
+    "the code that ships names a module that holds such items or such an item under another name, or builds a path or a method call in a macro, in a way that could reach them unseen",
+    "This check reads the source text, not the compiler's name resolution, so it finds an item of ITEMS where the last name of its module and its own name stand together (`thread::spawn`), also after `use std::thread;`, and a method or function such as Path's exists where its name follows a `.` or a `::`. Renaming a module that holds such items (`use std::thread as t;`, `use std::thread::{self as t};`), importing all of it (`use std::thread::*;`), renaming an item (`use std::thread::Builder as Threads;`) or naming it again with a type alias (`type Threads = std::thread::Builder;`), and macros that build a path or a method call from what they are handed (`$module::spawn`, `thread::$item`, `$value.$method`, `Type::$function`, a fragment of the kind `tt`, which can take a `::` or a `.` apart from the names around it, or a `::` or `.` handed to a macro on its own) could reach them without that text. Import such a module under its own name, name the items you use by their own names, write paths and method calls out in full, and hand a macro a whole path or expression instead of its pieces, bound with the fragment that matches it (`ident`, `path`, `expr`, `ty`, …) rather than `tt`.",
 );
 
 /// How the modules and items that a member no longer uses are reported: the heading of their list, and what to do.
 const STALE: (&str, &str) = (
-    "OUTSIDE_WORLD or APPROVED_ITEMS lists modules or items that the code that ships does not use",
-    "Each entry of OUTSIDE_WORLD in xtask/src/verify.rs names a member and the modules of the standard library, or the items of them, that its code that ships may use, and each entry of APPROVED_ITEMS names a file and the items of ITEMS that it may use. Remove each module or item above from its entry, and the entry when nothing is left, so that the lists name only what the code needs and cannot go stale.",
+    "OUTSIDE_WORLD or APPROVED_ITEMS lists modules or items that the code that ships does not use, or approves more uses than a file makes",
+    "Each entry of OUTSIDE_WORLD in xtask/src/verify.rs names a member and the modules of the standard library, or the items of them, that its code that ships may use, and each entry of APPROVED_ITEMS names a file, an item of ITEMS and the exact number of uses that the file makes of it. Remove each module or item above from its entry, and the entry when nothing is left, or lower the number of uses, so that the lists name only what the code needs and cannot go stale.",
 );
 
 /// How the dependencies of other members on the listed ones are reported: the heading of their list, and what to do.
@@ -404,6 +425,14 @@ const MACRO_PATH: &str =
     "a path from a macro's metavariable into one of the five names or another metavariable";
 /// `use` or `extern crate` with a metavariable.
 const MACRO_USE: &str = "a `use` or `extern crate` declaration with a macro's metavariable in it";
+/// A `::` directly after a `)`.
+const AFTER_REPETITION: &str = "`::` directly after a `)`, as the separator of a macro's repetition writes it (`$($part)::+`), which could join std and a module, or a module and an item, handed in separately";
+/// A `::` that follows no name, before a metavariable.
+const JOINED: &str = "`::` that follows no name, before a macro's metavariable, as after a macro's repetition (`$($root)*::$module`, `$($root)?::$module`), which could join std and a module, or a module and an item, handed in separately";
+/// An item of [`ITEMS`], renamed.
+const ITEM_RENAMED: &str = "an item of ITEMS renamed with `as`, so that it could be used under a name the check does not know";
+/// An item of [`ITEMS`] named again by a type alias.
+const ITEM_ALIASED: &str = "an item of ITEMS named again by a type alias (`type … = …;`), so that it could be used under a name the check does not know";
 /// A module that holds items of [`ITEMS`], renamed.
 const HOLDER_RENAMED: &str = "a module that holds items of ITEMS (thread, io, hash, hash_map, path or backtrace), renamed with `as`, so that its items could be named without its name";
 /// `*` after a module that holds items of [`ITEMS`].
@@ -416,9 +445,10 @@ const HOLDER_METAVARIABLE: &str =
 const MACRO_ITEM: &str = "a path from a macro's metavariable into the name of an item of ITEMS or of a module that holds some";
 /// An item's name after a `::` that follows no name.
 const LEADING_ITEM: &str = "the name of an item of ITEMS after a `::` that follows no name, as when it is handed to a macro apart from its module";
-/// A method or field named by a metavariable.
-const METHOD_METAVARIABLE: &str =
-    "a method or field named by a macro's metavariable, which could be a method of ITEMS";
+/// A method, field or function named by a metavariable.
+const METHOD_METAVARIABLE: &str = "a method, field or function named by a macro's metavariable after a `.` or a `::` (`$value.$method`, `Type::$function`), which could be a method or function of ITEMS";
+/// A fragment of the kind `tt`.
+const TOKEN_TREE: &str = "a macro's fragment of the kind `tt` (`$name:tt`), which can take a `::` or a `.` on its own from what the macro is handed and put it between names, so that the path or the method call it builds is written nowhere";
 /// A `::` on its own.
 const LONE_SEPARATOR: &str = "`::` on its own, not between the parts of a path, as when it is handed to a macro, which could put it between names handed in separately";
 /// A `.` on its own.
@@ -454,13 +484,76 @@ fn names_an_item(name: &str) -> bool {
     holds_items(name) || ITEMS.iter().any(|item| item.name() == name)
 }
 
-/// Records the items of [`ITEMS`] that `owner::name`, on `line`, names: one written as a path whose module's last name is `owner`, or a method whose type's name is.
+/// Records the item of [`ITEMS`] that `owner::name`, on `line`, names: one written as a path whose module's last name is `owner`. A method or function of [`ITEMS`] is found by its own name after any `::` ([`Reader::separator`]).
 fn pair(owner: &str, name: &str, line: usize, found: &mut Found) {
     for item in &ITEMS {
-        if item.written != Written::Name && item.owner() == owner && item.name() == name {
+        if item.written == Written::Path && item.owner() == owner && item.name() == name {
             found.items.push((line, item.path));
         }
     }
+}
+
+/// Whether `name` is the own name of an item of [`ITEMS`], such as `Builder` or `exists`.
+fn is_item_name(name: &str) -> bool {
+    ITEMS.iter().any(|item| item.name() == name)
+}
+
+/// Whether the identifier `token` is written exactly as `keyword`, not as a raw identifier (`r#type`), which is a name like any other.
+fn is_keyword(token: Token<'_>, keyword: &str) -> bool {
+    token.kind == Kind::Ident(keyword) && token.end - token.start == keyword.len()
+}
+
+/// For each token, whether it stands inside the group of a macro's call or definition: a group whose opening bracket follows `!` (`name!(…)`) or a name after `!` (`macro_rules! name { … }`), or a group inside one. A `!` before a group can also negate an expression (`!(a || b)`), which only makes this stricter.
+fn macro_groups(tokens: &[Token<'_>]) -> Vec<bool> {
+    let kind = |at: Option<usize>| at.and_then(|at| tokens.get(at)).map(|token| token.kind);
+    let mut inside = Vec::with_capacity(tokens.len());
+    let mut groups: Vec<bool> = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        let enclosing = groups.last().copied().unwrap_or(false);
+        match token.kind {
+            Kind::Punct(b'(' | b'[' | b'{') => {
+                let opens_macro = kind(at.checked_sub(1)) == Some(Kind::Punct(b'!'))
+                    || (matches!(kind(at.checked_sub(1)), Some(Kind::Ident(_)))
+                        && kind(at.checked_sub(2)) == Some(Kind::Punct(b'!')));
+                inside.push(enclosing);
+                groups.push(enclosing || opens_macro);
+            }
+            Kind::Punct(b')' | b']' | b'}') => {
+                groups.pop();
+                inside.push(groups.last().copied().unwrap_or(false));
+            }
+            _ => inside.push(enclosing),
+        }
+    }
+    inside
+}
+
+/// For each token, whether it stands in a `use` declaration that the compiler reads as it is written: from the keyword `use`, outside every macro's group (`in_macro`), to its `;`, with only names, `::`, `{`, `}`, `,` and `*` between. In such a declaration a name after `::` is a module's item, never a method, which `use` cannot import. Anything else after `use`, such as the `<` of `impl Trait + use<'a>`, means that the tokens are not such a declaration, and a `use` in a macro's group can be rearranged by the macro.
+fn use_declarations(tokens: &[Token<'_>], in_macro: &[bool]) -> Vec<bool> {
+    let mut in_use = vec![false; tokens.len()];
+    for (at, &token) in tokens.iter().enumerate() {
+        if !is_keyword(token, "use") || in_macro[at] {
+            continue;
+        }
+        let mut depth = 0_usize;
+        let mut end = None;
+        for (after, token) in tokens.iter().enumerate().skip(at + 1) {
+            match token.kind {
+                Kind::Punct(b';') if depth == 0 => {
+                    end = Some(after);
+                    break;
+                }
+                Kind::Punct(b'{') => depth += 1,
+                Kind::Punct(b'}') if depth > 0 => depth -= 1,
+                Kind::Ident(_) | Kind::PathSeparator | Kind::Punct(b',' | b'*') => {}
+                _ => break,
+            }
+        }
+        if let Some(end) = end {
+            in_use[at..=end].fill(true);
+        }
+    }
+    in_use
 }
 
 /// Whether the text is code, or the decoded string of an attribute, which may be prose, where `::` and `.` on their own are punctuation.
@@ -496,9 +589,12 @@ fn scan(source: &str) -> Result<Found, String> {
 fn scan_text(source: &str, text: Text) -> Result<Found, String> {
     let tokens = sources::tokenize(source)?;
     let closing = sources::closing_brackets(&tokens)?;
+    let in_macro = macro_groups(&tokens);
+    let in_use = use_declarations(&tokens, &in_macro);
     let reader = Reader {
         tokens: &tokens,
         closing: &closing,
+        in_use: &in_use,
         text,
     };
     let mut found = Found::default();
@@ -552,6 +648,8 @@ struct Reader<'t, 'a> {
     tokens: &'t [Token<'a>],
     /// For each opening bracket, the position of the bracket that closes it (`sources::closing_brackets`).
     closing: &'t [Option<usize>],
+    /// For each token, whether it stands in a `use` declaration that the compiler reads as it is written ([`use_declarations`]).
+    in_use: &'t [bool],
     /// Whether the tokens are code or the string of an attribute.
     text: Text,
 }
@@ -590,6 +688,15 @@ impl<'a> Reader<'_, 'a> {
                 {
                     self.declaration(at, found);
                 }
+                Kind::Ident("type") if is_keyword(*token, "type") => self.alias(at, found),
+                Kind::Ident("tt")
+                    if self.before(at) == Some(Kind::Punct(b':'))
+                        && at
+                            .checked_sub(2)
+                            .is_some_and(|name| self.metavariable(name)) =>
+                {
+                    found.hidden_items.push((line, TOKEN_TREE));
+                }
                 Kind::Ident(name) => {
                     for item in items_named(Written::Name, name) {
                         found.items.push((line, item.path));
@@ -621,8 +728,21 @@ impl<'a> Reader<'_, 'a> {
     /// Reads the path at the `::` at `at`: what it continues from, and what follows.
     fn separator(&self, at: usize, found: &mut Found) {
         let line = self.tokens[at].line;
+        // Only a macro's repetition writes `::` after a `)` (`$($part)::+`), and its expansion joins whatever names it is handed.
+        if self.before(at) == Some(Kind::Punct(b')')) {
+            found.hidden.push((line, AFTER_REPETITION));
+            return;
+        }
         let next = self.kind(at + 1);
         let parent = self.parent(at);
+        // A method or function of ITEMS, by its name after any `::` but in a `use` declaration, which cannot import one: the type before it can have any name (`Self`, an alias, `<PathBuf as Deref>::Target`).
+        if let Some(Kind::Ident(name)) = next
+            && !self.in_use[at]
+        {
+            for item in items_named(Written::Method, name) {
+                found.items.push((line, item.path));
+            }
+        }
         match parent {
             Parent::Std => match next {
                 Some(Kind::Ident(name)) => self.module_path(at + 1, name, found),
@@ -646,7 +766,14 @@ impl<'a> Reader<'_, 'a> {
                     for entry in self.entries(at + 1) {
                         let token = self.tokens[entry];
                         match token.kind {
-                            Kind::Ident(name) => pair(owner, name, token.line, found),
+                            Kind::Ident(name) => {
+                                pair(owner, name, token.line, found);
+                                if !self.in_use[entry] {
+                                    for item in items_named(Written::Method, name) {
+                                        found.items.push((token.line, item.path));
+                                    }
+                                }
+                            }
                             Kind::Punct(b'*') if holds_items(owner) => {
                                 found.hidden_items.push((token.line, HOLDER_GLOB));
                             }
@@ -660,28 +787,31 @@ impl<'a> Reader<'_, 'a> {
                 Some(Kind::Punct(b'$')) if holds_items(owner) => {
                     found.hidden_items.push((line, HOLDER_METAVARIABLE));
                 }
+                Some(Kind::Punct(b'$')) => found.hidden_items.push((line, METHOD_METAVARIABLE)),
                 _ => {}
             },
             Parent::Generic => {
-                if let Some(Kind::Ident(name)) = next {
-                    for item in items_named(Written::Method, name) {
-                        found.items.push((line, item.path));
-                    }
+                if next == Some(Kind::Punct(b'$')) {
+                    found.hidden_items.push((line, METHOD_METAVARIABLE));
                 }
             }
-            Parent::Nothing => {
-                if let Some(Kind::Ident(name)) = next
-                    && items_named(Written::Path, name).next().is_some()
-                {
+            Parent::Nothing => match next {
+                Some(Kind::Ident(name)) if items_named(Written::Path, name).next().is_some() => {
                     found.hidden_items.push((line, LEADING_ITEM));
                 }
-            }
+                // `$($root)*::$module`: the names that the repetition writes before it are joined to the one handed in after it.
+                Some(Kind::Punct(b'$')) => found.hidden.push((line, JOINED)),
+                _ => {}
+            },
         }
-        // In code, a `::` stands only between the parts of a path, and before the `+`, `?` or `*` of a macro's repetition whose separator it is; after `std` it is reported above.
-        let continues = matches!(
-            next,
-            Some(Kind::Ident(_) | Kind::Punct(b'{' | b'*' | b'<' | b'$' | b'+' | b'?'))
-        );
+        // In code, a `::` stands only between the parts of a path: before a name, a group or a turbofish's `<` in a path, a metavariable (each reported above where it could reach a module or an item), or the `*` of a glob import, which ends a use tree.
+        let continues = match next {
+            Some(Kind::Ident(_) | Kind::Punct(b'{' | b'<' | b'$')) => true,
+            Some(Kind::Punct(b'*')) => {
+                matches!(self.kind(at + 2), Some(Kind::Punct(b';' | b',' | b'}')))
+            }
+            _ => false,
+        };
         if self.text == Text::Code && parent != Parent::Std && !continues {
             found.hidden_items.push((line, LONE_SEPARATOR));
         }
@@ -806,27 +936,65 @@ impl<'a> Reader<'_, 'a> {
                 Some(Kind::Ident(name)) if !self.metavariable(rename - 1) => Some(name),
                 _ => None,
             };
-            if renamed.is_some_and(holds_items) {
-                found
-                    .hidden_items
-                    .push((self.tokens[rename].line, HOLDER_RENAMED));
+            let line = self.tokens[rename].line;
+            match renamed {
+                Some(name) if holds_items(name) => found.hidden_items.push((line, HOLDER_RENAMED)),
+                Some(name) if is_item_name(name) => found.hidden_items.push((line, ITEM_RENAMED)),
+                _ => {}
             }
         }
     }
 
-    /// The name before the `::{` of the innermost group that holds the token at `at`, if that group follows one.
-    fn group_owner(&self, at: usize) -> Option<&'a str> {
-        let open = (0..at).rev().find(|&open| {
-            self.tokens[open].kind == Kind::Punct(b'{')
-                && self.closing[open].is_some_and(|close| close > at)
-        })?;
-        if self.before(open) != Some(Kind::PathSeparator) {
-            return None;
+    /// Reads the `type` declaration whose keyword is at `at`, up to its `;`: an alias, or an associated type with its bounds or its value, that names an item of [`ITEMS`] could name it again under the declaration's own name.
+    fn alias(&self, at: usize, found: &mut Found) {
+        // In the string of an attribute, which is mostly prose ("the type is …"), only a declaration's shape counts: `type`, its name, and `=`, `<`, `:`, `;` or `where`.
+        let declared = matches!(self.kind(at + 1), Some(Kind::Ident(_)))
+            && matches!(
+                self.kind(at + 2),
+                Some(Kind::Punct(b'=' | b'<' | b':' | b';') | Kind::Ident("where"))
+            );
+        if self.text == Text::AttributeString && !declared {
+            return;
         }
-        let name = open.checked_sub(2)?;
-        match self.kind(name) {
-            Some(Kind::Ident(owner)) if !self.metavariable(name) => Some(owner),
-            _ => None,
+        let mut depth = 0_usize;
+        for token in &self.tokens[at + 1..] {
+            match token.kind {
+                Kind::Punct(b';') if depth == 0 => return,
+                Kind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                Kind::Punct(b')' | b']' | b'}') => match depth.checked_sub(1) {
+                    Some(outer) => depth = outer,
+                    // The group that holds the declaration ends: it had no `;`.
+                    None => return,
+                },
+                Kind::Ident(name) if is_item_name(name) => {
+                    found.hidden_items.push((token.line, ITEM_ALIASED));
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The name before the `::{` of the innermost group that holds the token at `at` and follows one: a group that is itself an entry of a group, with no path before it (`{{self as t}}`), continues the path of the group that holds it, as `self` in it does.
+    fn group_owner(&self, at: usize) -> Option<&'a str> {
+        let mut inner = at;
+        loop {
+            let open = (0..inner).rev().find(|&open| {
+                self.tokens[open].kind == Kind::Punct(b'{')
+                    && self.closing[open].is_some_and(|close| close > inner)
+            })?;
+            match self.before(open) {
+                Some(Kind::PathSeparator) => {
+                    let name = open.checked_sub(2)?;
+                    return match self.kind(name) {
+                        Some(Kind::Ident(owner)) if !self.metavariable(name) => Some(owner),
+                        _ => None,
+                    };
+                }
+                // An entry of the group that holds it.
+                Some(Kind::Punct(b'{' | b',')) => inner = open,
+                _ => return None,
+            }
         }
     }
 }
@@ -896,7 +1064,7 @@ fn is_relative_rust_file(file: &str) -> bool {
         })
 }
 
-/// Checks `OUTSIDE_WORLD` (`exemptions`) and `APPROVED_ITEMS` (`approved`) before anything is built: each entry of `OUTSIDE_WORLD` names a workspace member (of `members`) once, and lists at least one module of [`MODULES`], or one item of such a module, each only once; each entry of `APPROVED_ITEMS` names a workspace member whose code is checked for [`ITEMS`], a Rust file once, and at least one item of [`ITEMS`], each only once; and no member that `OUTSIDE_WORLD` does not name depends on one that it names (`dependencies`, from `cargo metadata`), except as a dev-dependency. Returns one line describing what was checked, or every problem found.
+/// Checks `OUTSIDE_WORLD` (`exemptions`) and `APPROVED_ITEMS` (`approved`) before anything is built: each entry of `OUTSIDE_WORLD` names a workspace member (of `members`) once, and lists at least one module of [`MODULES`], or one item of such a module, each only once; each entry of `APPROVED_ITEMS` names a workspace member whose code is checked for [`ITEMS`], a Rust file, an item of [`ITEMS`] and at least one use, and no two entries name the same item in the same file; and no member that `OUTSIDE_WORLD` does not name depends on one that it names (`dependencies`, from `cargo metadata`), except as a dev-dependency. Returns one line describing what was checked, or every problem found.
 pub fn check_list(
     members: &[&str],
     dependencies: &[MemberDependency],
@@ -952,7 +1120,7 @@ pub fn check_list(
         }
     }
     for (index, entry) in approved.iter().enumerate() {
-        let (member, file) = (entry.member, entry.file);
+        let (member, file, item) = (entry.member, entry.file, entry.item);
         if !members.contains(&member) {
             problems.push(format!(
                 "  APPROVED_ITEMS: `{member}` is not a workspace member; update the list"
@@ -972,33 +1140,26 @@ pub fn check_list(
         }
         if approved[..index]
             .iter()
-            .any(|earlier| earlier.member == member && earlier.file == file)
+            .any(|earlier| earlier.member == member && earlier.file == file && earlier.item == item)
         {
             problems.push(format!(
-                "  APPROVED_ITEMS: {file} of `{member}` is listed twice"
+                "  APPROVED_ITEMS: `{item}` in {file} of `{member}` is listed twice"
             ));
         }
-        if entry.items.is_empty() {
+        if !ITEMS.iter().any(|known| known.path == item) {
             problems.push(format!(
-                "  APPROVED_ITEMS: the entry for {file} lists no item; remove it"
+                "  APPROVED_ITEMS: the entry for {file} names `{item}`, which ITEMS in xtask/src/outside_world.rs does not list"
             ));
         }
-        for (position, item) in entry.items.iter().enumerate() {
-            if !ITEMS.iter().any(|known| known.path == *item) {
-                problems.push(format!(
-                    "  APPROVED_ITEMS: the entry for {file} lists `{item}`, which ITEMS in xtask/src/outside_world.rs does not list"
-                ));
-            }
-            if entry.items[..position].contains(item) {
-                problems.push(format!(
-                    "  APPROVED_ITEMS: the entry for {file} lists `{item}` twice"
-                ));
-            }
+        if entry.uses == 0 {
+            problems.push(format!(
+                "  APPROVED_ITEMS: the entry for `{item}` in {file} approves no use; remove it"
+            ));
         }
     }
     if !problems.is_empty() {
         return Err(format!(
-            "OUTSIDE_WORLD or APPROVED_ITEMS in xtask/src/verify.rs is not right:\n{}\nEach entry of OUTSIDE_WORLD names a workspace member, the modules of the standard library that exist for the outside world ({}), or the items of them, that its code that ships may use, and the reason. Each entry of APPROVED_ITEMS names a member whose code is checked for ITEMS, one of its Rust files, the items of ITEMS that the file may use, and why that use cannot reach the outside world.",
+            "OUTSIDE_WORLD or APPROVED_ITEMS in xtask/src/verify.rs is not right:\n{}\nEach entry of OUTSIDE_WORLD names a workspace member, the modules of the standard library that exist for the outside world ({}), or the items of them, that its code that ships may use, and the reason. Each entry of APPROVED_ITEMS names a member whose code is checked for ITEMS, one of its Rust files, an item of ITEMS, the exact number of uses that the file makes of it, and why those uses cannot reach the outside world.",
             problems.join("\n"),
             MODULES.join(", ")
         ));
@@ -1021,15 +1182,24 @@ pub fn check_list(
         .iter()
         .map(|exemption| exemption.member)
         .collect();
+    let files: BTreeSet<(&str, &str)> = approved
+        .iter()
+        .map(|entry| (entry.member, entry.file))
+        .collect();
     Ok(format!(
-        "outside world: every member that OUTSIDE_WORLD names is a workspace member ({}), and no other member depends on one of them except for its tests; APPROVED_ITEMS approves {} items of ITEMS for {} files",
+        "outside world: every member that OUTSIDE_WORLD names is a workspace member ({}), and no other member depends on one of them except for its tests; APPROVED_ITEMS approves {} counted uses of items of ITEMS in {} files",
         names.join(", "),
-        approved
-            .iter()
-            .map(|entry| entry.items.len())
-            .sum::<usize>(),
-        approved.len()
+        approved.iter().map(|entry| entry.uses).sum::<usize>(),
+        files.len()
     ))
+}
+
+/// What the item of [`ITEMS`] written as `item` reaches, as a message shows it.
+fn reaches(item: &str) -> &'static str {
+    ITEMS
+        .iter()
+        .find(|known| known.path == item)
+        .map_or("the outside world", |known| known.reaches)
 }
 
 /// A module of [`MODULES`] and what follows it, as a message shows it.
@@ -1041,7 +1211,7 @@ fn described(module: &str, next: &Next) -> String {
     }
 }
 
-/// Checks the code that ships of every workspace member at `root`: `shipped` maps each member to the Rust files that the compiler compiled into its units that are not tests (`dep_info::Comparison::shipped`). A member that `exemptions` does not name may use none of [`MODULES`], one that it names with modules only those modules, and one that it names with items exactly those items; every member that it does not name with whole modules may use none of [`ITEMS`], except where `approved` approves an item for the file; and every member names std only as the first word of a path written out in full, and, where its code is checked for [`ITEMS`], their modules only under their own names and their items, methods and modules never through a macro's pieces. Each module and item that an entry of `exemptions` or `approved` lists must be used. Returns one line describing what was checked, or every problem found.
+/// Checks the code that ships of every workspace member at `root`: `shipped` maps each member to the Rust files that the compiler compiled into its units that are not tests (`dep_info::Comparison::shipped`). A member that `exemptions` does not name may use none of [`MODULES`], one that it names with modules only those modules, and one that it names with items exactly those items; every member that it does not name with whole modules may use none of [`ITEMS`], except where an entry of `approved` approves an item for the file, exactly as many times as the entry says; and every member names std only as the first word of a path written out in full, and, where its code is checked for [`ITEMS`], their modules and items only under their own names and their items, methods and modules never through a macro's pieces. Each module and item that an entry of `exemptions` lists must be used, and each file that an entry of `approved` names must make exactly the uses that it approves. Returns one line describing what was checked, or every problem found.
 pub fn check_code(
     root: &Path,
     shipped: &BTreeMap<String, BTreeSet<PathBuf>>,
@@ -1064,9 +1234,9 @@ pub fn check_code(
     let mut item_places = Vec::new();
     let mut hidden_places = Vec::new();
     let mut hidden_item_places = Vec::new();
-    // The modules and items that each member used as its entry lists them, and the approved items that each entry of `approved` approved.
+    // The modules and items that each member used as its entry lists them, and the lines of the uses that each entry of `approved` approves.
     let mut used: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut approved_used: BTreeSet<(usize, &str)> = BTreeSet::new();
+    let mut approved_lines: Vec<Vec<usize>> = vec![Vec::new(); approved.len()];
     // The files read, of the members that OUTSIDE_WORLD does not name, of those it names with items, and of those it names with modules.
     let mut files_read = [0_usize; 3];
     for (member, files) in shipped {
@@ -1127,20 +1297,15 @@ pub fn check_code(
             let file_written = written(file);
             for (line, item) in found.items {
                 let approval = approved.iter().position(|entry| {
-                    entry.member == member
-                        && entry.file == file_written
-                        && entry.items.contains(&item)
+                    entry.member == member && entry.file == file_written && entry.item == item
                 });
                 if let Some(index) = approval {
-                    approved_used.insert((index, item));
+                    approved_lines[index].push(line);
                 } else {
-                    let reaches = ITEMS
-                        .iter()
-                        .find(|known| known.path == item)
-                        .map_or("the outside world", |known| known.reaches);
                     item_places.push(format!(
-                        "  {}:{line}: {item}, which reaches {reaches}",
-                        shown(file)
+                        "  {}:{line}: {item}, which reaches {}",
+                        shown(file),
+                        reaches(item)
                     ));
                 }
             }
@@ -1160,14 +1325,23 @@ pub fn check_code(
             }
         }
     }
-    for (index, entry) in approved.iter().enumerate() {
-        for item in entry.items {
-            if !approved_used.contains(&(index, *item)) {
-                stale.push(format!(
-                    "  {item}, in {} of {} (approved because {})",
-                    entry.file, entry.member, entry.reason
+    let mut approved_uses = 0;
+    for (entry, lines) in approved.iter().zip(&approved_lines) {
+        let (item, file, approves, makes) = (entry.item, entry.file, entry.uses, lines.len());
+        if makes > approves {
+            for line in lines {
+                item_places.push(format!(
+                    "  {file}:{line}: {item}, which reaches {} (APPROVED_ITEMS approves {approves} of its uses in this file, and the file makes {makes}: review the file and the entry again)",
+                    reaches(item)
                 ));
             }
+        } else if makes < approves {
+            stale.push(format!(
+                "  {item}, in {file} of {}: APPROVED_ITEMS approves {approves} uses, and the file makes {makes} (approved because {})",
+                entry.member, entry.reason
+            ));
+        } else {
+            approved_uses += makes;
         }
     }
     let problems: Vec<String> = [
@@ -1202,12 +1376,12 @@ pub fn check_code(
         })
         .collect();
     Ok(format!(
-        "outside world: the code that ships of the members that OUTSIDE_WORLD does not name ({}; {} files) names none of {} and uses none of the {} items of ITEMS but the {} that APPROVED_ITEMS approves for their files; that of the members it names with items ({}; {} files) names exactly the items it lists for them and uses none of ITEMS; and that of the members it names with whole modules ({} files) names exactly the modules it lists for them",
+        "outside world: the code that ships of the members that OUTSIDE_WORLD does not name ({}; {} files) names none of {} and uses none of the {} items of ITEMS but the {} counted uses that APPROVED_ITEMS approves for their files; that of the members it names with items ({}; {} files) names exactly the items it lists for them and uses none of ITEMS; and that of the members it names with whole modules ({} files) names exactly the modules it lists for them",
         others.join(", "),
         files_read[0],
         MODULES.join(", "),
         ITEMS.len(),
-        approved_used.len(),
+        approved_uses,
         named(false).join(", "),
         files_read[1],
         files_read[2]
@@ -1502,9 +1676,34 @@ mod tests {
             "macro_rules! m { ($root:ident) => { pub use $root::{env}; }; }",
             "macro_rules! m { ($root:ident) => { use $root::*; }; }",
             "macro_rules! m { ($root:ident) => { extern crate $root as host; }; }",
-            "macro_rules! m { ($($path:ident)::+) => { use $($path)::+ as host; }; }",
+            "macro_rules! m { ($($path:ident)*) => { use $($path)* as host; }; }",
         ] {
             assert_eq!(hidden(source), [MACRO_USE], "{source}");
+        }
+        // A repetition joins the names it is handed: `::` after its `)`, or after its operator before a metavariable.
+        for (source, expected) in [
+            (
+                "macro_rules! join_path { ($($part:ident),+) => { $($part)::+ }; }\nuse std::thread;\nfn f() { join_path!(thread, spawn)(|| {}); }",
+                AFTER_REPETITION,
+            ),
+            (
+                "macro_rules! join_path { ($($part:ident),+) => { $($part)::* }; }",
+                AFTER_REPETITION,
+            ),
+            (
+                "macro_rules! join_path { ($($root:ident)*, $item:ident) => { $($root)*::$item(|| {}) }; }",
+                JOINED,
+            ),
+            (
+                "macro_rules! join_path { ($($root:ident)?, $item:ident) => { $($root)?::$item(|| {}) }; }",
+                JOINED,
+            ),
+            (
+                "macro_rules! join_path { ($($root:ident),*; $item:ident) => { $($root),*::$item(|| {}) }; }",
+                JOINED,
+            ),
+        ] {
+            assert_eq!(hidden(source), [expected], "{source}");
         }
         // `$crate` names the macro's own crate, and other paths from a metavariable reach no module of std.
         assert_eq!(
@@ -1567,13 +1766,20 @@ mod tests {
                 format!("use {module}::{{self, {name}}};"),
                 format!("use std::{{{}::{{{name}}}}};", &module["std::".len()..]),
                 format!("use {module}::{{{{{name}}}}};"),
-                format!("use {} as renamed;", item.path),
-                format!("use {module}::{{{name} as renamed}};"),
                 // Through its module, bound under its own name in this file or by a re-export anywhere.
                 format!("use {module}; fn f() {{ let _ = {holder}::{name}; }}"),
                 format!("fn f() {{ let _ = crate::reexported::{holder}::{name}; }}"),
             ] {
                 assert_eq!(items(&source), [item.path], "{source}");
+            }
+            // Renamed, it counts where it is renamed, and the rename fails, because the new name could carry it elsewhere.
+            for source in [
+                format!("use {} as renamed;", item.path),
+                format!("use {module}::{{{name} as renamed}};"),
+            ] {
+                let found = scanned(&source);
+                assert_eq!(found.items, [(1, item.path)], "{source}");
+                assert_eq!(found.hidden_items, [(1, ITEM_RENAMED)], "{source}");
             }
         }
     }
@@ -1582,11 +1788,12 @@ mod tests {
     fn finds_the_methods_of_path_on_any_value_and_through_their_type() {
         for item in ITEMS.iter().filter(|item| item.written == Written::Method) {
             let name = item.name();
-            // Its type is forbidden by name, so that a call through it is seen too.
+            // Path is forbidden by name too, so that the code that ships holds no `Path` to call them on.
             assert!(
-                ITEMS
-                    .iter()
-                    .any(|other| other.written == Written::Path && other.name() == item.owner()),
+                item.owner() != "Path"
+                    || ITEMS
+                        .iter()
+                        .any(|other| other.written == Written::Path && other.name() == "Path"),
                 "{}",
                 item.path
             );
@@ -1599,11 +1806,33 @@ mod tests {
                 // A macro that is handed the call whole, or the method with its `.`.
                 format!("check!(entry.path().{name});"),
                 format!("check!(entry.path(), .{name});"),
-                // Through its type, also in angle brackets.
+                // Through any name of its type: in angle brackets, through an alias, `Self` or an associated type, and as a value.
                 format!("fn f(entry: &Entry) -> bool {{ <_>::{name}(entry.path()) }}"),
+                format!(
+                    "type Unnamed = <std::path::PathBuf as core::ops::Deref>::Target;\nfn f(p: &Unnamed) -> bool {{ Unnamed::{name}(p) }}"
+                ),
+                format!(
+                    "fn f<P>(p: P) -> bool {{ <std::path::PathBuf as core::ops::Deref>::Target::{name}(&p) }}"
+                ),
+                format!("fn f() {{ let check = Unnamed::{name}; }}"),
+                format!(
+                    "impl Trait for <std::path::PathBuf as core::ops::Deref>::Target {{ fn f(&self) -> bool {{ Self::{name}(self) }} }}"
+                ),
+                // In a group, and in a `use` that a macro is handed, which it could turn into a call.
+                format!("check!(Unnamed::{{{name}}});"),
+                format!("check!(use Unnamed::{name};);"),
+                // After `use<…>`, which only looks like a `use` declaration.
+                format!("fn f<'a>(p: &'a P) -> impl Sized + use<'a> {{ Unnamed::{name}(p) }}"),
             ] {
                 assert_eq!(items(&source), [item.path], "{source}");
             }
+            // A `use` declaration cannot import a method, so a name after its `::` is a module's function.
+            assert_eq!(
+                items(&format!(
+                    "use crate::checks::{name};\npub use crate::checks::{{{name}}};"
+                )),
+                Vec::<&str>::new()
+            );
             assert_eq!(
                 items(&format!(
                     "fn f(path: &Path) -> bool {{ Path::{name}(path) }}"
@@ -1611,6 +1840,16 @@ mod tests {
                 [item.path]
             );
         }
+        // The two functions of `std::io::Error` that ask the operating system.
+        assert_eq!(
+            items(
+                "fn last() -> io::Error { io::Error::last_os_error() }\nfn raw() -> String { std::io::Error::from_raw_os_error(2).to_string() }\n"
+            ),
+            [
+                "std::io::Error::last_os_error",
+                "std::io::Error::from_raw_os_error"
+            ]
+        );
     }
 
     #[test]
@@ -1642,7 +1881,7 @@ mod tests {
     fn leaves_other_items_methods_and_dots_alone() {
         assert_eq!(
             items(
-                "use std::path::{Component, PathBuf};\nuse std::io::{self, Read, Write};\nuse std::io::prelude::*;\nuse std::thread::{JoinHandle, ThreadId};\nuse bayan_engine::thread::{EngineThread, on_engine_thread};\nfn f(entry: &Entry, scope: Scope) -> io::Result<()> {\n    let path = PathBuf::from(\"/\");\n    let _ = std::thread::current().id();\n    let thread = EngineThread::spawn(config, blobs)?;\n    scope.push(1);\n    let exists = path.components().count() > 0;\n    if !exists { return Ok(()); }\n    let _ = tiny_skia::Path::from_rect(rect);\n    let _ = canonical::canonicalize(&source, &limits);\n    let _ = (0..n, a..=b, x.0, 1.0, 1., self.metadata_part, entry.path);\n    let point = Point { ..Default::default() };\n    Ok(())\n}\nstruct Builder;\npub use canonical::canonicalize;\n"
+                "use std::path::{Component, PathBuf};\nuse std::io::{self, Read, Write};\nuse std::io::prelude::*;\nuse std::thread::{JoinHandle, ThreadId};\nuse bayan_engine::thread::{EngineThread, on_engine_thread};\nfn f(entry: &Entry, scope: Scope) -> io::Result<()> {\n    let path = PathBuf::from(\"/\");\n    let _ = std::thread::current().id();\n    let thread = EngineThread::spawn(config, blobs)?;\n    scope.push(1);\n    let exists = path.components().count() > 0;\n    if !exists { return Ok(()); }\n    let _ = tiny_skia::Path::from_rect(rect);\n    let _ = (0..n, a..=b, x.0, 1.0, 1., self.metadata_part, entry.path);\n    let point = Point { ..Default::default() };\n    Ok(())\n}\nstruct Builder;\npub use canonical::canonicalize;\n"
             ),
             Vec::<&str>::new()
         );
@@ -1660,6 +1899,33 @@ mod tests {
             ),
             ("use std::collections::hash_map as maps;", HOLDER_RENAMED),
             ("use crate::reexported::path as paths;", HOLDER_RENAMED),
+            ("use std::thread::{{self as threads}};", HOLDER_RENAMED),
+            ("use std::{thread::{{self as threads}}};", HOLDER_RENAMED),
+            (
+                "use std::thread::{current, {{self as threads}}};",
+                HOLDER_RENAMED,
+            ),
+            // An item renamed, or named again by a type alias or an associated type.
+            ("use std::thread::Builder as Threads;", ITEM_RENAMED),
+            (
+                "pub use std::thread::{Builder as ReviewBuilder};",
+                ITEM_RENAMED,
+            ),
+            (
+                "pub use crate::thread::{Builder as ReviewBuilder};",
+                ITEM_RENAMED,
+            ),
+            ("type Threads = std::thread::Builder;", ITEM_ALIASED),
+            ("pub type ReviewBuilder = Builder;", ITEM_ALIASED),
+            (
+                "pub type Threads = Option<(u8, std::thread::Builder)>;",
+                ITEM_ALIASED,
+            ),
+            ("impl Make for Engine { type Output = Path; }", ITEM_ALIASED),
+            (
+                "#[make(alias = \"type Threads = std::thread::Builder;\")] struct Engine;",
+                ITEM_ALIASED,
+            ),
             // Or all of it imported.
             ("use std::thread::*;", HOLDER_GLOB),
             ("use std::io::{Read, *};", HOLDER_GLOB),
@@ -1684,20 +1950,44 @@ mod tests {
                 "macro_rules! m { ($value:expr, $method:ident) => { $value.$method() }; }",
                 METHOD_METAVARIABLE,
             ),
+            (
+                "macro_rules! m { ($name:ident) => { Unnamed::$name(&path) }; }",
+                METHOD_METAVARIABLE,
+            ),
+            (
+                "macro_rules! m { ($name:ident) => { <_>::$name(&path) }; }",
+                METHOD_METAVARIABLE,
+            ),
+            // A token tree can be a `::` or a `.` on its own.
+            (
+                "macro_rules! m { ($separator:tt) => { thread $separator spawn(work) }; }",
+                TOKEN_TREE,
+            ),
+            (
+                "macro_rules! m { ($($body:tt)*) => { $($body)* }; }",
+                TOKEN_TREE,
+            ),
             ("join!(thread, ::spawn);", LEADING_ITEM),
             ("join!(thread, ::, spawn);", LONE_SEPARATOR),
             ("join!(thread::, spawn);", LONE_SEPARATOR),
+            ("join!(thread ::+ spawn);", LONE_SEPARATOR),
+            ("join!(Unnamed ::* exists);", LONE_SEPARATOR),
             ("call!(entry.path(), ., exists);", LONE_DOT),
             ("call!(entry.path()., exists);", LONE_DOT),
         ] {
             assert_eq!(hidden_items(source), [expected], "{source}");
         }
-        // A repetition's separator, a turbofish, `->` and `=>` are paths' punctuation, and a number may end in `.`.
+        // A turbofish, `->`, `=>` and a glob import are paths' punctuation, a number may end in `.`, and a raw identifier is a name, not a keyword.
         assert_eq!(
             hidden_items(
-                "macro_rules! m { ($($part:ident)::+) => { $($part)::+ }; }\nfn f() -> ::core::primitive::u8 { let _ = Vec::<u8>::new(); match 1. { _ => ::core::primitive::u8::MAX } }"
+                "use crate::checks::*;\nfn f() -> ::core::primitive::u8 { let _ = Vec::<u8>::new(); match 1. { _ => ::core::primitive::u8::MAX } }\nstruct Token { r#type: Builder }\nmacro_rules! m { ($name:ident) => { $crate::limits::MAX }; }\n#[expect(clippy::unwrap_used, reason = \"the type is the Builder of tiny_skia, a Path, not std's\")] fn g() {}"
             ),
             Vec::<&str>::new()
+        );
+        // A repetition's separator `::` is rejected for every member, before the items are checked (`rejects_macros_that_could_continue_a_path_from_std`).
+        assert_eq!(
+            hidden("macro_rules! m { ($($part:ident),+) => { $($part)::+ }; }"),
+            [AFTER_REPETITION]
         );
     }
 
@@ -1719,16 +2009,18 @@ mod tests {
         }
     }
 
-    /// An entry of `APPROVED_ITEMS` for `file` of `member`.
+    /// An entry of `APPROVED_ITEMS` for `uses` uses of `item` in `file` of `member`.
     fn approval(
         member: &'static str,
         file: &'static str,
-        items: &'static [&'static str],
+        item: &'static str,
+        uses: usize,
     ) -> Approved {
         Approved {
             member,
             file,
-            items,
+            item,
+            uses,
             reason: "it sets the stack size",
         }
     }
@@ -1754,16 +2046,27 @@ mod tests {
                 exemption("tool", &["std::fs", "std::env"]),
                 item_exemption("binding", &["std::process::abort", "std::time::Instant"]),
             ],
-            &[approval(
-                "engine",
-                "crates/engine/src/thread.rs",
-                &["std::thread::Builder"],
-            )],
+            &[
+                approval(
+                    "engine",
+                    "crates/engine/src/thread.rs",
+                    "std::thread::Builder",
+                    1,
+                ),
+                approval(
+                    "engine",
+                    "crates/engine/src/thread.rs",
+                    "std::io::stderr",
+                    2,
+                ),
+            ],
         )
         .unwrap();
         assert!(
             line.contains("is a workspace member (tool, binding)")
-                && line.ends_with("APPROVED_ITEMS approves 1 items of ITEMS for 1 files"),
+                && line.ends_with(
+                    "APPROVED_ITEMS approves 3 counted uses of items of ITEMS in 1 files"
+                ),
             "{line}"
         );
     }
@@ -1789,19 +2092,33 @@ mod tests {
                 ),
             ],
             &[
-                approval("gone", "crates/gone/src/lib.rs", &["std::thread::Builder"]),
-                approval("tool", "crates/tool/src/main.rs", &["std::io::stdout"]),
-                approval("engine", "crates/engine/../engine/src/lib.rs", &[]),
+                approval("gone", "crates/gone/src/lib.rs", "std::thread::Builder", 1),
+                approval("tool", "crates/tool/src/main.rs", "std::io::stdout", 1),
+                approval(
+                    "engine",
+                    "crates/engine/../engine/src/lib.rs",
+                    "std::thread::spawn",
+                    0,
+                ),
                 approval(
                     "engine",
                     "crates/engine/src/a.rs",
-                    &[
-                        "std::thread::Builder",
-                        "std::thread::current",
-                        "std::thread::Builder",
-                    ],
+                    "std::thread::current",
+                    1,
                 ),
-                approval("engine", "crates/engine/src/a.rs", &["std::thread::spawn"]),
+                approval(
+                    "engine",
+                    "crates/engine/src/a.rs",
+                    "std::thread::Builder",
+                    1,
+                ),
+                approval(
+                    "engine",
+                    "crates/engine/src/a.rs",
+                    "std::thread::Builder",
+                    2,
+                ),
+                approval("engine", "crates/engine/src/a.rs", "std::thread::spawn", 1),
             ],
         )
         .unwrap_err();
@@ -1818,13 +2135,17 @@ mod tests {
             "APPROVED_ITEMS: `gone` is not a workspace member",
             "APPROVED_ITEMS: OUTSIDE_WORLD lists whole modules for `tool`",
             "APPROVED_ITEMS: crates/engine/../engine/src/lib.rs is not the path of a Rust file",
-            "APPROVED_ITEMS: the entry for crates/engine/../engine/src/lib.rs lists no item",
-            "lists `std::thread::current`, which ITEMS in xtask/src/outside_world.rs does not list",
-            "the entry for crates/engine/src/a.rs lists `std::thread::Builder` twice",
-            "APPROVED_ITEMS: crates/engine/src/a.rs of `engine` is listed twice",
+            "APPROVED_ITEMS: the entry for `std::thread::spawn` in crates/engine/../engine/src/lib.rs approves no use; remove it",
+            "names `std::thread::current`, which ITEMS in xtask/src/outside_world.rs does not list",
+            "APPROVED_ITEMS: `std::thread::Builder` in crates/engine/src/a.rs of `engine` is listed twice",
         ] {
             assert!(problem.contains(expected), "{expected}:\n{problem}");
         }
+        // Different items of one file are different entries.
+        assert!(
+            !problem.contains("`std::thread::spawn` in crates/engine/src/a.rs"),
+            "{problem}"
+        );
     }
 
     #[test]
@@ -1972,18 +2293,80 @@ mod tests {
             "fn spawn() { std::thread::Builder::new().stack_size(SIZE).spawn(run); }\n",
         );
         let other = scratch.write("src/other.rs", "fn other() {}\n");
-        let shipped =
-            BTreeMap::from([("engine".to_owned(), BTreeSet::from([thread, other.clone()]))]);
+        let shipped = BTreeMap::from([(
+            "engine".to_owned(),
+            BTreeSet::from([thread.clone(), other.clone()]),
+        )]);
         let approved = [approval(
             "engine",
             "src/thread.rs",
-            &["std::thread::Builder"],
+            "std::thread::Builder",
+            1,
         )];
         let line = check_code(&scratch.0, &shipped, &[], &approved)
             .unwrap_or_else(|problem| panic!("{problem}"));
         assert!(
-            line.contains("(engine; 2 files) names none of std::env, std::fs, std::net, std::process, std::time and uses none of the 30 items of ITEMS but the 1 that APPROVED_ITEMS approves for their files"),
+            line.contains("(engine; 2 files) names none of std::env, std::fs, std::net, std::process, std::time and uses none of the 32 items of ITEMS but the 1 counted uses that APPROVED_ITEMS approves for their files"),
             "{line}"
+        );
+        // A use beyond the count fails, at each use, until the entry is reviewed again; so do a rename and an alias that would carry the item to other files.
+        for (added, also) in [
+            (
+                "fn more() { std::thread::Builder::new().spawn(run); }\n",
+                None,
+            ),
+            (
+                "pub use std::thread::Builder as ReviewBuilder;\n",
+                Some(ITEM_RENAMED),
+            ),
+            (
+                "pub type ReviewBuilder = std::thread::Builder;\n",
+                Some(ITEM_ALIASED),
+            ),
+        ] {
+            std::fs::write(
+                &thread,
+                format!(
+                    "fn spawn() {{ std::thread::Builder::new().stack_size(SIZE).spawn(run); }}\n{added}"
+                ),
+            )
+            .unwrap();
+            let problem = check_code(&scratch.0, &shipped, &[], &approved).unwrap_err();
+            for line in [1, 2] {
+                assert!(
+                    problem.contains(&format!(
+                        "  src/thread.rs:{line}: std::thread::Builder, which reaches the environment, unless the builder sets the stack size"
+                    )),
+                    "{line}:\n{problem}"
+                );
+            }
+            assert_eq!(
+                problem
+                    .matches(" (APPROVED_ITEMS approves 1 of its uses in this file, and the file makes 2: review the file and the entry again)\n")
+                    .count(),
+                2,
+                "{problem}"
+            );
+            if let Some(also) = also {
+                assert!(problem.contains(also), "{problem}");
+            }
+        }
+        // An entry that approves more uses than the file makes is stale.
+        std::fs::write(
+            &thread,
+            "fn spawn() { std::thread::Builder::new().stack_size(SIZE).spawn(run); }\n",
+        )
+        .unwrap();
+        let generous = [approval(
+            "engine",
+            "src/thread.rs",
+            "std::thread::Builder",
+            2,
+        )];
+        let problem = check_code(&scratch.0, &shipped, &[], &generous).unwrap_err();
+        assert!(
+            problem.contains(&format!("{}:\n  std::thread::Builder, in src/thread.rs of engine: APPROVED_ITEMS approves 2 uses, and the file makes 1 (approved because it sets the stack size)\n", STALE.0)),
+            "{problem}"
         );
         // The same item in another file fails, and so does an approval that approves nothing.
         std::fs::write(
@@ -2003,10 +2386,10 @@ mod tests {
             )),
             "{problem}"
         );
-        let stale = [approval("engine", "src/other.rs", &["std::thread::spawn"])];
+        let stale = [approval("engine", "src/other.rs", "std::thread::spawn", 1)];
         let problem = check_code(&scratch.0, &shipped, &[], &stale).unwrap_err();
         assert!(
-            problem.contains("  std::thread::spawn, in src/other.rs of engine (approved because it sets the stack size)"),
+            problem.contains("  std::thread::spawn, in src/other.rs of engine: APPROVED_ITEMS approves 1 uses, and the file makes 0 (approved because it sets the stack size)"),
             "{problem}"
         );
     }
@@ -2035,7 +2418,7 @@ mod tests {
         .unwrap_or_else(|problem| panic!("{problem}"));
         assert!(
             line.contains(
-                "the members that OUTSIDE_WORLD does not name (engine; 1 files) names none of std::env, std::fs, std::net, std::process, std::time and uses none of the 30 items of ITEMS"
+                "the members that OUTSIDE_WORLD does not name (engine; 1 files) names none of std::env, std::fs, std::net, std::process, std::time and uses none of the 32 items of ITEMS"
             ) && line.ends_with("that of the members it names with whole modules (1 files) names exactly the modules it lists for them"),
             "{line}"
         );
