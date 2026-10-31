@@ -1,6 +1,6 @@
 //! Reads what Cargo prints for an audit run with `--message-format=json`: every lint occurrence that the compiler reported for a unit of a workspace member, where it reported it, and which macro wrote the code there, and each unit of a member that Cargo compiled or found unchanged.
 //!
-//! Every line must be one of Cargo's JSON messages, the last one `{"reason":"build-finished","success":true}`, and every diagnostic must be readable: a warning without a lint name, an error, a message for a package that is not a member, a lint occurrence without a primary span, and a member's target that is compiled for another edition than the workspace's, whose default lints the audit force-warns, are errors, never a pass.
+//! Every line must be one of Cargo's JSON messages of the kinds it reads (`compiler-message`, `compiler-artifact`, `build-script-executed` and, last, `{"reason":"build-finished","success":true}`), and every diagnostic must be readable: a warning without a lint name, an error, a message for a package that is not a member, a lint occurrence without a primary span, and a member's target that is compiled for another edition than the workspace's, whose default lints the audit force-warns, are errors, never a pass.
 
 use std::path::Path;
 
@@ -131,7 +131,13 @@ pub fn read(text: &str, members: &[Package], edition: &str) -> Result<Run, Strin
                     run.units.push(unit);
                 }
             }
-            _ => {}
+            // A dependency's build script, which carries no diagnostic: no workspace member has one.
+            "build-script-executed" => {}
+            other => {
+                return Err(format!(
+                    "Cargo printed a message of the kind `{other}`, which the lint audit does not read: {line}"
+                ));
+            }
         }
     }
     match finished {
@@ -228,6 +234,15 @@ fn occurrence(
     let diagnostic = message
         .get("message")
         .ok_or("a compiler message without a diagnostic")?;
+    match diagnostic.get("$message_type").and_then(Value::as_str) {
+        Some("diagnostic") => {}
+        Some(other) => {
+            return Err(format!(
+                "a compiler message of the kind `{other}`, which the audit does not read"
+            ));
+        }
+        None => return Err("a compiler message without `$message_type`".to_owned()),
+    }
     let level = diagnostic
         .get("level")
         .and_then(Value::as_str)
@@ -264,7 +279,7 @@ fn occurrence(
         kinds,
         root,
         lint: lint.to_owned(),
-        unknown: guarded::unknown_lint(diagnostic),
+        unknown: guarded::unknown_lint(diagnostic)?,
         spans,
     }))
 }
@@ -369,7 +384,8 @@ mod tests {
 
     #[test]
     fn reads_an_occurrence_and_the_macro_that_wrote_it() {
-        let text = format!("{DEPENDENCY}\n{LIBRARY}\n{MAP_IN_MACRO}\n{FINISHED}\n");
+        let script = r#"{"reason":"build-script-executed","package_id":"registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228","linked_libs":[],"linked_paths":[],"cfgs":[],"env":[],"out_dir":"/repo/target/debug/build/serde-1/out"}"#;
+        let text = format!("{DEPENDENCY}\n{script}\n{LIBRARY}\n{MAP_IN_MACRO}\n{FINISHED}\n");
         let run = read(&text, &members(), "2024").unwrap();
         let reported = run.reported;
         assert_eq!(reported.len(), 1);
@@ -515,6 +531,24 @@ mod tests {
             (
                 format!("{}\n{FINISHED}", LIBRARY.replace(r#","fresh":true"#, "")),
                 "without `fresh`",
+            ),
+            (
+                format!(
+                    "{}\n{FINISHED}",
+                    r#"{"reason":"timing-info","package_id":"a"}"#
+                ),
+                "of the kind `timing-info`, which the lint audit does not read",
+            ),
+            (
+                replaced(
+                    r#""$message_type":"diagnostic""#,
+                    r#""$message_type":"artifact""#,
+                ),
+                "of the kind `artifact`",
+            ),
+            (
+                replaced(r#""$message_type":"diagnostic","#, ""),
+                "without `$message_type`",
             ),
             (
                 format!(

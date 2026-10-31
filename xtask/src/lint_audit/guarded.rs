@@ -1,6 +1,6 @@
 //! The lints that the audit force-warns: every lint and group that a lint table of the workspace sets to `warn` or `deny`, and every lint that the pinned compiler turns on by default for the workspace's edition, except those that force-warning cannot name (the skip list, [`UNGUARDED`]).
 //!
-//! Both come from where they are decided, never from a list kept by hand: the lint tables from the manifests (`[workspace.lints]` in the root `Cargo.toml` and the copies in the binding crates' manifests), and the compiler's defaults from `rustc --edition <edition> -W help`, run with the pinned toolchain, so that a lint added to a table, or a default lint that a new toolchain brings, is guarded from the same commit. The skip list cannot go stale: [`check_refusals`] fails when the compiler calls a force-warned lint unknown that the list does not hold, and when force-warning a listed lint no longer fails for the reason the list gives.
+//! Both come from where they are decided, never from a list kept by hand: the lint tables from the manifests (`[workspace.lints]` in the root `Cargo.toml` and the copies in the binding crates' manifests), read only in their plain form ([`lint_table`] fails on every other form of TOML, which Cargo reads alike), and the compiler's defaults from `rustc --edition <edition> -W help`, run with the pinned toolchain, as are the lint groups of rustc, Clippy and rustdoc, which decide which `allow` entries switch a lint off ([`allowed_in`]), so that a lint added to a table, or a default lint that a new toolchain brings, is guarded from the same commit. The skip list cannot go stale: [`check_refusals`] fails when the compiler calls a force-warned lint unknown that the list does not hold, and when force-warning a listed lint no longer fails for the reason the list gives.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -69,22 +69,14 @@ pub const UNKNOWN_LINTS: &str = "unknown_lints";
 /// The lint tables of the workspace's manifests: `[workspace.lints.<tool>]` in the root `Cargo.toml`, which every other member inherits (the guardrails step checks that), and `[lints.<tool>]` in the binding crates' manifests.
 const LINT_TOOLS: [&str; 3] = ["rust", "clippy", "rustdoc"];
 
-/// Clippy's lint groups, which `rustc -W help` does not list: `clippy::all` and the categories of Clippy's documentation.
-const CLIPPY_GROUPS: [&str; 10] = [
-    "clippy::all",
-    "clippy::cargo",
-    "clippy::complexity",
-    "clippy::correctness",
-    "clippy::nursery",
-    "clippy::pedantic",
-    "clippy::perf",
-    "clippy::restriction",
-    "clippy::style",
-    "clippy::suspicious",
+/// The tools whose lint groups `rustc -W help` does not list, with the command that lists them under "Lint groups loaded by this crate:".
+const TOOL_HELP: [(&str, &str, &[&str]); 2] = [
+    ("clippy", "clippy-driver", &["rustc", "-W", "help"]),
+    ("rustdoc", "rustdoc", &["-W", "help"]),
 ];
 
-/// rustdoc's lint group, which `rustc -W help` does not list either.
-const RUSTDOC_GROUPS: [&str; 1] = ["rustdoc::all"];
+/// The keys that an entry of a lint table may set in its inline table: the ones the audit reads, and `check-cfg`, which only Cargo reads (for `unexpected_cfgs`).
+const ENTRY_KEYS: [&str; 3] = ["check-cfg", "level", "priority"];
 
 /// One entry of a lint table: the level it sets, and its priority, by which Cargo orders the table's entries when it passes them to the compiler, lowest first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +103,7 @@ pub struct Guarded {
 }
 
 impl Guarded {
-    /// Reads the lint tables of the root manifest and of the binding crates among `packages`, and the default levels and the groups of the compiler's lints from `rustc --edition <edition> -W help`, run in `root` so that the pinned toolchain answers.
+    /// Reads the lint tables of the root manifest and of the binding crates among `packages`, the default levels and the groups of the compiler's lints from `rustc --edition <edition> -W help`, and Clippy's and rustdoc's groups from their own `-W help` ([`TOOL_HELP`]), each run in `root` so that the pinned toolchain answers.
     pub fn load(root: &Path, packages: &[Package]) -> Result<Self, String> {
         let manifest = read(&root.join("Cargo.toml"))?;
         let edition = toml_subset::value(&manifest, "workspace.package", "edition")
@@ -135,16 +127,26 @@ impl Guarded {
         let help = String::from_utf8_lossy(&output.stdout);
         let defaults = compiler_defaults(&help)
             .map_err(|problem| format!("`{}`: {problem}", process::display(&rustc)))?;
-        let groups: BTreeSet<String> = compiler_groups(&help)
+        let mut groups: BTreeSet<String> = compiler_groups(&help)
             .map_err(|problem| format!("`{}`: {problem}", process::display(&rustc)))?
             .into_iter()
-            .chain(
-                CLIPPY_GROUPS
-                    .iter()
-                    .chain(&RUSTDOC_GROUPS)
-                    .map(|group| (*group).to_owned()),
-            )
             .collect();
+        for (tool, program, args) in TOOL_HELP {
+            let mut command = Command::new(program);
+            command.args(args).current_dir(root);
+            let output = process::capture(&mut command)?;
+            if !output.status.success() {
+                return Err(format!(
+                    "`{}` failed:\n{}",
+                    process::display(&command),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            groups.extend(
+                tool_groups(&String::from_utf8_lossy(&output.stdout), tool)
+                    .map_err(|problem| format!("`{}`: {problem}", process::display(&command)))?,
+            );
+        }
         let mut tables = vec![(
             "the root Cargo.toml".to_owned(),
             lint_table(&manifest, "workspace.lints")
@@ -230,6 +232,7 @@ impl Guarded {
 
 /// The entries of the tables `[<prefix>.rust]`, `[<prefix>.clippy]` and `[<prefix>.rustdoc]` in a manifest, keyed by the name the compiler gives the lint: `unsafe_code`, `clippy::all`, `rustdoc::broken_intra_doc_links`. A level is written as a string (`"warn"`), at priority 0, or as the `level` of an inline table, with its `priority` (`{ level = "warn", priority = -1 }`); anything else is an error.
 pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, Setting>, String> {
+    check_forms(text, prefix)?;
     let mut levels = BTreeMap::new();
     for tool in LINT_TOOLS {
         for entry in toml_subset::table(text, &format!("{prefix}.{tool}"))?.unwrap_or_default() {
@@ -247,7 +250,16 @@ pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, Setting>,
                                 )
                             })?;
                         }
-                        _ => {}
+                        "check-cfg" => {}
+                        other => {
+                            return Err(format!(
+                                "line {}: `{}` sets `{other}`, which the lint audit does not read; an entry's inline table may set only {}, written without quotes. {}",
+                                entry.line,
+                                entry.key,
+                                ENTRY_KEYS.map(|key| format!("`{key}`")).join(", "),
+                                plain_form(prefix)
+                            ));
+                        }
                     }
                 }
                 (level, priority)
@@ -277,6 +289,83 @@ pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, Setting>,
     Ok(levels)
 }
 
+/// How to write a lint table's entries so that the lint audit reads them, for the tables `[<prefix>.<tool>]`.
+fn plain_form(prefix: &str) -> String {
+    format!(
+        "Write each entry as `name = \"level\"` or `name = {{ level = \"…\", priority = … }}` directly in `[{prefix}.rust]`, `[{prefix}.clippy]` or `[{prefix}.rustdoc]`, the one form that the lint audit reads (the tables are `[workspace.lints.<tool>]` in the root Cargo.toml and `[lints.<tool>]` in a binding crate's manifest); Cargo reads the other forms of TOML too, so the audit would not see what they set."
+    )
+}
+
+/// Fails on every way of writing an entry of the lint tables `[<prefix>.<tool>]` that [`lint_table`] does not read, although Cargo reads them all alike: a table below a tool's table (`[<prefix>.clippy.all]`), an entry of `[<prefix>]` itself, a dotted key that reaches the lint tables from another table (`clippy.all = …` under `[<prefix>]`, or `lints.clippy.all = …` under `[workspace]`), a quoted or dotted key, a table written with quotes or as an array of tables, and the table of a tool other than rust, clippy and rustdoc. The message says how to write the entry in the one form that the audit reads.
+fn check_forms(text: &str, prefix: &str) -> Result<(), String> {
+    let lints = toml_subset::key_path(prefix)?;
+    for section in toml_subset::sections(text)? {
+        let header = if section.header.is_empty() {
+            Vec::new()
+        } else {
+            toml_subset::key_path(&section.header)
+                .map_err(|problem| format!("line {}: {problem}", section.line))?
+        };
+        let below = header.strip_prefix(lints.as_slice());
+        let plain = match below {
+            Some([tool]) => {
+                LINT_TOOLS.contains(&tool.as_str())
+                    && !section.array
+                    && section.header == format!("{prefix}.{tool}")
+            }
+            _ => false,
+        };
+        if let Some(rest) = below
+            && !plain
+            && (!rest.is_empty() || section.array || !section.entries.is_empty())
+        {
+            let form = match rest {
+                [] => "holds entries of its own".to_owned(),
+                [tool] if !LINT_TOOLS.contains(&tool.as_str()) => format!(
+                    "is the lint table of `{tool}`, which is not one of {}",
+                    LINT_TOOLS.join(", ")
+                ),
+                [_] => "is written with quotes or as an array of tables".to_owned(),
+                _ => "writes a lint table entry as a table of its own".to_owned(),
+            };
+            return Err(format!(
+                "line {}: `[{}]` {form}, which the lint audit does not read. {}",
+                section.line,
+                section.header,
+                plain_form(prefix)
+            ));
+        }
+        for entry in &section.entries {
+            let key = toml_subset::key_path(&entry.key)
+                .map_err(|problem| format!("line {}: {problem}", entry.line))?;
+            let full: Vec<String> = header.iter().chain(&key).cloned().collect();
+            if !full.starts_with(&lints) {
+                continue;
+            }
+            let bare = key.len() == 1 && entry.key == key[0];
+            if !(plain && bare) {
+                let place = if section.header.is_empty() {
+                    "before the first table".to_owned()
+                } else {
+                    format!("in `[{}]`", section.header)
+                };
+                let form = if plain {
+                    "a quoted or dotted key"
+                } else {
+                    "a key that reaches the lint tables from another table"
+                };
+                return Err(format!(
+                    "line {}: `{}` {place} is {form}, which the lint audit does not read. {}",
+                    entry.line,
+                    entry.key,
+                    plain_form(prefix)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The lints that a lint table switches off: those it sets to `allow` at a higher priority than every group of `groups` that it sets to `warn`, `deny` or `forbid`, of any tool. Cargo passes a table's entries to the compiler in the order of their priority, and of the flags that name a lint or a group that holds it, the last one wins; among entries of the same priority, the order is Cargo's own. So an `allow` at the same or a lower priority than such a group can leave the lint on, and the audit then judges its occurrences like those of any other guarded lint. Every group counts, whichever lints it holds, because the audit does not model that (`warnings` holds them all).
 fn allowed_in(table: &BTreeMap<String, Setting>, groups: &BTreeSet<String>) -> BTreeSet<String> {
     let highest_group = table
@@ -301,6 +390,12 @@ fn help_table<'a>(
     columns: &[&str],
     what: &str,
 ) -> Result<Vec<&'a str>, String> {
+    let titles = help.lines().filter(|line| line.trim() == title).count();
+    if titles > 1 {
+        return Err(format!(
+            "it printed the table of {what} (\"{title}\") {titles} times"
+        ));
+    }
     let mut lines = help.lines();
     lines
         .find(|line| line.trim() == title)
@@ -363,20 +458,46 @@ pub fn compiler_defaults(help: &str) -> Result<Vec<String>, String> {
     Ok(defaults)
 }
 
-/// The compiler's lint groups, from what `rustc -W help` prints: the table under "Lint groups provided by rustc:", one group per line with its name (written with `-` for `_`) and the lints it holds. A table without a group is an error.
-pub fn compiler_groups(help: &str) -> Result<Vec<String>, String> {
-    let groups: Vec<String> = help_table(
-        help,
-        "Lint groups provided by rustc:",
-        &["name", "sub-lints"],
-        "lint groups",
-    )?
-    .into_iter()
-    .filter_map(|line| line.split_whitespace().next())
-    .map(|name| name.replace('-', "_"))
-    .collect();
+/// The names in a table of lint groups of `-W help`, under `title`: one group per line, with its name (written with `-` for `_`) and the lints it holds. A line without both, or a table without a group, is an error.
+fn group_names(help: &str, title: &str) -> Result<Vec<String>, String> {
+    let mut groups = Vec::new();
+    for line in help_table(help, title, &["name", "sub-lints"], "lint groups")? {
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(_)) = (words.next(), words.next()) else {
+            return Err(format!(
+                "cannot read the line `{}` of the table of lint groups",
+                line.trim()
+            ));
+        };
+        groups.push(name.replace('-', "_"));
+    }
     if groups.is_empty() {
-        return Err("the table of the compiler's lint groups lists no group".to_owned());
+        return Err(format!(
+            "the table of lint groups (\"{title}\") lists no group"
+        ));
+    }
+    Ok(groups)
+}
+
+/// The compiler's lint groups, from what `rustc -W help` prints: the table under "Lint groups provided by rustc:". A name of a tool's group (with `::`) is an error.
+pub fn compiler_groups(help: &str) -> Result<Vec<String>, String> {
+    let groups = group_names(help, "Lint groups provided by rustc:")?;
+    if let Some(group) = groups.iter().find(|group| group.contains("::")) {
+        return Err(format!(
+            "the table of the compiler's lint groups lists `{group}`, a tool's group"
+        ));
+    }
+    Ok(groups)
+}
+
+/// The lint groups of the tool `tool`, `clippy` or `rustdoc`, from what its `-W help` prints: the table under "Lint groups loaded by this crate:". A name that does not start with `<tool>::` is an error.
+pub fn tool_groups(help: &str, tool: &str) -> Result<Vec<String>, String> {
+    let groups = group_names(help, "Lint groups loaded by this crate:")?;
+    let own = format!("{tool}::");
+    if let Some(group) = groups.iter().find(|group| !group.starts_with(&own)) {
+        return Err(format!(
+            "the table of {tool}'s lint groups lists `{group}`, which is not one of {tool}'s"
+        ));
     }
     Ok(groups)
 }
@@ -482,10 +603,22 @@ pub fn judge_refusals(
     }
 }
 
+/// The compiler's JSON diagnostics in `output`, what it printed with `--error-format json`: every line that is not empty must be one.
+fn diagnostics(output: &str) -> Result<Vec<json::Value>, String> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            json::parse(line).map_err(|error| {
+                format!("the compiler printed a line that is not one of its JSON diagnostics ({error}): {line}")
+            })
+        })
+        .collect()
+}
+
 /// Whether the compiler's JSON diagnostics `output` hold error E0602 for `lint`.
 fn refuses(output: &str, lint: &str) -> Result<bool, String> {
-    for line in output.lines().filter(|line| line.starts_with('{')) {
-        let diagnostic = json::parse(line)?;
+    for diagnostic in diagnostics(output)? {
         let code = diagnostic
             .get("code")
             .and_then(|code| code.get("code"))
@@ -504,21 +637,34 @@ fn refuses(output: &str, lint: &str) -> Result<bool, String> {
 /// The lints that the compiler's JSON diagnostics `output` call unknown: the names in its `unknown lint: `…`` warnings.
 fn unknown_lints(output: &str) -> Result<BTreeSet<String>, String> {
     let mut found = BTreeSet::new();
-    for line in output.lines().filter(|line| line.starts_with('{')) {
-        let diagnostic = json::parse(line)?;
-        if let Some(name) = unknown_lint(&diagnostic) {
+    for diagnostic in diagnostics(output)? {
+        if let Some(name) = unknown_lint(&diagnostic)? {
             found.insert(name);
         }
     }
     Ok(found)
 }
 
-/// The lint that a diagnostic calls unknown, if it is one of the compiler's `unknown lint: `…`` warnings.
-pub fn unknown_lint(diagnostic: &json::Value) -> Option<String> {
-    let code = diagnostic.get("code")?.get("code")?.as_str()?;
-    let message = diagnostic.get("message")?.as_str()?;
-    let name = message.strip_prefix("unknown lint: `")?.strip_suffix('`')?;
-    (code == UNKNOWN_LINTS).then(|| name.replace('-', "_"))
+/// The lint that a diagnostic calls unknown, if it is one of the compiler's warnings of the lint `unknown_lints`, `unknown lint: `…``; such a warning in any other words is an error, because the audit could not tell which lint the compiler does not know.
+pub fn unknown_lint(diagnostic: &json::Value) -> Result<Option<String>, String> {
+    let code = diagnostic
+        .get("code")
+        .and_then(|code| code.get("code"))
+        .and_then(json::Value::as_str);
+    if code != Some(UNKNOWN_LINTS) {
+        return Ok(None);
+    }
+    let message = diagnostic
+        .get("message")
+        .and_then(json::Value::as_str)
+        .unwrap_or_default();
+    message
+        .strip_prefix("unknown lint: `")
+        .and_then(|rest| rest.strip_suffix('`'))
+        .map(|name| Some(name.replace('-', "_")))
+        .ok_or_else(|| {
+            format!("a warning of `{UNKNOWN_LINTS}` that the audit cannot read: {message}")
+        })
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -585,10 +731,147 @@ Lint groups provided by rustc:
                 "Lint checks provided by rustc:\n\n  name  default  meaning\n  ----  -------  -------\n  a-lint  sometimes  never\n",
                 "`sometimes`",
             ),
+            (&format!("{HELP}{HELP}"), "2 times"),
         ] {
             let error = compiler_defaults(help).unwrap_err();
             assert!(error.contains(problem), "{help:?}: {error}");
         }
+        let groups = "Lint groups provided by rustc:\n\n  name  sub-lints\n  ----  ---------\n";
+        for (help, problem) in [
+            (
+                format!("{groups}  unused\n"),
+                "cannot read the line `unused`",
+            ),
+            (
+                format!("{groups}  clippy::all  clippy::x\n"),
+                "a tool's group",
+            ),
+            (format!("{groups}\n"), "lists no group"),
+        ] {
+            let error = compiler_groups(&help).unwrap_err();
+            assert!(error.contains(problem), "{help:?}: {error}");
+        }
+    }
+
+    /// What `clippy-driver rustc -W help` prints under its own title, shortened.
+    const CLIPPY_HELP: &str = "
+Lint groups loaded by this crate:
+
+                    name  sub-lints
+                    ----  ---------
+             clippy::all  clippy::almost-complete-range, clippy::approx-constant
+        clippy::pedantic  clippy::bool-to-int-with-if
+";
+
+    #[test]
+    fn reads_the_lint_groups_of_clippy_and_rustdoc() {
+        assert_eq!(
+            tool_groups(CLIPPY_HELP, "clippy").unwrap(),
+            ["clippy::all", "clippy::pedantic"]
+        );
+        assert!(
+            tool_groups(CLIPPY_HELP, "rustdoc")
+                .unwrap_err()
+                .contains("not one of rustdoc's")
+        );
+        assert!(
+            tool_groups(HELP, "clippy")
+                .unwrap_err()
+                .contains("no table of lint groups")
+        );
+        // The pinned toolchain's own: Clippy's ten groups, and rustdoc's one.
+        let root = crate::workspace_root();
+        for (tool, program, args) in TOOL_HELP {
+            let output = Command::new(program)
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            let groups = tool_groups(&String::from_utf8_lossy(&output.stdout), tool).unwrap();
+            assert!(groups.contains(&format!("{tool}::all")), "{groups:?}");
+            if tool == "clippy" {
+                assert_eq!(groups.len(), 10, "{groups:?}");
+            }
+        }
+    }
+
+    /// Required by the third review of CORE-009: every way of writing a lint table entry that Cargo reads but `lint_table` does not fails, and says how to write it.
+    #[test]
+    fn fails_on_every_form_of_a_lint_table_entry_that_it_does_not_read() {
+        for (manifest, prefix, form) in [
+            (
+                "[workspace.lints.clippy.all]\nlevel = \"warn\"\npriority = -1\n",
+                "workspace.lints",
+                "line 1: `[workspace.lints.clippy.all]` writes a lint table entry as a table of its own",
+            ),
+            (
+                "[workspace.lints]\nclippy.all = { level = \"warn\", priority = -1 }\n",
+                "workspace.lints",
+                "line 1: `[workspace.lints]` holds entries of its own",
+            ),
+            (
+                "[workspace]\nmembers = []\nlints.clippy.all = { level = \"warn\" }\n",
+                "workspace.lints",
+                "line 3: `lints.clippy.all` in `[workspace]` is a key that reaches the lint tables from another table",
+            ),
+            (
+                "workspace.lints.clippy.all = \"warn\"\n",
+                "workspace.lints",
+                "line 1: `workspace.lints.clippy.all` before the first table is a key that reaches",
+            ),
+            (
+                "[lints]\nclippy = { all = \"warn\" }\n",
+                "lints",
+                "line 1: `[lints]` holds entries of its own",
+            ),
+            (
+                "[workspace.lints.clippy]\n\"all\" = \"warn\"\n",
+                "workspace.lints",
+                "line 2: `\"all\"` in `[workspace.lints.clippy]` is a quoted or dotted key",
+            ),
+            (
+                "[workspace.lints.clippy]\nall.level = \"warn\"\n",
+                "workspace.lints",
+                "line 2: `all.level` in `[workspace.lints.clippy]` is a quoted or dotted key",
+            ),
+            (
+                "[workspace.lints.\"clippy\"]\nall = \"warn\"\n",
+                "workspace.lints",
+                "is written with quotes or as an array of tables",
+            ),
+            (
+                "[[workspace.lints.clippy]]\nall = \"warn\"\n",
+                "workspace.lints",
+                "is written with quotes or as an array of tables",
+            ),
+            (
+                "[workspace.lints.clipy]\nall = \"warn\"\n",
+                "workspace.lints",
+                "is the lint table of `clipy`, which is not one of rust, clippy, rustdoc",
+            ),
+            (
+                "[workspace.lints.clippy]\nall = { level = \"warn\", \"priority\" = -1 }\n",
+                "workspace.lints",
+                "line 2: `all` sets `\"priority\"`, which the lint audit does not read",
+            ),
+            (
+                "[lints.clippy]\nall = { level = \"warn\", priorty = -1 }\n",
+                "lints",
+                "line 2: `all` sets `priorty`",
+            ),
+        ] {
+            let error = lint_table(manifest, prefix).unwrap_err();
+            assert!(
+                error.contains(form)
+                    && error.contains(&format!(
+                        "directly in `[{prefix}.rust]`, `[{prefix}.clippy]`"
+                    )),
+                "{manifest:?}: {error}"
+            );
+        }
+        // Tables that do not reach the lint tables, and an empty `[workspace.lints]`, are left alone.
+        let fine = "[workspace]\nmembers = []\n\n[workspace.lints]\n\n[workspace.lints.clippy]\nall = { level = \"warn\", priority = -1 }\n\n[package]\nlints = 1\n";
+        assert_eq!(lint_table(fine, "workspace.lints").unwrap().len(), 1);
     }
 
     #[test]
@@ -640,8 +923,7 @@ manual_clamp = "allow"
         let groups: BTreeSet<String> = compiler_groups(HELP)
             .unwrap()
             .into_iter()
-            .chain(["unused".to_owned()])
-            .chain(CLIPPY_GROUPS.iter().map(|group| (*group).to_owned()))
+            .chain(["unused".to_owned(), "clippy::all".to_owned()])
             .collect();
         // The review's table: below the group, and at its priority, where the order is Cargo's own, the lint stays on; above it, it is off.
         let review = r#"
@@ -783,13 +1065,21 @@ manual_clamp = "allow"
     fn recognizes_the_compilers_unknown_lint_warnings() {
         let warning = json::parse(r#"{"$message_type":"diagnostic","message":"unknown lint: `tail_call_track_caller`","code":{"code":"unknown_lints","explanation":null},"level":"warning"}"#).unwrap();
         assert_eq!(
-            unknown_lint(&warning).as_deref(),
+            unknown_lint(&warning).unwrap().as_deref(),
             Some("tail_call_track_caller")
         );
         let other = json::parse(r#"{"message":"unused variable: `x`","code":{"code":"unused_variables","explanation":null},"level":"warning"}"#).unwrap();
-        assert_eq!(unknown_lint(&other), None);
+        assert_eq!(unknown_lint(&other).unwrap(), None);
+        let reworded = json::parse(r#"{"message":"lint `x` is unknown","code":{"code":"unknown_lints","explanation":null},"level":"warning"}"#).unwrap();
+        assert!(unknown_lint(&reworded).unwrap_err().contains("cannot read"));
+        assert!(
+            unknown_lints("{}\nnot JSON\n")
+                .unwrap_err()
+                .contains("not one of its JSON diagnostics")
+        );
+        assert!(refuses("not JSON\n", "warnings").is_err());
         let output = format!(
-            "{}\nnot JSON\n{}\n",
+            "{}\n\n{}\n",
             r#"{"message":"`warnings` lint group is not supported with ´--force-warn´","code":{"code":"E0602","explanation":"…"},"level":"error"}"#,
             r#"{"message":"unknown lint: `duplicate_tools`","code":{"code":"unknown_lints","explanation":null},"level":"warning"}"#
         );

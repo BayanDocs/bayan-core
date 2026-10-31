@@ -45,6 +45,8 @@ struct Occurrence {
     shown: String,
     /// The crate root and configuration of each unit that reported it.
     units: BTreeSet<(PathBuf, Config)>,
+    /// The units that may have reported it: those of a target whose unit that is not a test the second Cargo invocation of a run did not replay, so that the audit cannot tell whether a test reported it, and judges it both ways.
+    assumed: BTreeSet<(PathBuf, Config)>,
     /// The runs that reported it.
     runs: BTreeSet<String>,
 }
@@ -154,19 +156,19 @@ impl<'a> Audit<'a> {
         };
         // A target whose unit that is not a test the second invocation did not replay: its occurrences count both as tests and not.
         for reported in in_non_tests.keys() {
-            self.add(reported, &not_tests, run)?;
+            self.add(reported, &not_tests, run, false)?;
             if !replayed.contains(&reported.target_key()) {
-                self.add(reported, &tests, run)?;
+                self.add(reported, &tests, run, true)?;
             }
         }
         for (reported, count) in &in_all {
             if reported.always_tests() {
-                self.add(reported, &tests, run)?;
+                self.add(reported, &tests, run, false)?;
             } else if !replayed.contains(&reported.target_key()) {
-                self.add(reported, &not_tests, run)?;
-                self.add(reported, &tests, run)?;
+                self.add(reported, &not_tests, run, true)?;
+                self.add(reported, &tests, run, true)?;
             } else if *count > in_non_tests.get(reported).copied().unwrap_or_default() {
-                self.add(reported, &tests, run)?;
+                self.add(reported, &tests, run, false)?;
             }
         }
         let mut summary = format!(
@@ -193,13 +195,19 @@ impl<'a> Audit<'a> {
             .map_err(|problem| format!("{run}: {problem}"))?
             .reported;
         for occurrence in &reported {
-            self.add(occurrence, config, run)?;
+            self.add(occurrence, config, run, false)?;
         }
         Ok(())
     }
 
-    /// Records one report of the unit configuration `config` in the run `run`.
-    fn add(&mut self, reported: &Reported, config: &Config, run: &str) -> Result<(), String> {
+    /// Records one report of the unit configuration `config` in the run `run`; `assumed` if the audit cannot tell whether a unit of that configuration reported it ([`Occurrence::assumed`]).
+    fn add(
+        &mut self,
+        reported: &Reported,
+        config: &Config,
+        run: &str,
+        assumed: bool,
+    ) -> Result<(), String> {
         if let Some(lint) = &reported.unknown
             && self.guarded.lints.contains(lint)
         {
@@ -230,9 +238,15 @@ impl<'a> Audit<'a> {
             .or_insert_with(|| Occurrence {
                 shown,
                 units: BTreeSet::new(),
+                assumed: BTreeSet::new(),
                 runs: BTreeSet::new(),
             });
-        occurrence.units.insert((root, config.clone()));
+        let unit = (root, config.clone());
+        if assumed {
+            occurrence.assumed.insert(unit);
+        } else {
+            occurrence.units.insert(unit);
+        }
         occurrence.runs.insert(run.to_owned());
         Ok(())
     }
@@ -310,22 +324,43 @@ impl<'a> Audit<'a> {
         } = self;
         let mut uncovered = Vec::new();
         for ((lint, places), occurrence) in occurrences.iter() {
-            let mut covered = true;
-            for (root, config) in &occurrence.units {
+            // Whether every place is covered in the units that reported it, and in those that may have.
+            let mut certain = true;
+            let mut assumed = true;
+            let mut somewhere = false;
+            let units = occurrence.units.iter().map(|unit| (unit, false)).chain(
+                occurrence
+                    .assumed
+                    .difference(&occurrence.units)
+                    .map(|unit| (unit, true)),
+            );
+            for ((root, config), maybe) in units {
+                let mut covered = true;
                 for place in places {
                     covered &= model.covers(lint, place, root, config)?;
                 }
+                somewhere |= covered;
+                if maybe {
+                    assumed &= covered;
+                } else {
+                    certain &= covered;
+                }
             }
-            if covered {
+            if certain && assumed {
                 continue;
             }
+            let not_replayed = if certain && somewhere {
+                ", which an exception written out in full covers in some of the units that may have reported it but not in all: the second Cargo invocation did not replay the unit of this target that is not a test, so the audit cannot tell whether a test reported it and judges it both ways (see the summary of the audit run)"
+            } else {
+                ""
+            };
             let outside = places.iter().any(|place| !model.reads(&place.file));
             let runs: Vec<&str> = occurrence.runs.iter().map(String::as_str).collect();
             uncovered.push(Uncovered {
                 lint: lint.clone(),
                 file: places[0].file.clone(),
                 shown: format!(
-                    "  {}: `{}`{} ({})",
+                    "  {}: `{}`{}{not_replayed} ({})",
                     occurrence.shown,
                     lint,
                     if outside {
@@ -722,9 +757,13 @@ mod tests {
                 summary.contains("did not replay the units that are not tests of 1 targets"),
                 "{summary}"
             );
-            // The occurrence counts as not a test too, where the `cfg_attr` does not apply.
+            // The occurrence counts as not a test too, where the `cfg_attr` does not apply, and its line says so.
             let error = audit.finish().unwrap_err();
-            assert!(error.contains("`dead_code`"), "{error}");
+            assert!(
+                error.contains("`dead_code`, which an exception written out in full covers in some of the units")
+                    && error.contains("did not replay the unit of this target"),
+                "{error}"
+            );
             // And a message of the first that the second does not repeat is no error for such a target.
             let mut audit = Audit::new(
                 &workspace.root,
