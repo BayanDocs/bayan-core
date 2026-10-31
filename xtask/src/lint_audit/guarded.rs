@@ -69,6 +69,32 @@ pub const UNKNOWN_LINTS: &str = "unknown_lints";
 /// The lint tables of the workspace's manifests: `[workspace.lints.<tool>]` in the root `Cargo.toml`, which every other member inherits (the guardrails step checks that), and `[lints.<tool>]` in the binding crates' manifests.
 const LINT_TOOLS: [&str; 3] = ["rust", "clippy", "rustdoc"];
 
+/// Clippy's lint groups, which `rustc -W help` does not list: `clippy::all` and the categories of Clippy's documentation.
+const CLIPPY_GROUPS: [&str; 10] = [
+    "clippy::all",
+    "clippy::cargo",
+    "clippy::complexity",
+    "clippy::correctness",
+    "clippy::nursery",
+    "clippy::pedantic",
+    "clippy::perf",
+    "clippy::restriction",
+    "clippy::style",
+    "clippy::suspicious",
+];
+
+/// rustdoc's lint group, which `rustc -W help` does not list either.
+const RUSTDOC_GROUPS: [&str; 1] = ["rustdoc::all"];
+
+/// One entry of a lint table: the level it sets, and its priority, by which Cargo orders the table's entries when it passes them to the compiler, lowest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// `allow`, `warn`, `deny` or `forbid`.
+    pub level: String,
+    /// The entry's `priority`, 0 if it has none.
+    pub priority: i64,
+}
+
 /// What the audit force-warns, and the levels it needs to judge an occurrence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guarded {
@@ -80,12 +106,12 @@ pub struct Guarded {
     pub from_compiler: usize,
     /// The workspace's edition, from the root `Cargo.toml`.
     pub edition: String,
-    /// For each workspace member, the lints that its lint table sets to `allow`. A group such as `clippy::all` also force-warns these members of it, whose occurrences the audit ignores.
+    /// For each workspace member, the lints that its lint table switches off ([`allowed_in`]). A group such as `clippy::all` also force-warns these members of it, whose occurrences the audit ignores.
     pub allowed: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Guarded {
-    /// Reads the lint tables of the root manifest and of the binding crates among `packages`, and the default levels of the compiler's lints from `rustc --edition <edition> -W help`, run in `root` so that the pinned toolchain answers.
+    /// Reads the lint tables of the root manifest and of the binding crates among `packages`, and the default levels and the groups of the compiler's lints from `rustc --edition <edition> -W help`, run in `root` so that the pinned toolchain answers.
     pub fn load(root: &Path, packages: &[Package]) -> Result<Self, String> {
         let manifest = read(&root.join("Cargo.toml"))?;
         let edition = toml_subset::value(&manifest, "workspace.package", "edition")
@@ -94,23 +120,6 @@ impl Guarded {
             })
             .and_then(|edition| toml_subset::string(&edition))
             .map_err(|problem| format!("the root Cargo.toml: {problem}"))?;
-        let mut tables = vec![(
-            "the root Cargo.toml".to_owned(),
-            lint_table(&manifest, "workspace.lints")
-                .map_err(|problem| format!("the root Cargo.toml: {problem}"))?,
-        )];
-        let mut allowed = BTreeMap::new();
-        for package in packages {
-            if policy::BINDING_CRATES.contains(&package.name.as_str()) {
-                let path = package.folder.join("Cargo.toml");
-                let table = lint_table(&read(&path)?, "lints")
-                    .map_err(|problem| format!("{}: {problem}", path.display()))?;
-                allowed.insert(package.name.clone(), allowed_in(&table));
-                tables.push((format!("the manifest of {}", package.name), table));
-            } else {
-                allowed.insert(package.name.clone(), allowed_in(&tables[0].1));
-            }
-        }
         let mut rustc = Command::new("rustc");
         rustc
             .args(["--edition", &edition, "-W", "help"])
@@ -123,14 +132,42 @@ impl Guarded {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        let defaults = compiler_defaults(&String::from_utf8_lossy(&output.stdout))
+        let help = String::from_utf8_lossy(&output.stdout);
+        let defaults = compiler_defaults(&help)
             .map_err(|problem| format!("`{}`: {problem}", process::display(&rustc)))?;
+        let groups: BTreeSet<String> = compiler_groups(&help)
+            .map_err(|problem| format!("`{}`: {problem}", process::display(&rustc)))?
+            .into_iter()
+            .chain(
+                CLIPPY_GROUPS
+                    .iter()
+                    .chain(&RUSTDOC_GROUPS)
+                    .map(|group| (*group).to_owned()),
+            )
+            .collect();
+        let mut tables = vec![(
+            "the root Cargo.toml".to_owned(),
+            lint_table(&manifest, "workspace.lints")
+                .map_err(|problem| format!("the root Cargo.toml: {problem}"))?,
+        )];
+        let mut allowed = BTreeMap::new();
+        for package in packages {
+            if policy::BINDING_CRATES.contains(&package.name.as_str()) {
+                let path = package.folder.join("Cargo.toml");
+                let table = lint_table(&read(&path)?, "lints")
+                    .map_err(|problem| format!("{}: {problem}", path.display()))?;
+                allowed.insert(package.name.clone(), allowed_in(&table, &groups));
+                tables.push((format!("the manifest of {}", package.name), table));
+            } else {
+                allowed.insert(package.name.clone(), allowed_in(&tables[0].1, &groups));
+            }
+        }
         Self::new(&tables, &defaults, edition, allowed)
     }
 
     /// The guarded lints from the lint tables `tables` (each with where it comes from) and the lints that the compiler turns on by default, `defaults`. Fails if the list comes out empty.
     pub fn new(
-        tables: &[(String, BTreeMap<String, String>)],
+        tables: &[(String, BTreeMap<String, Setting>)],
         defaults: &[String],
         edition: String,
         allowed: BTreeMap<String, BTreeSet<String>>,
@@ -138,7 +175,7 @@ impl Guarded {
         let from_tables: BTreeSet<&str> = tables
             .iter()
             .flat_map(|(_, table)| table.iter())
-            .filter(|(_, level)| matches!(level.as_str(), "warn" | "deny"))
+            .filter(|(_, setting)| matches!(setting.level.as_str(), "warn" | "deny"))
             .map(|(lint, _)| lint.as_str())
             .collect();
         let skipped: BTreeSet<&str> = UNGUARDED.iter().map(|unguarded| unguarded.lint).collect();
@@ -191,17 +228,31 @@ impl Guarded {
     }
 }
 
-/// The lint levels of the tables `[<prefix>.rust]`, `[<prefix>.clippy]` and `[<prefix>.rustdoc]` in a manifest, keyed by the name the compiler gives the lint: `unsafe_code`, `clippy::all`, `rustdoc::broken_intra_doc_links`. A level is written as a string (`"warn"`) or as the `level` of an inline table (`{ level = "warn", priority = -1 }`); anything else is an error.
-pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, String>, String> {
+/// The entries of the tables `[<prefix>.rust]`, `[<prefix>.clippy]` and `[<prefix>.rustdoc]` in a manifest, keyed by the name the compiler gives the lint: `unsafe_code`, `clippy::all`, `rustdoc::broken_intra_doc_links`. A level is written as a string (`"warn"`), at priority 0, or as the `level` of an inline table, with its `priority` (`{ level = "warn", priority = -1 }`); anything else is an error.
+pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, Setting>, String> {
     let mut levels = BTreeMap::new();
     for tool in LINT_TOOLS {
         for entry in toml_subset::table(text, &format!("{prefix}.{tool}"))?.unwrap_or_default() {
-            let level = if entry.value.starts_with('{') {
-                toml_subset::field_of_each(&format!("[{}]", entry.value), "level")?
-                    .pop()
-                    .unwrap_or_default()
+            let (level, priority) = if entry.value.starts_with('{') {
+                let mut level = String::new();
+                let mut priority = 0;
+                for (key, value) in toml_subset::inline_table(&entry.value)? {
+                    match key.as_str() {
+                        "level" => level = toml_subset::string(&value)?,
+                        "priority" => {
+                            priority = value.parse().map_err(|_| {
+                                format!(
+                                    "line {}: `{}` has the priority `{value}`, which is not a whole number",
+                                    entry.line, entry.key
+                                )
+                            })?;
+                        }
+                        _ => {}
+                    }
+                }
+                (level, priority)
             } else {
-                toml_subset::string(&entry.value)?
+                (toml_subset::string(&entry.value)?, 0)
             };
             if !matches!(level.as_str(), "allow" | "warn" | "deny" | "forbid") {
                 return Err(format!(
@@ -215,7 +266,7 @@ pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, String>, 
             } else {
                 format!("{tool}::{key}")
             };
-            if levels.insert(lint, level).is_some() {
+            if levels.insert(lint, Setting { level, priority }).is_some() {
                 return Err(format!(
                     "line {}: `{}` appears twice",
                     entry.line, entry.key
@@ -226,29 +277,40 @@ pub fn lint_table(text: &str, prefix: &str) -> Result<BTreeMap<String, String>, 
     Ok(levels)
 }
 
-/// The lints that a lint table sets to `allow`.
-fn allowed_in(table: &BTreeMap<String, String>) -> BTreeSet<String> {
+/// The lints that a lint table switches off: those it sets to `allow` at a higher priority than every group of `groups` that it sets to `warn`, `deny` or `forbid`, of any tool. Cargo passes a table's entries to the compiler in the order of their priority, and of the flags that name a lint or a group that holds it, the last one wins; among entries of the same priority, the order is Cargo's own. So an `allow` at the same or a lower priority than such a group can leave the lint on, and the audit then judges its occurrences like those of any other guarded lint. Every group counts, whichever lints it holds, because the audit does not model that (`warnings` holds them all).
+fn allowed_in(table: &BTreeMap<String, Setting>, groups: &BTreeSet<String>) -> BTreeSet<String> {
+    let highest_group = table
+        .iter()
+        .filter(|(name, setting)| groups.contains(*name) && setting.level != "allow")
+        .map(|(_, setting)| setting.priority)
+        .max();
     table
         .iter()
-        .filter(|(_, level)| level.as_str() == "allow")
+        .filter(|(_, setting)| {
+            setting.level == "allow"
+                && highest_group.is_none_or(|priority| setting.priority > priority)
+        })
         .map(|(lint, _)| lint.clone())
         .collect()
 }
 
-/// The lints that the compiler turns on by default, `warn` or `deny`, from what `rustc --edition <edition> -W help` prints: the table under "Lint checks provided by rustc:", one lint per line with its name (written with `-` for `_`), its default level and its meaning, between a line of dashes and an empty line. Anything else in the table, or a table without a lint, is an error.
-pub fn compiler_defaults(help: &str) -> Result<Vec<String>, String> {
+/// The rows of the table under the line `title` in what `rustc -W help` prints, which has the columns `columns`: the lines between the line of dashes under the header and the next empty line. A missing table, header or line of dashes is an error; `what` names the table.
+fn help_table<'a>(
+    help: &'a str,
+    title: &str,
+    columns: &[&str],
+    what: &str,
+) -> Result<Vec<&'a str>, String> {
     let mut lines = help.lines();
     lines
-        .find(|line| line.trim() == "Lint checks provided by rustc:")
-        .ok_or(
-            "it printed no table of the compiler's lints (\"Lint checks provided by rustc:\")",
-        )?;
+        .find(|line| line.trim() == title)
+        .ok_or_else(|| format!("it printed no table of {what} (\"{title}\")"))?;
     let header = lines
         .find(|line| !line.trim().is_empty())
-        .ok_or("the table of lints has no header")?;
-    if header.split_whitespace().collect::<Vec<_>>() != ["name", "default", "meaning"] {
+        .ok_or_else(|| format!("the table of {what} has no header"))?;
+    if header.split_whitespace().collect::<Vec<_>>() != columns {
         return Err(format!(
-            "the table of lints has an unexpected header: `{}`",
+            "the table of {what} has an unexpected header: `{}`",
             header.trim()
         ));
     }
@@ -259,13 +321,24 @@ pub fn compiler_defaults(help: &str) -> Result<Vec<String>, String> {
         || dashes.trim().is_empty()
     {
         return Err(format!(
-            "the table of lints has no line of dashes under its header, but `{}`",
+            "the table of {what} has no line of dashes under its header, but `{}`",
             dashes.trim()
         ));
     }
+    Ok(lines.take_while(|line| !line.trim().is_empty()).collect())
+}
+
+/// The lints that the compiler turns on by default, `warn` or `deny`, from what `rustc --edition <edition> -W help` prints: the table under "Lint checks provided by rustc:", one lint per line with its name (written with `-` for `_`), its default level and its meaning, between a line of dashes and an empty line. Anything else in the table, or a table without a lint, is an error.
+pub fn compiler_defaults(help: &str) -> Result<Vec<String>, String> {
+    let lines = help_table(
+        help,
+        "Lint checks provided by rustc:",
+        &["name", "default", "meaning"],
+        "lints",
+    )?;
     let mut defaults = Vec::new();
     let mut rows = 0_usize;
-    for line in lines.take_while(|line| !line.trim().is_empty()) {
+    for line in lines {
         let mut words = line.split_whitespace();
         let (Some(name), Some(level)) = (words.next(), words.next()) else {
             return Err(format!(
@@ -288,6 +361,24 @@ pub fn compiler_defaults(help: &str) -> Result<Vec<String>, String> {
         return Err("the table of the compiler's lints lists no lint".to_owned());
     }
     Ok(defaults)
+}
+
+/// The compiler's lint groups, from what `rustc -W help` prints: the table under "Lint groups provided by rustc:", one group per line with its name (written with `-` for `_`) and the lints it holds. A table without a group is an error.
+pub fn compiler_groups(help: &str) -> Result<Vec<String>, String> {
+    let groups: Vec<String> = help_table(
+        help,
+        "Lint groups provided by rustc:",
+        &["name", "sub-lints"],
+        "lint groups",
+    )?
+    .into_iter()
+    .filter_map(|line| line.split_whitespace().next())
+    .map(|name| name.replace('-', "_"))
+    .collect();
+    if groups.is_empty() {
+        return Err("the table of the compiler's lint groups lists no group".to_owned());
+    }
+    Ok(groups)
 }
 
 /// Checks the reasons of the skip list against the pinned compiler, by compiling an empty crate with rustc in `root`: force-warning `warnings` must fail with error E0602, and force-warning the other listed lints, together with every guarded lint that is not a tool's (such as Clippy's), must report exactly the listed ones as unknown. Returns one line describing what was checked.
@@ -461,6 +552,7 @@ Lint groups provided by rustc:
                 name  sub-lints
                 ----  ---------
             warnings  all lints that are set to issue warnings
+   nonstandard-style  non-camel-case-types, non-snake-case, non-upper-case-globals
 ";
 
     #[test]
@@ -512,25 +604,105 @@ all = { level = "warn", priority = -1 }
 manual_clamp = "allow"
 "#;
         let levels = lint_table(manifest, "workspace.lints").unwrap();
-        let expected: BTreeMap<String, String> = [
-            ("clippy::all", "warn"),
-            ("clippy::manual_clamp", "allow"),
-            ("missing_docs", "warn"),
-            ("unexpected_cfgs", "warn"),
-            ("unsafe_code", "forbid"),
+        let expected: BTreeMap<String, Setting> = [
+            ("clippy::all", "warn", -1),
+            ("clippy::manual_clamp", "allow", 0),
+            ("missing_docs", "warn", 0),
+            ("unexpected_cfgs", "warn", 0),
+            ("unsafe_code", "forbid", 0),
         ]
         .into_iter()
-        .map(|(lint, level)| (lint.to_owned(), level.to_owned()))
+        .map(|(lint, level, priority)| {
+            (
+                lint.to_owned(),
+                Setting {
+                    level: level.to_owned(),
+                    priority,
+                },
+            )
+        })
         .collect();
         assert_eq!(levels, expected);
         assert!(lint_table("[lints.rust]\nx = \"sometimes\"\n", "lints").is_err());
         assert!(lint_table("[lints.rust]\nx = { priority = 1 }\n", "lints").is_err());
+        assert!(
+            lint_table(
+                "[lints.rust]\nx = { level = \"warn\", priority = \"high\" }\n",
+                "lints"
+            )
+            .is_err()
+        );
     }
 
-    fn table(levels: &[(&str, &str)]) -> BTreeMap<String, String> {
+    /// Required by the second review of CORE-009: Cargo passes `-A clippy::disallowed_types` before `-W clippy::all` when the `allow` has the lower priority, so the ban stays on and the audit must judge it.
+    #[test]
+    fn an_allow_switches_a_lint_off_only_above_every_group_that_turns_it_on() {
+        let groups: BTreeSet<String> = compiler_groups(HELP)
+            .unwrap()
+            .into_iter()
+            .chain(["unused".to_owned()])
+            .chain(CLIPPY_GROUPS.iter().map(|group| (*group).to_owned()))
+            .collect();
+        // The review's table: below the group, and at its priority, where the order is Cargo's own, the lint stays on; above it, it is off.
+        let review = r#"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+disallowed_types = { level = "allow", priority = -2 }
+unwrap_used = { level = "allow", priority = -1 }
+manual_clamp = "allow"
+"#;
+        let allowed = allowed_in(&lint_table(review, "lints").unwrap(), &groups);
+        assert_eq!(allowed, BTreeSet::from(["clippy::manual_clamp".to_owned()]));
+        // A group of another tool counts too, because the audit does not model which lints a group holds.
+        let across = r#"
+[lints.rust]
+unused = { level = "warn", priority = 1 }
+dead_code = { level = "allow", priority = 1 }
+unreachable_code = { level = "allow", priority = 2 }
+
+[lints.clippy]
+manual_clamp = "allow"
+"#;
+        let allowed = allowed_in(&lint_table(across, "lints").unwrap(), &groups);
+        assert_eq!(allowed, BTreeSet::from(["unreachable_code".to_owned()]));
+        // The workspace's own tables: `manual_clamp` at priority 0 sits above `clippy::all` at -1.
+        let root = std::fs::read_to_string(crate::workspace_root().join("Cargo.toml")).unwrap();
+        let workspace = lint_table(&root, "workspace.lints").unwrap();
+        assert!(allowed_in(&workspace, &groups).contains("clippy::manual_clamp"));
+    }
+
+    #[test]
+    fn reads_the_compilers_lint_groups() {
+        assert_eq!(
+            compiler_groups(HELP).unwrap(),
+            ["warnings", "nonstandard_style"]
+        );
+        let without = HELP.replace("Lint groups provided by rustc:", "Lint groups:");
+        assert!(
+            compiler_groups(&without)
+                .unwrap_err()
+                .contains("no table of lint groups")
+        );
+        let empty = &HELP[..HELP.find("            warnings  all").unwrap()];
+        assert!(
+            compiler_groups(empty)
+                .unwrap_err()
+                .contains("lists no group")
+        );
+    }
+
+    fn table(levels: &[(&str, &str)]) -> BTreeMap<String, Setting> {
         levels
             .iter()
-            .map(|(lint, level)| ((*lint).to_owned(), (*level).to_owned()))
+            .map(|(lint, level)| {
+                (
+                    (*lint).to_owned(),
+                    Setting {
+                        level: (*level).to_owned(),
+                        priority: 0,
+                    },
+                )
+            })
             .collect()
     }
 
@@ -652,8 +824,8 @@ manual_clamp = "allow"
             ("crates/bayan-wasm/Cargo.toml", "lints"),
         ] {
             let text = std::fs::read_to_string(root.join(manifest)).unwrap();
-            for (lint, level) in lint_table(&text, prefix).unwrap() {
-                if level == "warn" || level == "deny" {
+            for (lint, setting) in lint_table(&text, prefix).unwrap() {
+                if setting.level == "warn" || setting.level == "deny" {
                     expected.push(lint);
                 }
             }

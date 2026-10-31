@@ -349,7 +349,7 @@ fn judge_audit(
         .collect();
     if missing.is_empty() {
         Ok(format!(
-            "the lint audit rejected what the case silences, which Clippy accepts: {}",
+            "the lint audit rejected what the case silences: {}",
             silenced(case).join(", ")
         ))
     } else {

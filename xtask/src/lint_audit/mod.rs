@@ -8,12 +8,13 @@
 //!
 //! After the four Clippy runs, which stay as they are, so that the compiler remains the first line of enforcement, the audit compiles the workspace again in each run's configuration, with every guarded lint passed as `--force-warn <lint>` after `--` (`guarded.rs`). A force-warned lint is reported wherever it occurs, also where an attribute sets it to `allow` or `expect`, and the report is a warning that ignores `-D warnings`, so the runs enforce nothing by their exit status: after the Clippy runs passed, every occurrence they report is one that an attribute silences in those runs. Each occurrence must lie where an exception written out in full covers it ([`coverage`]); any other fails the step, with the lint, the file, the line and the macro that wrote the code, and so does an occurrence in a file that the source check did not read, which no exception written in the workspace can cover. The compiler reports code that a macro writes at the macro's own code, the same place for every call of the macro, so an occurrence is told apart by its places together with the whole chain of macro calls that wrote the code there, and each call is checked on its own: an exception that covers one call says nothing about another, which something else may silence. Lints set to `forbid` need nothing, because the compiler rejects every exception to them (error E0453). Before the runs, the audit checks the skip list against the pinned compiler with an empty crate ([`check_refusals`]).
 //!
-//! An exception inside a `cfg_attr` applies only where its condition holds, and `test` is one of the conditions, so the audit must know which unit reported each occurrence: the library compiled as itself or as its unit tests. Cargo's messages do not say, because both units have the same target. Each audit run therefore runs Cargo twice in the same configuration: first for the units that are not tests (`--lib --bins --examples`), then for all targets (`--all-targets`). The second run compiles the test units and replays the messages of the others, which it finds unchanged, so what it reports beyond the first run comes from tests; integration tests and benchmarks are always tests. The second run is the one whose units are checked for every member, and a message of the first run that the second does not repeat is an error. The audit runs share the build folder with the Clippy runs: their arguments differ, so Cargo recompiles the members (not their dependencies) in each, and the Clippy step's check of when each dependency file was written still holds for the units that each Clippy run compiles.
+//! An exception inside a `cfg_attr` applies only where its condition holds, and `test` is one of the conditions, so the audit must know which unit reported each occurrence: the library compiled as itself or as its unit tests. Cargo's messages do not say, because both units have the same target. Each audit run therefore runs Cargo twice in the same configuration: first for the units that are not tests (`--lib --bins --examples`), then for all targets (`--all-targets`). Where the second run replays the messages of a target's unit that is not a test from the first, because it finds that very unit unchanged, what it reports beyond the first run for that target comes from tests; integration tests and benchmarks are always tests. The audit checks the replay instead of assuming it, with Cargo's `compiler-artifact` messages, because it often does not happen: without the tests and their dev-dependencies, Cargo can resolve the features of some dependencies differently (syn's, for one), so the first run checks those dependencies again in another variant, on a cold build folder, and compiles another unit of each member that uses them, which the second run then compiles again instead of replaying. For a target whose unit that is not a test the second run did not replay (another unit, with other files, one compiled again, or none), the audit cannot tell the tests' messages from the others, so it judges every occurrence of that target both as a test and as not a test, and an exception inside `cfg_attr` counts only if it holds both ways. The second run is the one whose units are checked for every member, and a message of the first run that the second does not repeat, for a target that it replayed, is an error. The audit runs share the build folder with the Clippy runs: their arguments differ, so Cargo recompiles the members in each, and the Clippy step's check of when each dependency file was written still holds for the units that each Clippy run compiles.
 //!
 //! # What it cannot see
 //!
 //! - Attributes that change linting without setting a level, such as `#[automatically_derived]` or `#[clippy::msrv]`, and code that a lint's own implementation skips: a lint that is never reported cannot be checked, by Clippy or by the audit.
 //! - Code in the expansion of a macro of another crate, which the compiler does not report for most lints, with or without force-warning.
+//! - Where tokens are copied from: tokens that a derive or an attribute macro copies from its input into a separate item are judged where they are written, so an `#[expect]` on the input item counts for them, although the compiler applies it to that item only. This is accepted, because the exception is written over that very text.
 //! - The lints that cannot be force-warned: the `warnings` group, which the compiler refuses (error E0602), and the unstable lints of the skip list (`guarded::UNGUARDED`), which it calls unknown.
 
 mod coverage;
@@ -29,12 +30,12 @@ pub use coverage::Config;
 pub use guarded::{Guarded, check_refusals};
 
 use coverage::{Expansion, Model, Place};
-use messages::{Reported, Span};
+use messages::{Reported, Span, TargetKey, Unit};
 
 /// How occurrences that no exception written out in full covers are reported: the heading of their list, and what to do.
 const UNCOVERED: (&str, &str) = (
     "lints are silenced by something other than an `#[expect(lint, reason = \"…\")]` written out in full",
-    "The audit compiled the workspace again with every lint that the lint tables or the compiler turn on force-warned, so that the compiler reports each occurrence of them also where an attribute silences it, and no exception written out in full in the source covers the occurrences above. An attribute that a macro assembles from its arguments, an `#[allow]` that a macro of another crate puts out, or an exception in another place silences them in the Clippy runs. Write `#[expect(<lint>, reason = \"…\")]` out in full on the smallest item, statement, field or match arm that holds the occurrence; for code that a macro writes, put it next to that code in the macro's own definition, because an exception around a macro call does not reach the code the macro writes. Never lower a lint in another way. See \"Lint rules and exceptions\" in AGENTS.md.",
+    "The audit compiled the workspace again with every lint that the lint tables or the compiler turn on force-warned, so that the compiler reports each occurrence of them also where an attribute silences it, and no exception written out in full in the source covers the occurrences above. An attribute that a macro assembles from its arguments, an `#[allow]` that a macro of another crate puts out, or a written `#[expect]` that the audit counts for nothing silences them in the Clippy runs. Write `#[expect(<lint>, reason = \"…\")]` out in full on the smallest item, statement, field or match arm that holds the occurrence; for code that a macro writes, put it next to that code in the macro's own definition, or on the item or statement that holds the macro's call. The audit counts a written `#[expect]` for nothing on a generic parameter, on a parameter's type (on a parameter, it covers only the pattern), on a field of a struct expression or pattern, on a parameter of a function pointer type, on the first statement of a block after `if x` and the like, anywhere inside a macro's input (also one that the macro hands on through `$(#[$meta])*`), on a macro call and on a `macro_rules!` definition, because it cannot tell how far the compiler applies it there: move such an `#[expect]` onto the enclosing item or statement. Never lower a lint in another way. See \"Lint rules and exceptions\" in AGENTS.md.",
 );
 
 /// One occurrence, found in one or more units and runs.
@@ -113,16 +114,18 @@ impl<'a> Audit<'a> {
         non_tests: &str,
         all: &str,
     ) -> Result<String, String> {
-        let non_tests = messages::read(non_tests, self.packages)
+        let edition = &self.guarded.edition;
+        let first = messages::read(non_tests, self.packages, edition)
             .map_err(|problem| format!("{run}, the units that are not tests: {problem}"))?;
-        let all = messages::read(all, self.packages)
+        let second = messages::read(all, self.packages, edition)
             .map_err(|problem| format!("{run}, all targets: {problem}"))?;
+        let (replayed, not_replayed) = replayed(&first.units, &second.units);
         let mut in_all: BTreeMap<&Reported, usize> = BTreeMap::new();
-        for reported in &all {
+        for reported in &second.reported {
             *in_all.entry(reported).or_default() += 1;
         }
         let mut in_non_tests: BTreeMap<&Reported, usize> = BTreeMap::new();
-        for reported in &non_tests {
+        for reported in &first.reported {
             if reported.always_tests() {
                 return Err(format!(
                     "{run}: the units that are not tests reported `{}` for the tests `{}` of {}, so the audit cannot tell which units reported what",
@@ -132,7 +135,9 @@ impl<'a> Audit<'a> {
             *in_non_tests.entry(reported).or_default() += 1;
         }
         for (reported, count) in &in_non_tests {
-            if in_all.get(reported).copied().unwrap_or_default() < *count {
+            if replayed.contains(&reported.target_key())
+                && in_all.get(reported).copied().unwrap_or_default() < *count
+            {
                 return Err(format!(
                     "{run}: the run of all targets did not repeat `{}` at {}:{} of {}, which the units that are not tests reported, so the audit cannot tell which units reported what",
                     reported.lint, reported.spans[0].file, reported.spans[0].line, reported.member
@@ -147,20 +152,34 @@ impl<'a> Audit<'a> {
             test: false,
             ..config.clone()
         };
+        // A target whose unit that is not a test the second invocation did not replay: its occurrences count both as tests and not.
         for reported in in_non_tests.keys() {
             self.add(reported, &not_tests, run)?;
-        }
-        for (reported, count) in &in_all {
-            let not_tests_count = in_non_tests.get(reported).copied().unwrap_or_default();
-            if reported.always_tests() || *count > not_tests_count {
+            if !replayed.contains(&reported.target_key()) {
                 self.add(reported, &tests, run)?;
             }
         }
-        Ok(format!(
+        for (reported, count) in &in_all {
+            if reported.always_tests() {
+                self.add(reported, &tests, run)?;
+            } else if !replayed.contains(&reported.target_key()) {
+                self.add(reported, &not_tests, run)?;
+                self.add(reported, &tests, run)?;
+            } else if *count > in_non_tests.get(reported).copied().unwrap_or_default() {
+                self.add(reported, &tests, run)?;
+            }
+        }
+        let mut summary = format!(
             "{run}: the compiler reported {} occurrences of force-warned lints ({} in the units that are not tests)",
-            all.len(),
-            non_tests.len()
-        ))
+            second.reported.len(),
+            first.reported.len()
+        );
+        if not_replayed > 0 {
+            summary.push_str(&format!(
+                "; the second Cargo invocation did not replay the units that are not tests of {not_replayed} targets from the first, so their occurrences count both as tests and not"
+            ));
+        }
+        Ok(summary)
     }
 
     /// Adds what one compilation reported whose units all have the configuration `config`, such as a case of the lint canary.
@@ -170,8 +189,9 @@ impl<'a> Audit<'a> {
         config: &Config,
         text: &str,
     ) -> Result<(), String> {
-        let reported =
-            messages::read(text, self.packages).map_err(|problem| format!("{run}: {problem}"))?;
+        let reported = messages::read(text, self.packages, &self.guarded.edition)
+            .map_err(|problem| format!("{run}: {problem}"))?
+            .reported;
         for occurrence in &reported {
             self.add(occurrence, config, run)?;
         }
@@ -347,6 +367,25 @@ impl<'a> Audit<'a> {
     }
 }
 
+/// Of the targets whose unit that is not a test the first Cargo invocation of an audit run compiled or found unchanged (`first`), those whose very unit the second (`second`) replayed: the same unit, with the same files, which Cargo found unchanged, so that it repeated the first invocation's messages for it. Without the tests and their dev-dependencies, Cargo can resolve the features of some dependencies differently and so build another unit of the same target in each invocation, and it compiles a unit again when something changed. Also returns how many targets the second invocation did not replay.
+fn replayed(first: &[Unit], second: &[Unit]) -> (BTreeSet<TargetKey>, usize) {
+    let mut replayed = BTreeSet::new();
+    let mut not_replayed = 0;
+    for unit in first.iter().filter(|unit| !unit.test) {
+        if second.iter().any(|later| {
+            !later.test
+                && later.fresh
+                && later.target == unit.target
+                && later.filenames == unit.filenames
+        }) {
+            replayed.insert(unit.target.clone());
+        } else {
+            not_replayed += 1;
+        }
+    }
+    (replayed, not_replayed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +449,18 @@ mod tests {
             format!(
                 r#"{{"reason":"compiler-message","package_id":"a","manifest_path":{manifest},"target":{{"kind":["lib"],"crate_types":["lib"],"name":"a","src_path":{source},"edition":"2024","doc":true,"doctest":true,"test":true}},"message":{{"rendered":"","$message_type":"diagnostic","children":[],"code":{{"code":"{lint}","explanation":null}},"level":"warning","message":"a message","spans":[{}]}}}}"#,
                 span(needle, true, expansion)
+            )
+        }
+    }
+
+    impl Workspace {
+        /// The `compiler-artifact` message of a unit of the library, compiled as tests (`test`) or not, whose file is `file`, and which Cargo found unchanged (`fresh`) or compiled.
+        fn artifact(&self, test: bool, file: &str, fresh: bool) -> String {
+            let manifest = json_string(&under(&self.root, "crates/a/Cargo.toml"));
+            let source = json_string(&under(&self.root, LIBRARY));
+            let file = json_string(&under(&self.root, &format!("target/debug/deps/{file}")));
+            format!(
+                r#"{{"reason":"compiler-artifact","package_id":"a","manifest_path":{manifest},"target":{{"kind":["lib"],"crate_types":["lib"],"name":"a","src_path":{source},"edition":"2024","doc":true,"doctest":true,"test":true}},"profile":{{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":{test}}},"features":[],"filenames":[{file}],"executable":null,"fresh":{fresh}}}"#
             )
         }
     }
@@ -586,53 +637,113 @@ mod tests {
         assert!(summary.contains("each of the 1 places"), "{summary}");
     }
 
+    /// The library's `cfg_attr(test, expect(…))` exception, which holds only in the unit tests.
+    const ONLY_TESTS: &str = "#[cfg_attr(test, expect(dead_code, reason = \"only the build that is not a test uses it\"))]\nfn helper() {}\n";
+
     #[test]
     fn tells_the_units_that_are_tests_from_the_others() {
-        let library = "#[cfg_attr(test, expect(dead_code, reason = \"only the build that is not a test uses it\"))]\nfn helper() {}\n";
         let guarded = guarded(&["dead_code"], &[]);
-        let workspace = Workspace::new("tests", library);
+        let workspace = Workspace::new("tests", ONLY_TESTS);
         let message = workspace.message("dead_code", "helper", None);
+        // The library's unit that is not a test, compiled by the first invocation and replayed by the second, and its unit tests.
+        let compiled = workspace.artifact(false, "liba-1.rmeta", false);
+        let replayed = workspace.artifact(false, "liba-1.rmeta", true);
+        let tests = workspace.artifact(true, "liba-2.rmeta", false);
+        let new_audit = || {
+            Audit::new(
+                &workspace.root,
+                &workspace.packages,
+                &workspace.sources,
+                &guarded,
+            )
+            .unwrap()
+        };
         // Only the unit tests report it, where the `cfg_attr` applies.
-        let mut audit = Audit::new(
-            &workspace.root,
-            &workspace.packages,
-            &workspace.sources,
-            &guarded,
-        )
-        .unwrap();
-        audit
-            .add_run("run 1", &host(), &run(&[]), &run(&[&message]))
+        let mut audit = new_audit();
+        let summary = audit
+            .add_run(
+                "run 1",
+                &host(),
+                &run(&[&compiled]),
+                &run(&[&replayed, &tests, &message]),
+            )
             .unwrap();
+        assert!(!summary.contains("did not replay"), "{summary}");
         assert!(audit.finish().is_ok());
         // Both report it, and the `cfg_attr` does not apply in the library that is not a test.
-        let mut audit = Audit::new(
-            &workspace.root,
-            &workspace.packages,
-            &workspace.sources,
-            &guarded,
-        )
-        .unwrap();
+        let mut audit = new_audit();
         audit
             .add_run(
                 "run 1",
                 &host(),
-                &run(&[&message]),
-                &run(&[&message, &message]),
+                &run(&[&compiled, &message]),
+                &run(&[&replayed, &message, &tests, &message]),
             )
             .unwrap();
         assert!(audit.finish().unwrap_err().contains("`dead_code`"));
-        // The run of all targets must repeat what the units that are not tests reported.
-        let mut audit = Audit::new(
-            &workspace.root,
-            &workspace.packages,
-            &workspace.sources,
-            &guarded,
-        )
-        .unwrap();
+        // The run of all targets must repeat what the units that are not tests reported, where it replayed them.
+        let mut audit = new_audit();
         let error = audit
-            .add_run("run 1", &host(), &run(&[&message]), &run(&[]))
+            .add_run(
+                "run 1",
+                &host(),
+                &run(&[&compiled, &message]),
+                &run(&[&replayed, &tests]),
+            )
             .unwrap_err();
         assert!(error.contains("did not repeat"), "{error}");
+    }
+
+    /// Required by the second review of CORE-009: Cargo does not replay a unit that it builds in another variant, or compiles again.
+    #[test]
+    fn judges_both_ways_a_target_whose_unit_the_second_invocation_did_not_replay() {
+        let guarded = guarded(&["dead_code"], &[]);
+        let workspace = Workspace::new("not-replayed", ONLY_TESTS);
+        let message = workspace.message("dead_code", "helper", None);
+        let compiled = workspace.artifact(false, "liba-1.rmeta", false);
+        let tests = workspace.artifact(true, "liba-2.rmeta", false);
+        // Another unit of the same target, with other files; the same unit compiled again; or none at all.
+        let another = workspace.artifact(false, "liba-3.rmeta", true);
+        let again = workspace.artifact(false, "liba-1.rmeta", false);
+        for second in [vec![&another], vec![&again], vec![]] {
+            let mut all: Vec<&str> = second.iter().map(|text| text.as_str()).collect();
+            all.extend([tests.as_str(), message.as_str()]);
+            let mut audit = Audit::new(
+                &workspace.root,
+                &workspace.packages,
+                &workspace.sources,
+                &guarded,
+            )
+            .unwrap();
+            let summary = audit
+                .add_run("run 1", &host(), &run(&[&compiled]), &run(&all))
+                .unwrap();
+            assert!(
+                summary.contains("did not replay the units that are not tests of 1 targets"),
+                "{summary}"
+            );
+            // The occurrence counts as not a test too, where the `cfg_attr` does not apply.
+            let error = audit.finish().unwrap_err();
+            assert!(error.contains("`dead_code`"), "{error}");
+            // And a message of the first that the second does not repeat is no error for such a target.
+            let mut audit = Audit::new(
+                &workspace.root,
+                &workspace.packages,
+                &workspace.sources,
+                &guarded,
+            )
+            .unwrap();
+            let mut only_tests: Vec<&str> = second.iter().map(|text| text.as_str()).collect();
+            only_tests.push(tests.as_str());
+            audit
+                .add_run(
+                    "run 1",
+                    &host(),
+                    &run(&[&compiled, &message]),
+                    &run(&only_tests),
+                )
+                .unwrap();
+        }
     }
 
     #[test]

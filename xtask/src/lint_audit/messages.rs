@@ -1,6 +1,6 @@
-//! Reads what Cargo prints for an audit run with `--message-format=json`: every lint occurrence that the compiler reported for a unit of a workspace member, where it reported it, and which macro wrote the code there.
+//! Reads what Cargo prints for an audit run with `--message-format=json`: every lint occurrence that the compiler reported for a unit of a workspace member, where it reported it, and which macro wrote the code there, and each unit of a member that Cargo compiled or found unchanged.
 //!
-//! Every line must be one of Cargo's JSON messages, the last one `{"reason":"build-finished","success":true}`, and every diagnostic must be readable: a warning without a lint name, an error, a message for a package that is not a member, or a lint occurrence without a primary span is an error, never a pass.
+//! Every line must be one of Cargo's JSON messages, the last one `{"reason":"build-finished","success":true}`, and every diagnostic must be readable: a warning without a lint name, an error, a message for a package that is not a member, a lint occurrence without a primary span, and a member's target that is compiled for another edition than the workspace's, whose default lints the audit force-warns, are errors, never a pass.
 
 use std::path::Path;
 
@@ -35,6 +35,31 @@ pub struct MacroCall {
     pub call_site: Span,
 }
 
+/// A target of a workspace member, a library, binary, example, test or benchmark: the member, the target's name, its kinds and its root file as Cargo names it (`src_path`).
+pub type TargetKey = (String, String, Vec<String>, String);
+
+/// What Cargo printed for one run.
+#[derive(Debug, Default)]
+pub struct Run {
+    /// The lint occurrences, in the order Cargo printed them.
+    pub reported: Vec<Reported>,
+    /// The units of the workspace members that Cargo compiled or found unchanged.
+    pub units: Vec<Unit>,
+}
+
+/// One unit of a workspace member, from the `compiler-artifact` message that Cargo prints when it has compiled the unit or found it unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unit {
+    /// The unit's target.
+    pub target: TargetKey,
+    /// Whether the unit is its target compiled as tests (`profile.test`).
+    pub test: bool,
+    /// The files it produced (`filenames`), which tell it from every other unit: each unit of a target has files of its own.
+    pub filenames: Vec<String>,
+    /// Whether Cargo found the unit unchanged and replayed the messages of its last compilation (`fresh`), instead of compiling it.
+    pub fresh: bool,
+}
+
 /// One lint occurrence that the compiler reported for a unit of a workspace member.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reported {
@@ -61,11 +86,21 @@ impl Reported {
             .iter()
             .any(|kind| kind == "test" || kind == "bench")
     }
+
+    /// The target of the unit that reported it.
+    pub fn target_key(&self) -> TargetKey {
+        (
+            self.member.clone(),
+            self.target.clone(),
+            self.kinds.clone(),
+            self.root.clone(),
+        )
+    }
 }
 
-/// Reads the lint occurrences in `text`, what Cargo printed on standard output for one run with `--message-format=json`, for the workspace members `members`.
-pub fn read(text: &str, members: &[Package]) -> Result<Vec<Reported>, String> {
-    let mut reported = Vec::new();
+/// Reads what Cargo printed on standard output for one run with `--message-format=json`, `text`, for the workspace members `members`, whose targets must all be compiled for `edition`.
+pub fn read(text: &str, members: &[Package], edition: &str) -> Result<Run, String> {
+    let mut run = Run::default();
     let mut finished = None;
     for line in text.lines() {
         let message = json::parse(line).map_err(|error| {
@@ -83,45 +118,113 @@ pub fn read(text: &str, members: &[Package]) -> Result<Vec<Reported>, String> {
         match reason {
             "build-finished" => finished = Some(message.get("success") == Some(&Value::Bool(true))),
             "compiler-message" => {
-                if let Some(occurrence) =
-                    occurrence(&message, members).map_err(|problem| format!("{problem}: {line}"))?
+                if let Some(occurrence) = occurrence(&message, members, edition)
+                    .map_err(|problem| format!("{problem}: {line}"))?
                 {
-                    reported.push(occurrence);
+                    run.reported.push(occurrence);
+                }
+            }
+            "compiler-artifact" => {
+                if let Some(unit) = unit(&message, members, edition)
+                    .map_err(|problem| format!("{problem}: {line}"))?
+                {
+                    run.units.push(unit);
                 }
             }
             _ => {}
         }
     }
     match finished {
-        Some(true) => Ok(reported),
+        Some(true) => Ok(run),
         Some(false) => Err("the run failed (`build-finished` reports no success)".to_owned()),
         None => Err("the run did not finish: Cargo printed no `build-finished` message".to_owned()),
     }
 }
 
-/// The lint occurrence that a `compiler-message` describes, `None` for the notes that a failure brings, or an error for anything that the audit cannot judge.
-fn occurrence(message: &Value, members: &[Package]) -> Result<Option<Reported>, String> {
+/// The member's target that `message`, a message of the kind `what`, names, or `None` if it names a package that is not a workspace member. Fails if the message cannot say which target it names, and if a member's target is compiled for another edition than `edition`, because the audit force-warns the lints that rustc turns on by default for that edition only.
+fn member_target(
+    message: &Value,
+    members: &[Package],
+    edition: &str,
+    what: &str,
+) -> Result<Option<TargetKey>, String> {
     let manifest = message
         .get("manifest_path")
         .and_then(Value::as_str)
-        .ok_or("a compiler message without a `manifest_path`")?;
+        .ok_or_else(|| format!("{what} without a `manifest_path`"))?;
     let folder = Path::new(manifest).parent();
-    let member = members
+    let Some(member) = members
         .iter()
         .find(|member| Some(member.folder.as_path()) == folder)
-        .ok_or("a compiler message for a package that is not a workspace member")?;
+    else {
+        return Ok(None);
+    };
     let target = message
         .get("target")
-        .ok_or("a compiler message without a target")?;
+        .ok_or_else(|| format!("{what} without a target"))?;
     let name = target
         .get("name")
         .and_then(Value::as_str)
-        .ok_or("a compiler message whose target has no name")?;
-    let kinds = strings(target.get("kind")).ok_or("a compiler message whose target has no kind")?;
+        .ok_or_else(|| format!("{what} whose target has no name"))?;
+    let kinds =
+        strings(target.get("kind")).ok_or_else(|| format!("{what} whose target has no kind"))?;
     let root = target
         .get("src_path")
         .and_then(Value::as_str)
-        .ok_or("a compiler message whose target has no `src_path`")?;
+        .ok_or_else(|| format!("{what} whose target has no `src_path`"))?;
+    let compiled_for = target
+        .get("edition")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{what} whose target has no `edition`"))?;
+    if compiled_for != edition {
+        return Err(format!(
+            "the target `{name}` of {} is compiled for edition {compiled_for}, but the audit force-warns the lints that rustc turns on by default for edition {edition}, the edition of the root Cargo.toml; give the member the workspace's edition, or teach the audit the default lints of each edition",
+            member.name
+        ));
+    }
+    Ok(Some((
+        member.name.clone(),
+        name.to_owned(),
+        kinds,
+        root.to_owned(),
+    )))
+}
+
+/// The unit that a `compiler-artifact` message describes, `None` for a package that is not a workspace member, or an error for a member's unit that the message does not describe in full.
+fn unit(message: &Value, members: &[Package], edition: &str) -> Result<Option<Unit>, String> {
+    let Some(target) = member_target(message, members, edition, "an artifact message")? else {
+        return Ok(None);
+    };
+    let Some(Value::Bool(test)) = message
+        .get("profile")
+        .and_then(|profile| profile.get("test"))
+    else {
+        return Err(
+            "an artifact message whose profile does not say whether the unit is a test".to_owned(),
+        );
+    };
+    let filenames =
+        strings(message.get("filenames")).ok_or("an artifact message without `filenames`")?;
+    let Some(Value::Bool(fresh)) = message.get("fresh") else {
+        return Err("an artifact message without `fresh`".to_owned());
+    };
+    Ok(Some(Unit {
+        target,
+        test: *test,
+        filenames,
+        fresh: *fresh,
+    }))
+}
+
+/// The lint occurrence that a `compiler-message` describes, `None` for the notes that a failure brings, or an error for anything that the audit cannot judge.
+fn occurrence(
+    message: &Value,
+    members: &[Package],
+    edition: &str,
+) -> Result<Option<Reported>, String> {
+    let (member, name, kinds, root) =
+        member_target(message, members, edition, "a compiler message")?
+            .ok_or("a compiler message for a package that is not a workspace member")?;
     let diagnostic = message
         .get("message")
         .ok_or("a compiler message without a diagnostic")?;
@@ -156,10 +259,10 @@ fn occurrence(message: &Value, members: &[Package]) -> Result<Option<Reported>, 
         ));
     }
     Ok(Some(Reported {
-        member: member.name.clone(),
-        target: name.to_owned(),
+        member,
+        target: name,
         kinds,
-        root: root.to_owned(),
+        root,
         lint: lint.to_owned(),
         unknown: guarded::unknown_lint(diagnostic),
         spans,
@@ -258,11 +361,17 @@ mod tests {
 
     const FINISHED: &str = r#"{"reason":"build-finished","success":true}"#;
 
+    /// The `compiler-artifact` message of the member's library, compiled as itself and found unchanged, as Cargo 1.99 prints it, shortened.
+    const LIBRARY: &str = r#"{"reason":"compiler-artifact","package_id":"path+file:///repo/crates/a#0.0.0","manifest_path":"/repo/crates/a/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"a","src_path":"/repo/crates/a/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/repo/target/debug/deps/liba-48f2a89a8c4a8ccd.rmeta"],"executable":null,"fresh":true}"#;
+
+    /// A dependency's `compiler-artifact` message, which the audit leaves out.
+    const DEPENDENCY: &str = r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#memchr@2.7.6","manifest_path":"/cargo/registry/src/memchr-2.7.6/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"memchr","src_path":"/cargo/registry/src/memchr-2.7.6/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"profile":{"test":false},"features":[],"filenames":["/repo/target/debug/deps/libmemchr-1.rmeta"],"executable":null,"fresh":true}"#;
+
     #[test]
     fn reads_an_occurrence_and_the_macro_that_wrote_it() {
-        let artifact = r#"{"reason":"compiler-artifact","package_id":"x","fresh":true}"#;
-        let text = format!("{artifact}\n{MAP_IN_MACRO}\n{FINISHED}\n");
-        let reported = read(&text, &members()).unwrap();
+        let text = format!("{DEPENDENCY}\n{LIBRARY}\n{MAP_IN_MACRO}\n{FINISHED}\n");
+        let run = read(&text, &members(), "2024").unwrap();
+        let reported = run.reported;
         assert_eq!(reported.len(), 1);
         let occurrence = &reported[0];
         assert_eq!(
@@ -304,14 +413,31 @@ mod tests {
             (266, 5, 1)
         );
         assert!(call.call_site.expansion.is_none());
+        // The member's unit, not the dependency's.
+        assert_eq!(
+            run.units,
+            [Unit {
+                target: (
+                    "a".to_owned(),
+                    "a".to_owned(),
+                    vec!["lib".to_owned()],
+                    "/repo/crates/a/src/lib.rs".to_owned()
+                ),
+                test: false,
+                filenames: vec!["/repo/target/debug/deps/liba-48f2a89a8c4a8ccd.rmeta".to_owned()],
+                fresh: true,
+            }]
+        );
+        assert_eq!(occurrence.target_key(), run.units[0].target);
     }
 
     #[test]
     fn leaves_out_the_notes_of_a_failure() {
         let note = MAP_IN_MACRO.replace(r#""level":"warning""#, r#""level":"failure-note""#);
         assert!(
-            read(&format!("{note}\n{FINISHED}"), &members())
+            read(&format!("{note}\n{FINISHED}"), &members(), "2024")
                 .unwrap()
+                .reported
                 .is_empty()
         );
     }
@@ -371,8 +497,37 @@ mod tests {
                 replaced(r#""macro_decl_name":"exempt!","#, ""),
                 "without a `macro_decl_name`",
             ),
+            (
+                replaced(r#""edition":"2024""#, r#""edition":"2021""#),
+                "compiled for edition 2021, but the audit force-warns the lints that rustc turns on by default for edition 2024",
+            ),
+            (
+                format!(
+                    "{}\n{FINISHED}",
+                    LIBRARY.replace(r#""edition":"2024""#, r#""edition":"2021""#)
+                ),
+                "compiled for edition 2021",
+            ),
+            (
+                format!("{}\n{FINISHED}", LIBRARY.replace(r#","test":false}"#, "}")),
+                "does not say whether the unit is a test",
+            ),
+            (
+                format!("{}\n{FINISHED}", LIBRARY.replace(r#","fresh":true"#, "")),
+                "without `fresh`",
+            ),
+            (
+                format!(
+                    "{}\n{FINISHED}",
+                    LIBRARY.replace(
+                        r#""filenames":["/repo/target/debug/deps/liba-48f2a89a8c4a8ccd.rmeta"],"#,
+                        ""
+                    )
+                ),
+                "without `filenames`",
+            ),
         ] {
-            let error = read(&text, &members()).unwrap_err();
+            let error = read(&text, &members(), "2024").unwrap_err();
             assert!(error.contains(problem), "{problem}: {error}");
         }
     }

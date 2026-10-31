@@ -68,23 +68,19 @@ const WHOLE_FRAGMENTS: [&str; 11] = [
     "meta",
 ];
 
-/// The built-in attributes that the compiler checks as part of the item they stand on, under its lint levels, such as `#[unsafe(no_mangle)]`, which `unsafe_code` reports. A derive or an attribute macro is not among them: the code it writes is a separate item, to which the attributes of this one do not apply.
-const BUILT_IN_ATTRIBUTES: [&str; 17] = [
-    "cfg",
+/// The built-in attributes that the compiler checks as part of the item they stand on, under its lint levels, such as `#[unsafe(no_mangle)]`, which `unsafe_code` reports. A derive or an attribute macro is not among them: the code it writes is a separate item, to which the attributes of this one do not apply. So neither is `#[test]`, an attribute macro whose expansion, a separate item, also holds what `#[should_panic]` and `#[ignore]` say, nor `#[cfg]`, because an item that its condition removes takes its `#[expect]` with it, while the model does not evaluate an item's own condition and would still count the `#[expect]`.
+const BUILT_IN_ATTRIBUTES: [&str; 13] = [
     "cold",
     "deprecated",
     "doc",
     "expect",
     "export_name",
-    "ignore",
     "inline",
     "link_section",
     "must_use",
     "no_mangle",
     "non_exhaustive",
     "repr",
-    "should_panic",
-    "test",
     "track_caller",
     "unsafe",
 ];
@@ -2051,6 +2047,12 @@ pub enum Kinds {
 #[derive(Debug)]
 #[unsafe(no_mangle)]
 pub extern "C" fn version() -> u8 { 1 }
+
+#[expect(non_snake_case, reason = "r")]
+#[cfg(test)]
+#[should_panic]
+#[test]
+fn Upper() {}
 "#,
             )],
         );
@@ -2058,6 +2060,13 @@ pub extern "C" fn version() -> u8 { 1 }
         assert!(sources.covered("unsafe_code", &unsafe_attribute));
         let derive = sources.place("lib.rs", "Debug", 0);
         assert!(!sources.covered("unsafe_code", &derive));
+        // `#[test]` writes a separate item, which also holds what `#[should_panic]` says, and `#[cfg]` can take the item and its `#[expect]` away.
+        for needle in ["cfg(test)", "should_panic", "#[test]"] {
+            let attribute = sources.place("lib.rs", needle, 0);
+            assert!(!sources.covered("non_snake_case", &attribute), "{needle}");
+        }
+        let name = sources.place("lib.rs", "Upper", 0);
+        assert!(sources.covered("non_snake_case", &name));
     }
 
     #[test]
