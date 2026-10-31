@@ -6,7 +6,7 @@
 //!
 //! # How it works
 //!
-//! After the four Clippy runs, which stay as they are, so that the compiler remains the first line of enforcement, the audit compiles the workspace again in each run's configuration, with every guarded lint passed as `--force-warn <lint>` after `--` (`guarded.rs`). A force-warned lint is reported wherever it occurs, also where an attribute sets it to `allow` or `expect`, and the report is a warning that ignores `-D warnings`, so the runs enforce nothing by their exit status: after the Clippy runs passed, every occurrence they report is one that an attribute silences in those runs. Each occurrence must lie where an exception written out in full covers it ([`coverage`]); any other fails the step, with the lint, the file, the line and the macro that wrote the code, and so does an occurrence in a file that the source check did not read, which no exception written in the workspace can cover. Lints set to `forbid` need nothing, because the compiler rejects every exception to them (error E0453). Before the runs, the audit checks the skip list against the pinned compiler with an empty crate ([`check_refusals`]).
+//! After the four Clippy runs, which stay as they are, so that the compiler remains the first line of enforcement, the audit compiles the workspace again in each run's configuration, with every guarded lint passed as `--force-warn <lint>` after `--` (`guarded.rs`). A force-warned lint is reported wherever it occurs, also where an attribute sets it to `allow` or `expect`, and the report is a warning that ignores `-D warnings`, so the runs enforce nothing by their exit status: after the Clippy runs passed, every occurrence they report is one that an attribute silences in those runs. Each occurrence must lie where an exception written out in full covers it ([`coverage`]); any other fails the step, with the lint, the file, the line and the macro that wrote the code, and so does an occurrence in a file that the source check did not read, which no exception written in the workspace can cover. The compiler reports code that a macro writes at the macro's own code, the same place for every call of the macro, so an occurrence is told apart by its places together with the whole chain of macro calls that wrote the code there, and each call is checked on its own: an exception that covers one call says nothing about another, which something else may silence. Lints set to `forbid` need nothing, because the compiler rejects every exception to them (error E0453). Before the runs, the audit checks the skip list against the pinned compiler with an empty crate ([`check_refusals`]).
 //!
 //! An exception inside a `cfg_attr` applies only where its condition holds, and `test` is one of the conditions, so the audit must know which unit reported each occurrence: the library compiled as itself or as its unit tests. Cargo's messages do not say, because both units have the same target. Each audit run therefore runs Cargo twice in the same configuration: first for the units that are not tests (`--lib --bins --examples`), then for all targets (`--all-targets`). The second run compiles the test units and replays the messages of the others, which it finds unchanged, so what it reports beyond the first run comes from tests; integration tests and benchmarks are always tests. The second run is the one whose units are checked for every member, and a message of the first run that the second does not repeat is an error. The audit runs share the build folder with the Clippy runs: their arguments differ, so Cargo recompiles the members (not their dependencies) in each, and the Clippy step's check of when each dependency file was written still holds for the units that each Clippy run compiles.
 //!
@@ -40,11 +40,7 @@ const UNCOVERED: (&str, &str) = (
 /// One occurrence, found in one or more units and runs.
 #[derive(Debug)]
 struct Occurrence {
-    /// The lint.
-    lint: String,
-    /// Where the compiler reports it: its primary spans.
-    places: Vec<Place>,
-    /// Where it is, for a person: the file relative to the root, the line and the column, and the macros that wrote the code there.
+    /// Where it is, for a person: the file relative to the root, the line and the column, and the macros that wrote the code there, each with the place where it was called.
     shown: String,
     /// The crate root and configuration of each unit that reported it.
     units: BTreeSet<(PathBuf, Config)>,
@@ -73,8 +69,8 @@ pub struct Audit<'a> {
     guarded: &'a Guarded,
     /// Which exceptions written out in full cover which code.
     model: Model,
-    /// The occurrences, by lint, file and position.
-    occurrences: BTreeMap<(String, PathBuf, usize), Occurrence>,
+    /// The occurrences, by lint and by where the compiler reports them: its primary spans, each with the chain of macro calls that wrote the code there, so that two calls of one macro are two occurrences, while the same occurrence reported by several units or runs is one.
+    occurrences: BTreeMap<(String, Vec<Place>), Occurrence>,
     /// The force-warned lints that the compiler called unknown.
     unknown: BTreeSet<String>,
     /// How many reports were of lints that the reporting member's lint table sets to `allow`.
@@ -207,19 +203,15 @@ impl<'a> Audit<'a> {
             .iter()
             .map(|span| self.place(span))
             .collect::<Result<Vec<_>, _>>()?;
-        let key = (
-            reported.lint.clone(),
-            places[0].file.clone(),
-            places[0].byte,
-        );
         let shown = self.show(&reported.spans[0]);
-        let occurrence = self.occurrences.entry(key).or_insert_with(|| Occurrence {
-            lint: reported.lint.clone(),
-            places,
-            shown,
-            units: BTreeSet::new(),
-            runs: BTreeSet::new(),
-        });
+        let occurrence = self
+            .occurrences
+            .entry((reported.lint.clone(), places))
+            .or_insert_with(|| Occurrence {
+                shown,
+                units: BTreeSet::new(),
+                runs: BTreeSet::new(),
+            });
         occurrence.units.insert((root, config.clone()));
         occurrence.runs.insert(run.to_owned());
         Ok(())
@@ -291,34 +283,31 @@ impl<'a> Audit<'a> {
         shown
     }
 
-    /// The occurrences that no exception written out in full covers in some unit that reported them.
+    /// The occurrences that no exception written out in full covers in some unit that reported them, each call of a macro on its own.
     pub fn uncovered(&mut self) -> Result<Vec<Uncovered>, String> {
         let Self {
             occurrences, model, ..
         } = self;
         let mut uncovered = Vec::new();
-        for occurrence in occurrences.values() {
+        for ((lint, places), occurrence) in occurrences.iter() {
             let mut covered = true;
             for (root, config) in &occurrence.units {
-                for place in &occurrence.places {
-                    covered &= model.covers(&occurrence.lint, place, root, config)?;
+                for place in places {
+                    covered &= model.covers(lint, place, root, config)?;
                 }
             }
             if covered {
                 continue;
             }
-            let outside = occurrence
-                .places
-                .iter()
-                .any(|place| !model.reads(&place.file));
+            let outside = places.iter().any(|place| !model.reads(&place.file));
             let runs: Vec<&str> = occurrence.runs.iter().map(String::as_str).collect();
             uncovered.push(Uncovered {
-                lint: occurrence.lint.clone(),
-                file: occurrence.places[0].file.clone(),
+                lint: lint.clone(),
+                file: places[0].file.clone(),
                 shown: format!(
                     "  {}: `{}`{} ({})",
                     occurrence.shown,
-                    occurrence.lint,
+                    lint,
                     if outside {
                         ", in a file that the source check did not read, so that no exception written in the workspace can cover it"
                     } else {
@@ -352,7 +341,7 @@ impl<'a> Audit<'a> {
         }
         let places = self.occurrences.len();
         Ok(format!(
-            "lint audit: an `#[expect(…, reason = \"…\")]` written out in full that names its lint covers each of the {places} places where the force-warned runs report a silenced lint ({} reports of lints that a lint table sets to allow are left out)",
+            "lint audit: an `#[expect(…, reason = \"…\")]` written out in full that names its lint covers each of the {places} places where the force-warned runs report a silenced lint, each call of a macro on its own ({} reports of lints that a lint table sets to allow are left out)",
             self.ignored
         ))
     }
@@ -512,6 +501,63 @@ mod tests {
                 && error.contains(": `clippy::disallowed_types` (run 1)"),
             "{error}"
         );
+    }
+
+    /// One macro, called in two functions: the compiler reports the code it writes at the same place in its definition for both calls.
+    const TWO_CALLS: &str = "macro_rules! old { ($x:expr) => { crate::legacy($x) }; }\n#[deprecated]\npub fn legacy(x: u8) -> u8 { x }\n#[expect(deprecated, reason = \"the first call uses the old function on purpose\")]\npub fn first() -> u8 { old!(1) }\npub fn second() -> u8 { old!(2) }\n";
+
+    #[test]
+    fn checks_each_call_of_a_macro_on_its_own() {
+        let workspace = Workspace::new("two-calls", TWO_CALLS);
+        let guarded = guarded(&["deprecated"], &[]);
+        let covered = workspace.message("deprecated", "crate::legacy", Some("old!(1)"));
+        let uncovered = workspace.message("deprecated", "crate::legacy", Some("old!(2)"));
+        let file = under(Path::new(""), LIBRARY).display().to_string();
+        // Whichever call the compiler reports first, the call that nothing covers fails, and the error names where it is called.
+        for messages in [
+            [covered.as_str(), uncovered.as_str()],
+            [uncovered.as_str(), covered.as_str()],
+        ] {
+            let mut audit = Audit::new(
+                &workspace.root,
+                &workspace.packages,
+                &workspace.sources,
+                &guarded,
+            )
+            .unwrap();
+            audit
+                .add_compilation("run 1", &host(), &run(&messages))
+                .unwrap();
+            let error = audit.finish().unwrap_err();
+            assert!(
+                error.contains(&format!("called at {file}:6:"))
+                    && !error.contains(&format!("called at {file}:5:"))
+                    && error.contains(": `deprecated` (run 1)"),
+                "{error}"
+            );
+        }
+        // With both calls covered, both pass, as two places.
+        let workspace = Workspace::new(
+            "two-calls-covered",
+            &TWO_CALLS.replace(
+                "pub fn second",
+                "#[expect(deprecated, reason = \"so does the second\")]\npub fn second",
+            ),
+        );
+        let covered = workspace.message("deprecated", "crate::legacy", Some("old!(1)"));
+        let also_covered = workspace.message("deprecated", "crate::legacy", Some("old!(2)"));
+        let mut audit = Audit::new(
+            &workspace.root,
+            &workspace.packages,
+            &workspace.sources,
+            &guarded,
+        )
+        .unwrap();
+        audit
+            .add_compilation("run 1", &host(), &run(&[&covered, &also_covered]))
+            .unwrap();
+        let summary = audit.finish().unwrap();
+        assert!(summary.contains("each of the 2 places"), "{summary}");
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! An occurrence that the audit runs report passes only if an `#[expect(<lint>, reason = "…")]` or `#![expect(<lint>, reason = "…")]` written out in full in the source covers the position where the compiler reports it, naming exactly that lint (not a group that contains it), also inside a `cfg_attr` whose condition holds in the unit that reported it. The model reads the source with the tokens of the source check (`sources.rs`), and it may be stricter than the compiler, never looser:
 //!
-//! - An outer attribute covers what follows it and its other outer attributes: in item or statement position (after `;`, `{`, `}`, an inner attribute, or at the start of a file), an item (`fn`, `struct`, `impl`, `mod`, `use`, `static`, `const`, …) or a `let` statement, up to its first `;`, the end of its first `{…}` group or the end of the group around it, whichever comes first; anywhere else, such as before a field, a match arm or a parameter, or inside a macro's input, also no further than its first `,` or a `>` that is not part of `->` or `=>`.
+//! - An outer attribute covers what follows it and its other outer attributes. In item or statement position (after `;`, `{`, `}`, an inner attribute, or at the start of a file), that is an item (`fn`, `struct`, `impl`, `mod`, `use`, `static`, `const`, …) or a `let` statement, up to its first `;`, the end of its first `{…}` group or the end of the group around it, whichever comes first. Before another statement, a field or a variant in the definition of a struct, union or enum, or a match arm, it is also no further than its first `,` or a `>` that is not part of `->` or `=>`. Before a parameter of a function or a closure, it is only the parameter's pattern, which also ends before the `:` of its type and at a `|` or `=`: the compiler applies the attribute neither to the type, which belongs to the signature, nor to a closure's body or its other parameters.
+//! - Where the model cannot tell how far the compiler applies an outer attribute, it covers nothing, so that it errs on the side of failing: before a generic parameter (whose bounds and default the compiler does not cover, nor its name for the lints of its later passes), a field of a struct expression or pattern (which look alike, and on a pattern's field the compiler applies the attribute to almost nothing), a parameter of a function pointer type, or the first statement of a block whose `{` the model cannot tell from that of a struct expression, such as after `if x`; inside a macro's input, because the macro decides where the attribute and the tokens after it go; and anywhere else that the model does not recognise.
 //! - An attribute on a `macro_rules!` definition or on a macro call covers nothing: the compiler does not apply it where the macro expands (on a macro call in item position it reports the attribute as unused).
 //! - An outer attribute on `mod name;` covers the declaration, and with it the module's file and the files of its submodules: a position in a module's file is covered if every declaration that leads to the file from the unit's crate root is.
 //! - An inner attribute covers the rest of the `{…}` block or module it stands in, or, at the top of a file, the whole file, and through the declarations the module's submodules (in a crate's root file, the whole crate). Inside a macro's input it covers nothing.
@@ -92,6 +93,79 @@ const BUILT_IN_ATTRIBUTES: [&str; 17] = [
 const NOT_MACROS: [&str; 8] = [
     "if", "while", "match", "return", "in", "break", "yield", "else",
 ];
+
+/// Rust's keywords, strict, reserved and weak.
+const KEYWORDS: [&str; 56] = [
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "become",
+    "box",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "do",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "final",
+    "fn",
+    "for",
+    "gen",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "macro",
+    "macro_rules",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "override",
+    "priv",
+    "pub",
+    "raw",
+    "ref",
+    "return",
+    "safe",
+    "self",
+    "Self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "union",
+    "unsafe",
+    "unsized",
+    "use",
+    "virtual",
+    "where",
+    "while",
+    "yield",
+];
+
+/// The keywords that may stand in the header of a definition between its keyword and its parameters or body: in generic parameters, bounds and a `where` clause.
+const HEADER_KEYWORDS: [&str; 10] = [
+    "as", "const", "crate", "dyn", "for", "mut", "self", "Self", "super", "where",
+];
+
+/// The keywords that may stand in the expression after `match`.
+const SCRUTINEE_KEYWORDS: [&str; 11] = [
+    "as", "await", "crate", "dyn", "false", "mut", "self", "Self", "super", "true", "unsafe",
+];
+
+/// The keywords after which a `{` opens a block.
+const BLOCK_KEYWORDS: [&str; 7] = ["async", "const", "else", "loop", "move", "try", "unsafe"];
 
 /// The coverage model of the workspace's files.
 #[derive(Debug)]
@@ -532,8 +606,38 @@ impl File {
 enum Extent {
     /// An item or a `let` statement in item or statement position: up to its first `;`, the end of its first `{…}` group or the end of the group around it.
     Item,
-    /// Anything else: also no further than its first `,` or a `>` that is not part of `->` or `=>`.
-    Short,
+    /// Another statement, a field or a variant in the definition of a type, or a match arm: also no further than its first `,` or a `>` that is not part of `->` or `=>`.
+    Node,
+    /// A parameter of a function or a closure: its pattern, which also ends before the `:` of its type and at a `|` or `=`.
+    Pattern,
+}
+
+/// What a bracket group holds, as far as the model can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// The parameters of a function: `fn name<…>(…)`.
+    Parameters,
+    /// The fields of a struct, union or variant in its definition.
+    Fields,
+    /// The variants of an enum.
+    Variants,
+    /// The arms of a `match`.
+    Arms,
+    /// A block, which holds statements.
+    Block,
+    /// Anything else, such as the fields of a struct expression or pattern, which look alike, the parameters of a function pointer type or the arguments of a call.
+    Other,
+}
+
+/// What opens the list that an element after a comma belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opener {
+    /// The `|` of a closure's parameters.
+    Pipe,
+    /// The `<` of generic parameters.
+    Angle,
+    /// The bracket group around the element, which opens at this position.
+    Group(usize),
 }
 
 /// Reads the model of one file from its tokens.
@@ -781,16 +885,13 @@ impl Reader<'_> {
         parts
     }
 
-    /// The bytes that the outer attribute whose `#` is at `hash` and whose `]` is at `close` covers: the item, statement or other code it stands before, and the built-in attributes of its run, to which the compiler applies the same lint levels.
+    /// The bytes that the outer attribute whose `#` is at `hash` and whose `]` is at `close` covers: the item, statement or other code it stands before, and, unless that is a parameter, the built-in attributes of its run, to which the compiler applies the same lint levels.
     fn outer_region(
         &self,
         hash: usize,
         close: usize,
         context: Context,
     ) -> Option<Vec<Range<usize>>> {
-        if context == Context::Matcher {
-            return None;
-        }
         // What it stands before: the first token after it and the outer attributes that follow it.
         let mut start = close + 1;
         while self.kind(start) == Some(Kind::Punct(b'#'))
@@ -799,21 +900,13 @@ impl Reader<'_> {
             start = self.closing[start + 1]? + 1;
         }
         self.tokens.get(start)?;
-        let target = self.target(start);
-        if matches!(target, Target::MacroRules | Target::MacroCall) {
-            return None;
-        }
-        let extent = if target == Target::Item
-            && context != Context::MacroInput
-            && self.in_item_position(hash, context)
-        {
-            Extent::Item
-        } else {
-            Extent::Short
-        };
+        let extent = self.extent(hash, start, context)?;
         let last = self.scan(start, extent, context)?;
         let item = self.tokens[start].start..self.tokens[last].end;
         let mut region = vec![item];
+        if extent == Extent::Pattern {
+            return Some(region);
+        }
         let mut at = self.first_attribute(hash);
         while at < start {
             let close = self.closing[at + 1]?;
@@ -836,14 +929,239 @@ impl Reader<'_> {
         };
         match self.kind(before) {
             Some(Kind::Punct(b';' | b'{' | b'}')) => true,
-            Some(Kind::Punct(b']')) => self.opening[before].is_some_and(|open| {
-                open >= 2
-                    && self.kind(open - 1) == Some(Kind::Punct(b'!'))
-                    && self.kind(open - 2) == Some(Kind::Punct(b'#'))
-            }),
+            Some(Kind::Punct(b']')) => self.ends_inner_attribute(before),
             _ => {
                 matches!(context, Context::Transcriber(index) if self.transcribers[index].open == before)
             }
+        }
+    }
+
+    /// Whether the `]` at `at` ends an inner attribute, `#![…]`.
+    fn ends_inner_attribute(&self, at: usize) -> bool {
+        self.opening[at].is_some_and(|open| {
+            open >= 2
+                && self.kind(open - 1) == Some(Kind::Punct(b'!'))
+                && self.kind(open - 2) == Some(Kind::Punct(b'#'))
+        })
+    }
+
+    /// The punctuation before the `>` at `at`, if it makes it part of `->` or `=>`.
+    fn arrow(&self, at: usize) -> Option<u8> {
+        match at.checked_sub(1).and_then(|before| self.kind(before)) {
+            Some(Kind::Punct(byte @ (b'-' | b'='))) => Some(byte),
+            _ => None,
+        }
+    }
+
+    /// How far the outer attribute whose `#` is at `hash` extends over the code from the token at `start` on, which it stands before in `context`, or `None` where the model cannot tell how far the compiler applies it, so that it covers nothing.
+    fn extent(&self, hash: usize, start: usize, context: Context) -> Option<Extent> {
+        if matches!(context, Context::Matcher | Context::MacroInput) {
+            return None;
+        }
+        let target = self.target(start);
+        if matches!(target, Target::MacroRules | Target::MacroCall) {
+            return None;
+        }
+        if target == Target::Item && self.in_item_position(hash, context) {
+            return Some(Extent::Item);
+        }
+        let run = self.first_attribute(hash);
+        let before = run.checked_sub(1)?;
+        if matches!(context, Context::Transcriber(index) if self.transcribers[index].open == before)
+        {
+            // What a macro writes first is a statement there, or the compiler rejects the attribute.
+            return Some(Extent::Node);
+        }
+        match self.kind(before)? {
+            Kind::Punct(b';' | b'}') => Some(Extent::Node),
+            Kind::Punct(b']') if self.ends_inner_attribute(before) => Some(Extent::Node),
+            Kind::Punct(b'|') => Some(Extent::Pattern),
+            Kind::Punct(b'{' | b'(') => match self.group(before) {
+                Group::Parameters => Some(Extent::Pattern),
+                Group::Fields | Group::Variants | Group::Arms | Group::Block => Some(Extent::Node),
+                Group::Other => None,
+            },
+            Kind::Punct(b',') => match self.list_opener(run)? {
+                Opener::Pipe => Some(Extent::Pattern),
+                Opener::Angle => None,
+                Opener::Group(group) => match self.group(group) {
+                    Group::Parameters => Some(Extent::Pattern),
+                    Group::Fields | Group::Variants | Group::Arms => Some(Extent::Node),
+                    Group::Block | Group::Other => None,
+                },
+            },
+            _ => None,
+        }
+    }
+
+    /// What opens the list whose element starts at `run`, after a comma: the `|` of a closure's parameters, the `<` of generic parameters, or else the bracket group around it; `None` at the top level of a file.
+    fn list_opener(&self, run: usize) -> Option<Opener> {
+        let mut at = run;
+        let mut angles = 0usize;
+        while let Some(before) = at.checked_sub(1) {
+            match self.kind(before)? {
+                Kind::Punct(b')' | b']' | b'}') => {
+                    at = self.opening[before]?;
+                    continue;
+                }
+                Kind::Punct(b'(' | b'[' | b'{') => return Some(Opener::Group(before)),
+                Kind::Punct(b'|') => return Some(Opener::Pipe),
+                // A statement or a match arm ends here, so the list is the group's own.
+                Kind::Punct(b';') => return self.parent[run].map(Opener::Group),
+                Kind::Punct(b'>') => match self.arrow(before) {
+                    Some(b'=') => return self.parent[run].map(Opener::Group),
+                    Some(_) => {}
+                    None => angles += 1,
+                },
+                Kind::Punct(b'<') => match angles.checked_sub(1) {
+                    Some(fewer) => angles = fewer,
+                    None => return Some(Opener::Angle),
+                },
+                _ => {}
+            }
+            at = before;
+        }
+        None
+    }
+
+    /// What the bracket group that opens at `open` holds, as far as the model can tell.
+    fn group(&self, open: usize) -> Group {
+        match self.kind(open) {
+            Some(Kind::Punct(b'(')) => match self.definition(open) {
+                Some("fn") => Group::Parameters,
+                Some("struct") => Group::Fields,
+                _ if self.is_variant(open) => Group::Fields,
+                _ => Group::Other,
+            },
+            Some(Kind::Punct(b'{')) => {
+                if self.is_match_body(open) {
+                    return Group::Arms;
+                }
+                match self.definition(open) {
+                    Some("struct" | "union") => Group::Fields,
+                    Some("enum") => Group::Variants,
+                    _ if self.is_variant(open) => Group::Fields,
+                    _ if self.is_block(open) => Group::Block,
+                    _ => Group::Other,
+                }
+            }
+            _ => Group::Other,
+        }
+    }
+
+    /// The keyword of the definition whose parameters or body the group at `open` holds, if the tokens before it are that definition's header: `fn`, `struct`, `union` or `enum`, a name, generic parameters and, before a body, a `where` clause.
+    fn definition(&self, open: usize) -> Option<&str> {
+        let mut at = open;
+        let mut angles = 0usize;
+        loop {
+            let before = at.checked_sub(1)?;
+            match self.kind(before)? {
+                Kind::Punct(b')' | b']') => {
+                    at = self.opening[before]?;
+                    continue;
+                }
+                Kind::Punct(b'>') => {
+                    if self.arrow(before).is_none() {
+                        angles += 1;
+                    }
+                }
+                Kind::Punct(b'<') => angles = angles.checked_sub(1)?,
+                Kind::Punct(b'=') if angles > 0 => {}
+                Kind::Punct(b':' | b',' | b'+' | b'?' | b'&' | b'*' | b'-' | b'!')
+                | Kind::PathSeparator
+                | Kind::Other => {}
+                Kind::Ident(_) => match self.word(before) {
+                    Some(keyword @ ("fn" | "struct" | "union" | "enum")) => {
+                        let after = before + 2;
+                        let shaped = matches!(self.kind(before + 1), Some(Kind::Ident(_)))
+                            && (after == open
+                                || self.kind(after) == Some(Kind::Punct(b'<'))
+                                || self.word(after) == Some("where"));
+                        return (angles == 0 && shaped).then_some(keyword);
+                    }
+                    Some(word) if KEYWORDS.contains(&word) && !HEADER_KEYWORDS.contains(&word) => {
+                        return None;
+                    }
+                    _ => {}
+                },
+                _ => return None,
+            }
+            at = before;
+        }
+    }
+
+    /// Whether the group at `open` holds the fields of a variant in the definition of an enum: whether it follows the variant's name, which stands first in the enum's body or after a comma, after the variant's outer attributes.
+    fn is_variant(&self, open: usize) -> bool {
+        let (Some(name), Some(body)) = (open.checked_sub(1), self.parent[open]) else {
+            return false;
+        };
+        matches!(self.kind(name), Some(Kind::Ident(_)))
+            && self
+                .first_attribute(name)
+                .checked_sub(1)
+                .is_some_and(|before| {
+                    before == body || self.kind(before) == Some(Kind::Punct(b','))
+                })
+            && self.kind(body) == Some(Kind::Punct(b'{'))
+            && self.definition(body) == Some("enum")
+    }
+
+    /// Whether the `{` at `open` holds the arms of a `match`: whether the tokens before it are an expression after the keyword `match`.
+    fn is_match_body(&self, open: usize) -> bool {
+        let mut at = open;
+        while let Some(before) = at.checked_sub(1) {
+            match self.kind(before) {
+                Some(Kind::Punct(b')' | b']' | b'}')) => {
+                    let Some(group) = self.opening[before] else {
+                        return false;
+                    };
+                    at = group;
+                    continue;
+                }
+                Some(
+                    Kind::Punct(
+                        b'.' | b'&' | b'*' | b'-' | b'!' | b'+' | b'/' | b'%' | b'^' | b'|' | b'<'
+                        | b'>' | b'?',
+                    )
+                    | Kind::PathSeparator
+                    | Kind::Str(_)
+                    | Kind::Other,
+                ) => {}
+                Some(Kind::Ident(_)) => match self.word(before) {
+                    Some("match") => return true,
+                    Some(word)
+                        if KEYWORDS.contains(&word) && !SCRUTINEE_KEYWORDS.contains(&word) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                },
+                _ => return false,
+            }
+            at = before;
+        }
+        false
+    }
+
+    /// Whether the `{` at `open` opens a block, which holds statements: whether the token before it is one after which a block can start but the fields of a struct expression or pattern cannot, because they follow a path.
+    fn is_block(&self, open: usize) -> bool {
+        let Some(before) = open.checked_sub(1) else {
+            return false;
+        };
+        match self.kind(before) {
+            Some(
+                Kind::Punct(
+                    b')' | b']' | b';' | b'{' | b'}' | b'=' | b'(' | b'[' | b',' | b'|' | b':'
+                    | b'?',
+                )
+                | Kind::Str(_)
+                | Kind::Other,
+            ) => true,
+            Some(Kind::Punct(b'>')) => self.arrow(before) == Some(b'='),
+            Some(Kind::Ident(_)) => self
+                .word(before)
+                .is_some_and(|word| BLOCK_KEYWORDS.contains(&word)),
+            _ => false,
         }
     }
 
@@ -953,16 +1271,11 @@ impl Reader<'_> {
                 }
                 Kind::Punct(b')' | b']' | b'}') => return last,
                 Kind::Punct(b';') => return Some(at),
-                Kind::Punct(b',') if extent == Extent::Short => return last,
-                Kind::Punct(b'>')
-                    if extent == Extent::Short
-                        && !matches!(
-                            at.checked_sub(1).and_then(|before| self.kind(before)),
-                            Some(Kind::Punct(b'-' | b'='))
-                        ) =>
-                {
+                Kind::Punct(b',') if extent != Extent::Item => return last,
+                Kind::Punct(b'>') if extent != Extent::Item && self.arrow(at).is_none() => {
                     return last;
                 }
+                Kind::Punct(b':' | b'|' | b'=') if extent == Extent::Pattern => return last,
                 Kind::Punct(b'$') => {
                     if !self.whole_substitution(at, context) {
                         return last;
@@ -1203,6 +1516,40 @@ pub fn two() -> usize {
     }
 
     #[test]
+    fn an_expect_on_a_statement_that_is_not_an_item_covers_that_statement_only() {
+        let mut sources = Sources::new(
+            "expression-statement",
+            &[(
+                "lib.rs",
+                r#"
+pub fn statements() {
+    #[expect(clippy::disallowed_types, reason = "r")]
+    drop(HashMap::<u8, u8>::new());
+    let set = HashSet::<u8>::new();
+    #[expect(clippy::disallowed_types, reason = "r")]
+    drop(HashMap::<u8, u8>::new());
+    drop(set);
+    drop(HashMap::<u8, u8>::new());
+}
+"#,
+            )],
+        );
+        for (needle, occurrence, covered) in [
+            ("HashMap", 0, true),
+            ("HashSet", 0, false),
+            ("HashMap", 1, true),
+            ("HashMap", 2, false),
+        ] {
+            let place = sources.place("lib.rs", needle, occurrence);
+            assert_eq!(
+                sources.covered(MAP, &place),
+                covered,
+                "{needle} {occurrence}"
+            );
+        }
+    }
+
+    #[test]
     fn an_expect_on_a_field_covers_that_field_only() {
         let mut sources = Sources::new(
             "field",
@@ -1367,6 +1714,33 @@ counted!(entries, u8);
     }
 
     #[test]
+    fn an_expect_in_a_macros_own_code_covers_what_the_macro_writes_at_every_call() {
+        let mut sources = Sources::new(
+            "macro-own-code-twice",
+            &[(
+                "lib.rs",
+                r#"
+macro_rules! counted {
+    ($name:ident) => {
+        #[expect(clippy::disallowed_types, reason = "only counted")]
+        pub fn $name() -> usize { HashMap::<u8, u8>::new().len() }
+    };
+}
+counted!(first);
+pub fn caller() -> usize {
+    counted!(second);
+    second()
+}
+"#,
+            )],
+        );
+        for call in ["counted!(first)", "counted!(second)"] {
+            let place = sources.in_macro("lib.rs", "HashMap", "macro_rules", call);
+            assert!(sources.covered(MAP, &place), "{call}");
+        }
+    }
+
+    #[test]
     fn an_expect_on_a_macro_definition_covers_nothing_in_its_body() {
         let mut sources = Sources::new(
             "macro-definition",
@@ -1504,8 +1878,9 @@ pub fn two() -> usize { HashMap::<u8, u8>::new().len() }
         }
     }
 
+    /// The macro decides where the attribute and the tokens after it go, which the model cannot know, also where the macro passes them on unchanged, as `thread_local!` does.
     #[test]
-    fn inside_a_macros_input_an_expect_ends_at_the_first_comma() {
+    fn an_expect_inside_a_macros_input_covers_nothing() {
         let mut sources = Sources::new(
             "macro-input",
             &[(
@@ -1515,11 +1890,17 @@ sneaky! {
     #[expect(clippy::disallowed_types, reason = "decoy")] fn decoy() -> HashMap<u8, u8>,
     fn real() -> usize { HashSet::<u8>::new().len() }
 }
+std::thread_local! {
+    #[expect(clippy::disallowed_types, reason = "passed on unchanged")]
+    static MAP: core::cell::RefCell<HashMap<u8, u8>> = core::cell::RefCell::new(HashMap::new());
+}
 "#,
             )],
         );
-        let decoy = sources.place("lib.rs", "HashMap", 0);
-        assert!(sources.covered(MAP, &decoy));
+        for occurrence in 0..3 {
+            let place = sources.place("lib.rs", "HashMap", occurrence);
+            assert!(!sources.covered(MAP, &place), "occurrence {occurrence}");
+        }
         let real = sources.place("lib.rs", "HashSet", 0);
         assert!(!sources.covered(MAP, &real));
     }
@@ -1545,24 +1926,118 @@ two!({ 1 });
         assert!(!sources.covered(MAP, &second));
     }
 
+    /// The compiler covers neither a generic parameter's bounds nor its default, nor its name for the lints of its later passes, and on a pattern's field it applies the attribute to almost nothing; a struct expression's fields look like a pattern's.
     #[test]
-    fn an_expect_on_a_generic_parameter_or_a_field_with_a_raw_name_stays_small() {
+    fn an_expect_on_a_generic_parameter_or_a_field_of_a_struct_expression_or_pattern_covers_nothing()
+     {
         let mut sources = Sources::new(
-            "small",
+            "nothing",
             &[(
                 "lib.rs",
                 r#"
-pub fn generic<#[expect(non_camel_case_types, reason = "r")] t>() -> usize { HashMap::<u8, u8>::new().len() }
+pub struct Generic<'a, #[expect(deprecated, reason = "r")] T: OldTrait + 'a = Old>(&'a T);
+pub fn generic<#[expect(non_upper_case_globals, reason = "r")] const n: usize>() -> usize { n + HashMap::<u8, u8>::new().len() }
 pub fn literal() -> Fields {
-    Fields { #[expect(clippy::disallowed_types, reason = "r")] r#fn: 1, rest: HashMap::new() }
+    Fields { #[expect(clippy::disallowed_types, reason = "r")] r#fn: HashSet::new(), rest: HashMap::new() }
+}
+pub fn destructure(fields: Fields) {
+    let Fields { #[expect(non_snake_case, reason = "r")] r#fn: Set, .. } = fields;
 }
 "#,
             )],
         );
-        let body = sources.place("lib.rs", "HashMap", 0);
-        assert!(!sources.covered("non_camel_case_types", &body));
-        let rest = sources.place("lib.rs", "HashMap", 1);
-        assert!(!sources.covered(MAP, &rest));
+        for (lint, needle) in [
+            ("deprecated", "T: OldTrait"),
+            ("deprecated", "OldTrait"),
+            ("deprecated", "Old>"),
+            ("non_upper_case_globals", "n: usize"),
+            ("non_upper_case_globals", "n + HashMap"),
+            (MAP, "HashMap::<u8, u8>::new().len() }"),
+            (MAP, "HashSet::new()"),
+            (MAP, "HashMap::new()"),
+            ("non_snake_case", "Set, .."),
+        ] {
+            let place = sources.place("lib.rs", needle, 0);
+            assert!(!sources.covered(lint, &place), "{needle}");
+        }
+    }
+
+    /// Required by the review of CORE-009: the compiler applies an attribute on a parameter to the parameter's pattern, never to its type, which belongs to the signature, nor to a closure's body or its other parameters.
+    #[test]
+    fn an_expect_on_a_parameter_covers_its_pattern_only() {
+        let mut sources = Sources::new(
+            "parameter",
+            &[(
+                "lib.rs",
+                r#"
+pub fn typed(#[expect(deprecated, reason = "r")] Old: Old, next: Old) {}
+pub fn closures() -> u8 {
+    let typed = |#[expect(non_snake_case, deprecated, reason = "r")] Param: Old| { let Body = Param; Body };
+    let plain = |#[expect(non_snake_case, reason = "r")] First, Second| First + Second + Tail;
+    typed(1) + plain(1, 2)
+}
+pub fn pattern(#[expect(non_snake_case, deprecated, reason = "r")] Point { x: X, .. }: Point) -> u8 { X }
+"#,
+            )],
+        );
+        for (lint, needle, occurrence, covered) in [
+            // A function's parameter: its pattern, not its type, nor the next parameter.
+            ("deprecated", "Old", 0, true),
+            ("deprecated", "Old", 1, false),
+            ("deprecated", "Old", 2, false),
+            // A closure's parameter: its pattern, not its type, nor the closure's body.
+            ("non_snake_case", "Param", 0, true),
+            ("deprecated", "Old", 3, false),
+            ("non_snake_case", "Body", 0, false),
+            ("non_snake_case", "First", 0, true),
+            ("non_snake_case", "Second", 0, false),
+            ("non_snake_case", "Tail", 0, false),
+            // A pattern with braces: the whole pattern, not the type after it, nor the body.
+            ("non_snake_case", "X", 0, true),
+            ("deprecated", "Point", 1, false),
+            ("non_snake_case", "X", 1, false),
+        ] {
+            let place = sources.place("lib.rs", needle, occurrence);
+            assert_eq!(
+                sources.covered(lint, &place),
+                covered,
+                "{needle} {occurrence}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expect_on_a_variant_or_a_field_of_a_tuple_covers_it() {
+        let mut sources = Sources::new(
+            "variant",
+            &[(
+                "lib.rs",
+                r#"
+pub struct Pair(#[expect(clippy::disallowed_types, reason = "r")] pub HashMap<u8, u8>, pub HashSet<u8>);
+pub enum Kinds {
+    #[expect(clippy::disallowed_types, reason = "r")]
+    Map { map: HashMap<u8, u8> },
+    Set(#[expect(clippy::disallowed_types, reason = "r")] HashSet<u8>, HashMap<u8, u8>),
+    Other(HashMap<u8, u8>),
+}
+"#,
+            )],
+        );
+        for (needle, occurrence, covered) in [
+            ("HashMap", 0, true),
+            ("HashSet", 0, false),
+            ("HashMap", 1, true),
+            ("HashSet", 1, true),
+            ("HashMap", 2, false),
+            ("HashMap", 3, false),
+        ] {
+            let place = sources.place("lib.rs", needle, occurrence);
+            assert_eq!(
+                sources.covered(MAP, &place),
+                covered,
+                "{needle} {occurrence}"
+            );
+        }
     }
 
     #[test]
