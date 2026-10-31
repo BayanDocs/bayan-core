@@ -43,7 +43,7 @@
 //!
 //! In the preflight, before anything is built, a member that `OUTSIDE_WORLD` does not name may not depend on one that it names, except for its tests (`[dev-dependencies]`), so that code which ships cannot reach the outside world through a member that may.
 //!
-//! An entry of `APPROVED_ITEMS` approves an exact number of uses of its item in its file: a use beyond that number fails until the entry is reviewed again.
+//! An entry of `APPROVED_ITEMS` approves an exact number of uses of its item in its file: there, every identifier equal to the item's own name (`Builder`) counts as one use, outside comments, documentation and other strings and also in the strings of attributes that the check reads, whatever path, `use` declaration, group or glob brings the item in, the `use` declaration itself included, so that neither an import (`use std::thread::{Builder};` and then `Builder::new()`) nor a re-export (`pub use std::thread::Builder;`) adds a use that is not counted. A use beyond that number fails until the entry is reviewed again. Today's `thread.rs` writes `Builder` once.
 //!
 //! The lists cannot go stale: an entry of `OUTSIDE_WORLD` for a member that does not exist, an entry without modules or items, a module that is not one of the five, an item that is not one of a module of the five, and a module or item that the member's code that ships no longer uses all fail; so does an entry of `APPROVED_ITEMS` for a member that does not exist or whose code is not checked for [`ITEMS`], an item that is not one of [`ITEMS`], and a file that makes fewer uses of its item than the entry approves.
 //!
@@ -334,7 +334,7 @@ pub struct Approved {
     pub file: &'static str,
     /// The item, as [`ITEMS`] writes it.
     pub item: &'static str,
-    /// How many uses of it the file makes: a use beyond them fails until the entry is reviewed again, and a file that makes fewer leaves the entry stale.
+    /// How many uses of it the file makes, where every identifier equal to the item's own name (`Builder`) counts as one, whatever path, `use` declaration, group or glob brings the item in, the `use` declaration included: a use beyond them fails until the entry is reviewed again, and a file that makes fewer leaves the entry stale.
     pub uses: usize,
     /// Why those uses cannot reach the outside world.
     pub reason: &'static str,
@@ -360,7 +360,7 @@ const USED: &str = "the code that ships names modules of the standard library th
 /// How the uses of [`ITEMS`] are reported: the heading of their list, and what to do.
 const ITEMS_USED: (&str, &str) = (
     "the code that ships uses items of the standard library that reach the outside world outside those modules (ITEMS in xtask/src/outside_world.rs)",
-    "Outside the five modules, the standard library reaches the outside world through these items too, which the code that ships may not use either (ADR-0012 §5, ADR-0005 §5, architecture §12): the file system through std::path::Path and its methods, the current folder through std::path::absolute, the operating system's randomness through RandomState, the environment through threads started without a stack size (std::thread::spawn, scope and Builder) and through std::backtrace::Backtrace, the operating system through std::thread::available_parallelism and std::io::Error's last_os_error and from_raw_os_error, the clock through sleeping and waiting with a timeout (std::thread::sleep and park_timeout, recv_timeout, wait_timeout), and the console through std::io::stdin, stdout and stderr. Ask the host for what the code needs instead; keep maps and sets ordered (BTreeMap, BTreeSet); start engine threads with bayan-engine's EngineThread, which sets the stack size. The check reads the source text and cannot tell the types of values, so it finds a method or function such as Path's exists by its name after a `.` or a `::`: if the name above belongs to another type, module or field, rename it; if you cannot, because it belongs to a dependency and does not reach the outside world, approve it for the file in APPROVED_ITEMS in xtask/src/verify.rs, counted and with the reason, in a reviewed pull request, as for every other use that cannot reach the outside world. A file that APPROVED_ITEMS lists may make exactly the number of uses that its entry approves: a new use needs the entry reviewed again. If only tests need the item, move them out of the files that ship: into an integration test (tests/), or into a module declared with `#[cfg(test)] mod name;` and written in its own file.",
+    "Outside the five modules, the standard library reaches the outside world through these items too, which the code that ships may not use either (ADR-0012 §5, ADR-0005 §5, architecture §12): the file system through std::path::Path and its methods, the current folder through std::path::absolute, the operating system's randomness through RandomState, the environment through threads started without a stack size (std::thread::spawn, scope and Builder) and through std::backtrace::Backtrace, the operating system through std::thread::available_parallelism and std::io::Error's last_os_error and from_raw_os_error, the clock through sleeping and waiting with a timeout (std::thread::sleep and park_timeout, recv_timeout, wait_timeout), and the console through std::io::stdin, stdout and stderr. Ask the host for what the code needs instead; keep maps and sets ordered (BTreeMap, BTreeSet); start engine threads with bayan-engine's EngineThread, which sets the stack size. The check reads the source text and cannot tell the types of values, so it finds a method or function such as Path's exists by its name after a `.` or a `::`: if the name above belongs to another type, module or field, rename it; if you cannot, because it belongs to a dependency and does not reach the outside world, approve it for the file in APPROVED_ITEMS in xtask/src/verify.rs, counted and with the reason, in a reviewed pull request, as for every other use that cannot reach the outside world. In a file that APPROVED_ITEMS lists, every identifier equal to the approved item's own name (Builder) counts as one use, the one in a `use` declaration included, and the file may make exactly the number of uses that its entry approves: a new use needs the entry reviewed again. If only tests need the item, move them out of the files that ship: into an integration test (tests/), or into a module declared with `#[cfg(test)] mod name;` and written in its own file.",
 );
 
 /// How the ways of naming std that the check cannot follow are reported: the heading of their list, and what to do.
@@ -409,6 +409,8 @@ struct Found {
     hidden: Vec<(usize, &'static str)>,
     /// The ways of naming a module that holds items of [`ITEMS`], or of building a path or a method call in a macro, that could reach them unseen, each described.
     hidden_items: Vec<(usize, &'static str)>,
+    /// Every identifier that equals the own name of an item of [`ITEMS`] (`Builder`), wherever it stands, `use` declarations included, by that name: the uses that an entry of `APPROVED_ITEMS` counts in its file, whatever path, `use`, group or glob brings its item in.
+    names: Vec<(usize, &'static str)>,
 }
 
 /// `std` on its own.
@@ -495,7 +497,12 @@ fn pair(owner: &str, name: &str, line: usize, found: &mut Found) {
 
 /// Whether `name` is the own name of an item of [`ITEMS`], such as `Builder` or `exists`.
 fn is_item_name(name: &str) -> bool {
-    ITEMS.iter().any(|item| item.name() == name)
+    item_name(name).is_some()
+}
+
+/// The own name of an item of [`ITEMS`] that equals `name`, as [`ITEMS`] writes it.
+fn item_name(name: &str) -> Option<&'static str> {
+    ITEMS.iter().map(Item::name).find(|&own| own == name)
 }
 
 /// Whether the identifier `token` is written exactly as `keyword`, not as a raw identifier (`r#type`), which is a name like any other.
@@ -634,11 +641,15 @@ fn scan_text(source: &str, text: Text) -> Result<Found, String> {
         found
             .hidden_items
             .extend(inner.hidden_items.into_iter().map(|(_, what)| (line, what)));
+        found
+            .names
+            .extend(inner.names.into_iter().map(|(_, name)| (line, name)));
     }
     found.modules.sort_by_key(|&(line, _, _)| line);
     found.items.sort_by_key(|&(line, _)| line);
     found.hidden.sort_by_key(|&(line, _)| line);
     found.hidden_items.sort_by_key(|&(line, _)| line);
+    found.names.sort_by_key(|&(line, _)| line);
     Ok(found)
 }
 
@@ -700,6 +711,9 @@ impl<'a> Reader<'_, 'a> {
                 Kind::Ident(name) => {
                     for item in items_named(Written::Name, name) {
                         found.items.push((line, item.path));
+                    }
+                    if let Some(own) = item_name(name) {
+                        found.names.push((line, own));
                     }
                 }
                 _ => {}
@@ -1194,6 +1208,11 @@ pub fn check_list(
     ))
 }
 
+/// The own name of the item written as `item`, such as `Builder` for `std::thread::Builder`.
+fn own_name(item: &str) -> &str {
+    item.rsplit("::").next().unwrap_or(item)
+}
+
 /// What the item of [`ITEMS`] written as `item` reaches, as a message shows it.
 fn reaches(item: &str) -> &'static str {
     ITEMS
@@ -1211,7 +1230,7 @@ fn described(module: &str, next: &Next) -> String {
     }
 }
 
-/// Checks the code that ships of every workspace member at `root`: `shipped` maps each member to the Rust files that the compiler compiled into its units that are not tests (`dep_info::Comparison::shipped`). A member that `exemptions` does not name may use none of [`MODULES`], one that it names with modules only those modules, and one that it names with items exactly those items; every member that it does not name with whole modules may use none of [`ITEMS`], except where an entry of `approved` approves an item for the file, exactly as many times as the entry says; and every member names std only as the first word of a path written out in full, and, where its code is checked for [`ITEMS`], their modules and items only under their own names and their items, methods and modules never through a macro's pieces. Each module and item that an entry of `exemptions` lists must be used, and each file that an entry of `approved` names must make exactly the uses that it approves. Returns one line describing what was checked, or every problem found.
+/// Checks the code that ships of every workspace member at `root`: `shipped` maps each member to the Rust files that the compiler compiled into its units that are not tests (`dep_info::Comparison::shipped`). A member that `exemptions` does not name may use none of [`MODULES`], one that it names with modules only those modules, and one that it names with items exactly those items; every member that it does not name with whole modules may use none of [`ITEMS`], except where an entry of `approved` approves an item for the file, exactly as many times as the entry says, every identifier there equal to the item's own name counting as one use; and every member names std only as the first word of a path written out in full, and, where its code is checked for [`ITEMS`], their modules and items only under their own names and their items, methods and modules never through a macro's pieces. Each module and item that an entry of `exemptions` lists must be used, and each file that an entry of `approved` names must make exactly the uses that it approves. Returns one line describing what was checked, or every problem found.
 pub fn check_code(
     root: &Path,
     shipped: &BTreeMap<String, BTreeSet<PathBuf>>,
@@ -1234,7 +1253,7 @@ pub fn check_code(
     let mut item_places = Vec::new();
     let mut hidden_places = Vec::new();
     let mut hidden_item_places = Vec::new();
-    // The modules and items that each member used as its entry lists them, and the lines of the uses that each entry of `approved` approves.
+    // The modules and items that each member used as its entry lists them, and, for each entry of `approved`, the lines on which its file names its item.
     let mut used: BTreeSet<(String, String)> = BTreeSet::new();
     let mut approved_lines: Vec<Vec<usize>> = vec![Vec::new(); approved.len()];
     // The files read, of the members that OUTSIDE_WORLD does not name, of those it names with items, and of those it names with modules.
@@ -1295,19 +1314,32 @@ pub fn check_code(
                 continue;
             }
             let file_written = written(file);
+            // In a file that an entry approves an item for, every identifier equal to the item's own name counts as one use, whatever path, `use`, group or glob brings the item in.
+            let approvals: Vec<usize> = approved
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.member == member && entry.file == file_written)
+                .map(|(index, _)| index)
+                .collect();
+            for &index in &approvals {
+                let own = own_name(approved[index].item);
+                approved_lines[index].extend(
+                    found
+                        .names
+                        .iter()
+                        .filter(|&&(_, name)| name == own)
+                        .map(|&(line, _)| line),
+                );
+            }
             for (line, item) in found.items {
-                let approval = approved.iter().position(|entry| {
-                    entry.member == member && entry.file == file_written && entry.item == item
-                });
-                if let Some(index) = approval {
-                    approved_lines[index].push(line);
-                } else {
-                    item_places.push(format!(
-                        "  {}:{line}: {item}, which reaches {}",
-                        shown(file),
-                        reaches(item)
-                    ));
+                if approvals.iter().any(|&index| approved[index].item == item) {
+                    continue;
                 }
+                item_places.push(format!(
+                    "  {}:{line}: {item}, which reaches {}",
+                    shown(file),
+                    reaches(item)
+                ));
             }
             for (line, what) in found.hidden_items {
                 hidden_item_places.push(format!("  {}:{line}: {what}", shown(file)));
@@ -1331,7 +1363,8 @@ pub fn check_code(
         if makes > approves {
             for line in lines {
                 item_places.push(format!(
-                    "  {file}:{line}: {item}, which reaches {} (APPROVED_ITEMS approves {approves} of its uses in this file, and the file makes {makes}: review the file and the entry again)",
+                    "  {file}:{line}: `{}`, the name of {item}, which reaches {} (APPROVED_ITEMS approves {approves} uses of its name in this file, and the file makes {makes}: review the file and the entry again)",
+                    own_name(item),
                     reaches(item)
                 ));
             }
@@ -2335,14 +2368,14 @@ mod tests {
             for line in [1, 2] {
                 assert!(
                     problem.contains(&format!(
-                        "  src/thread.rs:{line}: std::thread::Builder, which reaches the environment, unless the builder sets the stack size"
+                        "  src/thread.rs:{line}: `Builder`, the name of std::thread::Builder, which reaches the environment, unless the builder sets the stack size"
                     )),
                     "{line}:\n{problem}"
                 );
             }
             assert_eq!(
                 problem
-                    .matches(" (APPROVED_ITEMS approves 1 of its uses in this file, and the file makes 2: review the file and the entry again)\n")
+                    .matches(" (APPROVED_ITEMS approves 1 uses of its name in this file, and the file makes 2: review the file and the entry again)\n")
                     .count(),
                 2,
                 "{problem}"
@@ -2351,6 +2384,47 @@ mod tests {
                 assert!(problem.contains(also), "{problem}");
             }
         }
+        // Every identifier equal to the item's own name counts, whatever brings the item in: the import itself and each use after it.
+        let imported = "use std::thread::{Builder, JoinHandle, ThreadId};\nfn spawn() -> JoinHandle<()> { Builder::new().stack_size(SIZE).spawn(run) }\n";
+        std::fs::write(&thread, imported).unwrap();
+        let counted = |uses| {
+            [approval(
+                "engine",
+                "src/thread.rs",
+                "std::thread::Builder",
+                uses,
+            )]
+        };
+        check_code(&scratch.0, &shipped, &[], &counted(2))
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        let problem = check_code(&scratch.0, &shipped, &[], &counted(1)).unwrap_err();
+        assert!(
+            problem.contains("  src/thread.rs:1: `Builder`, the name of std::thread::Builder")
+                && problem.contains("  src/thread.rs:2: `Builder`, the name of std::thread::Builder")
+                && problem.contains("(APPROVED_ITEMS approves 1 uses of its name in this file, and the file makes 2: review the file and the entry again)"),
+            "{problem}"
+        );
+        std::fs::write(
+            &thread,
+            format!("{imported}fn more() {{ Builder::new().spawn(run); }}\n"),
+        )
+        .unwrap();
+        let problem = check_code(&scratch.0, &shipped, &[], &counted(2)).unwrap_err();
+        assert_eq!(
+            problem
+                .matches(" (APPROVED_ITEMS approves 2 uses of its name in this file, and the file makes 3: review the file and the entry again)\n")
+                .count(),
+            3,
+            "{problem}"
+        );
+        // A re-export counts, and so does the string of an attribute that the check reads as code; comments and other strings do not.
+        std::fs::write(
+            &thread,
+            "pub use std::thread::Builder;\n#[make(default = \"Builder::new\")]\nstruct Made;\n// Builder\nconst NAME: &str = \"Builder\";\n",
+        )
+        .unwrap();
+        check_code(&scratch.0, &shipped, &[], &counted(2))
+            .unwrap_or_else(|problem| panic!("{problem}"));
         // An entry that approves more uses than the file makes is stale.
         std::fs::write(
             &thread,
