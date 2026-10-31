@@ -21,6 +21,7 @@ mod canary;
 mod dep_info;
 mod flags;
 mod json;
+mod lint_audit;
 mod notices;
 mod outside_world;
 mod policy;

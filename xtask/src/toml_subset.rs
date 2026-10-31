@@ -192,6 +192,22 @@ pub fn string(value: &str) -> Result<String, String> {
     unescape(inner)
 }
 
+/// Reads a compacted inline table, such as `{level="warn",priority=-1}`, and returns each key with its compacted value.
+pub fn inline_table(value: &str) -> Result<Vec<(String, String)>, String> {
+    let fields = value
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| format!("expected an inline table, found `{value}`"))?;
+    split_top_level(fields)?
+        .into_iter()
+        .map(|pair| {
+            pair.split_once('=')
+                .map(|(key, text)| (key.to_owned(), text.to_owned()))
+                .ok_or_else(|| format!("expected `key = value` in `{value}`"))
+        })
+        .collect()
+}
+
 /// Reads a compacted array of inline tables, such as `[{path="f64::sin",reason="…"},…]`, and returns the string value of `field` in each element.
 pub fn field_of_each(array: &str, field: &str) -> Result<Vec<String>, String> {
     let inner = array

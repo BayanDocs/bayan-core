@@ -2,7 +2,7 @@
 //!
 //! Deliberately broken code that proves the workspace's lint rules work (CORE-001, acceptance criterion AC-2).
 //!
-//! A normal build compiles an empty crate. `cargo xtask verify` compiles one case at a time by passing `--cfg bayan_lint_canary="<case>"` to the compiler, in its own build folder `target/lint-canary/<case>`, and checks that Clippy or the compiler rejects exactly what it must: platform floating-point math, hash maps and sets, `unsafe` code in a crate that is not a binding crate, lint exceptions that are not written as `#[expect(…, reason = "…")]`, and any exception to the float bans. It also checks that what must be allowed is accepted: the one sanctioned exception, and the explicit comparison that replaces the forbidden `clamp`.
+//! A normal build compiles an empty crate. `cargo xtask verify` compiles one case at a time by passing `--cfg bayan_lint_canary="<case>"` to the compiler, in its own build folder `target/lint-canary/<case>`, and checks that Clippy or the compiler rejects exactly what it must: platform floating-point math, hash maps and sets, `unsafe` code in a crate that is not a binding crate, lint exceptions that are not written as `#[expect(…, reason = "…")]`, and any exception to the float bans. Three cases, which Clippy and the compiler accept, are judged by the lint audit of the Clippy step (`xtask/src/lint_audit/`) instead: lint exceptions that no one wrote out in full, because a macro assembles them or puts them out. It also checks that what must be allowed is accepted: the one sanctioned exception, and the explicit comparison that replaces the forbidden `clamp`.
 //!
 //! This crate is configured like a core crate: `[lints] workspace = true` in its manifest, and the root `clippy.toml`. That alone does not prove the rules reach every core crate, because each crate could be configured differently: Clippy does not merge configuration files, so a `clippy.toml` below the root would replace the root one for the crates beneath it without affecting this crate. The gate therefore also checks that every crate inherits the workspace lints (the guardrails step) and that Clippy reads no configuration other than the root `clippy.toml` (the preflight). The preflight also rejects build scripts that xtask does not list, and compiler flags that lower lint levels, and the cases are compiled with the project's real compiler flags, so a flag such as `--cap-lints=allow` makes a case compile and the gate fail. Together with those checks, whatever is rejected here is rejected in every core crate. That includes exceptions written in a crate's own code: `clippy::disallowed_methods` is forbidden, so the compiler rejects `#[expect(clippy::disallowed_methods, …)]` and exceptions for the groups that contain it, which the `expect_disallowed_methods` and `expect_lint_groups` cases prove. Unlike the core crates, this one has no `#![forbid(unsafe_code)]` attribute of its own: the `unsafe_block` case proves that the workspace lint table alone rejects unsafe code.
 //!
@@ -53,3 +53,15 @@ pub mod unsafe_block;
 /// An attempt to switch the forbidden `unsafe_code` lint off locally; the compiler must refuse to build it.
 #[cfg(bayan_lint_canary = "unsafe_expect")]
 pub mod unsafe_expect;
+
+/// An `#[allow]` that a macro assembles from tokens handed in separately; Clippy accepts it, and the lint audit must reject it.
+#[cfg(bayan_lint_canary = "split_allow")]
+pub mod split_allow;
+
+/// An `#[expect]` that a macro assembles the same way; Clippy accepts it, and the lint audit must reject it.
+#[cfg(bayan_lint_canary = "split_expect")]
+pub mod split_expect;
+
+/// An `#[allow]` written in full inside the input of std's `thread_local!`; Clippy accepts it, and the lint audit must reject it.
+#[cfg(bayan_lint_canary = "allow_in_foreign_macro")]
+pub mod allow_in_foreign_macro;
