@@ -15,11 +15,15 @@
 //!
 //! The same record shows which files make up each member's code that ships: the comparison keeps the Rust files that the dependency files of the units that are not tests list (not compiled as unit tests, and not a test, benchmark, example or build-script target), and the outside-world check reads exactly those (`outside_world.rs`).
 //!
+//! # The environment that the code that ships read while it was compiled
+//!
+//! `env!("NAME")` and `option_env!("NAME")` read an environment variable while the crate is compiled, not while the engine runs, and copy its value into the code: the same source would make different programs on different machines, and the engine reads no environment variables (architecture §12, ADR-0005 §5). The compiler records every such read in the unit's dependency file, as a comment `# env-dep:NAME=value` (or `# env-dep:NAME` for a variable that was not set), together with the variables that Clippy itself reads for every unit it checks, `CLIPPY_ARGS` (which holds each run's arguments, so the lint audit's runs change its value) and `CLIPPY_CONF_DIR`. After each Clippy run, the comparison reads these comments too, and fails unless every unit records Clippy's own two, which shows that the compiler recorded the variables that the unit read and that the gate read them. In the units that ship of every member that `OUTSIDE_WORLD` in `verify.rs` does not list with the whole module `std::env`, it fails on every variable but Clippy's two and the variables `CARGO_PKG_*` that Cargo sets from the package's manifest ([`CARGO_PKG_VARIABLES`], exactly as Cargo 1.99 sets them: any other name that begins with `CARGO_PKG_` is not Cargo's, so its value would come from the environment of whoever runs Cargo). Tests may read any variable, Cargo's others among them (`CARGO_MANIFEST_DIR`, `CARGO_BIN_EXE_<name>`, `CARGO_TARGET_TMPDIR`), and so may the members listed with `std::env`, because both may read any variable while they run as well; a list for them would make nothing that ships safer. The error names the run, the unit and the variable, never its value, which may be a secret.
+//!
 //! The unit that Cargo builds to run a build script or a procedural macro of a workspace member, an executable or a shared library, has no `.rmeta` file, so it would make the step fail ("with 0 `.rmeta` files instead of one"). `BUILD_SCRIPTS` and `PROC_MACROS` in `verify.rs` are empty today; whoever lists a member in either must first teach [`units`] where that unit's dependency file is.
 //!
 //! # Failing loudly
 //!
-//! Whatever the check cannot follow is an error, never a pass: a run that reports no unit for a member it checks, a unit without a dependency file, a unit that Cargo compiled in the run whose dependency file was not written during the run, a line of one that it cannot read, a listed file that does not exist, and a unit whose list does not contain its own target's root file, which shows that the list was read.
+//! Whatever the check cannot follow is an error, never a pass: a run that reports no unit for a member it checks, a unit without a dependency file, a unit that Cargo compiled in the run whose dependency file was not written during the run, a line of one that it cannot read (a comment of another kind than `# env-dep:` among them), a listed file that does not exist, a unit whose list does not contain its own target's root file, which shows that the list was read, and a unit whose record lacks Clippy's own variables, which shows the same for the environment.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -50,6 +54,33 @@ const CLIPPY_CONFIG: &str = "clippy.toml";
 const UNREAD: (&str, &str) = (
     "the compiler read code that the source check never checked",
     "The source check (xtask/src/sources.rs) reads every `.rs` file below the members' folders before anything is built, and Clippy checks only the code that the compiler reads, so the compiler may read nothing else, apart from Clippy's own configuration and the data files that DATA_FILES lists. For the units above it read files that the source check never read, so code in them could hide from Clippy, for example behind `#[cfg(not(clippy))]`: a macro can make the compiler read such a file by assembling an attribute such as `#[path = \"…\"]` in a form that the source check does not recognize. Keep every Rust file of a crate inside the crate's folder, and declare its modules with a plain `mod name;`. If a file is data that a member reads with `include_str!` or `include_bytes!`, list it in DATA_FILES in xtask/src/verify.rs, with the members that read it and the reason, in a reviewed pull request; the compiler's dependency files do not say whether a file was read as data or compiled as code, so reviewers check that every listed file is data.",
+);
+
+/// The environment variables that Clippy reads for every unit it checks, and so records in the unit's dependency file: the arguments that `cargo clippy` hands it, and the folder of its configuration, which the preflight requires to be unset.
+const CLIPPY_VARIABLES: [&str; 2] = ["CLIPPY_ARGS", "CLIPPY_CONF_DIR"];
+
+/// The variables `CARGO_PKG_*` that Cargo 1.99 sets, from the package's manifest, for every crate it compiles: the only ones, besides Clippy's own, that the code that ships of a member that `OUTSIDE_WORLD` does not list with the whole of `std::env` may read while it is compiled. Any other name that begins with `CARGO_PKG_` is not Cargo's, so its value would come from the environment of whoever runs Cargo. A toolchain whose Cargo sets more is adopted in the monthly dependency session, which adds them here.
+pub const CARGO_PKG_VARIABLES: [&str; 14] = [
+    "CARGO_PKG_AUTHORS",
+    "CARGO_PKG_DESCRIPTION",
+    "CARGO_PKG_HOMEPAGE",
+    "CARGO_PKG_LICENSE",
+    "CARGO_PKG_LICENSE_FILE",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_README",
+    "CARGO_PKG_REPOSITORY",
+    "CARGO_PKG_RUST_VERSION",
+    "CARGO_PKG_VERSION",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+];
+
+/// How the environment variables that the code that ships read while it was compiled are reported: the heading of their list, and what to do.
+const ENVIRONMENT: (&str, &str) = (
+    "the code that ships read environment variables while it was compiled that are neither Cargo's CARGO_PKG_* nor Clippy's own",
+    "The engine reads no environment variables (architecture §12, ADR-0005 §5), also not while it is compiled: `env!(\"NAME\")` and `option_env!(\"NAME\")` copy a variable's value from the environment of whoever builds the code into the code that ships, so the same source would make different programs on different machines. The compiler records every such read in the unit's dependency file, and the code that ships of the members that OUTSIDE_WORLD in xtask/src/verify.rs does not list with the whole module std::env may read only the variables CARGO_PKG_* that Cargo sets from the package's manifest, such as CARGO_PKG_VERSION, besides Clippy's own CLIPPY_ARGS and CLIPPY_CONF_DIR. Look for `env!` and `option_env!` with the names above in the unit's files, or for a macro that expands to one. Take the setting from the host instead, through the engine protocol; if only tests need it, read it in a test (an integration test, or a module declared with `#[cfg(test)] mod name;` in a file of its own), which may read any variable, Cargo's CARGO_MANIFEST_DIR among them.",
 );
 
 /// How the entries of `DATA_FILES` that no named member read are reported: the heading of their list, and what to do.
@@ -210,16 +241,47 @@ fn dep_info_next_to(rmeta: &Path) -> Option<PathBuf> {
     Some(rmeta.with_file_name(format!("{stem}.d")))
 }
 
-/// The files that a dependency file lists, in order, as rustc names them: relative to the compiler's working folder or absolute, and not normalized (`crates/bayan-units/src/../../../shared/sine.rs`).
+/// What a dependency file records for its unit.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Record {
+    /// The files that the compiler read, in order, as rustc names them: relative to the compiler's working folder or absolute, and not normalized (`crates/bayan-units/src/../../../shared/sine.rs`).
+    pub files: Vec<String>,
+    /// The names of the environment variables that the compiler read for the unit, set or not, in order.
+    pub variables: Vec<String>,
+}
+
+/// What the dependency file `text` records: the files that the compiler read, and the environment variables.
 ///
-/// rustc writes Makefile rules: first one rule per output, `<output>: <file> <file> …`, each followed by an empty line; then one rule `<file>:` per file; then, after an empty line, comments that start with `#`, such as `# env-dep:CLIPPY_CONF_DIR` for an environment variable it read. In a file's name it writes a space as `\ ` and changes nothing else (on Windows a path has a `:` after the drive letter), so a file's rule never contains `: `, and an output's rule always does; it writes the outputs' names as they are. The files are therefore read from their own rules, which hold one name each, and every output's rule must list exactly those files, in the same order, so that a misreading cannot pass. Any other line is an error, and so is a dependency file without files or outputs: never an empty list.
-pub fn listed_files(text: &str) -> Result<Vec<String>, String> {
+/// rustc writes Makefile rules: first one rule per output, `<output>: <file> <file> …`, each followed by an empty line; then one rule `<file>:` per file; then, after an empty line, one comment for each environment variable that the compiler read for the unit (with `env!` or `option_env!`, or for Clippy), sorted, `# env-dep:<name>=<value>` for a variable that was set and `# env-dep:<name>` for one that was not, with `\n`, `\r` and `\` in names and values written as `\n`, `\r` and `\\`. In a file's name it writes a space as `\ ` and changes nothing else (on Windows a path has a `:` after the drive letter), so a file's rule never contains `: `, and an output's rule always does; it writes the outputs' names as they are. The files are therefore read from their own rules, which hold one name each, and every output's rule must list exactly those files, in the same order, so that a misreading cannot pass. A variable's name is what stands between `# env-dep:` and the first `=`, because a name cannot contain `=`. Any other line is an error: a comment of another kind, a comment without a name, and a line after the comments that is not one of them; so is a dependency file without files or outputs: never an empty list. A comment's value is never shown, because it may be a secret.
+pub fn read_record(text: &str) -> Result<Record, String> {
     let mut outputs = Vec::new();
     let mut files = Vec::new();
+    let mut variables = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
             continue;
+        }
+        if let Some(variable) = line.strip_prefix("# env-dep:") {
+            let name = variable.split_once('=').map_or(variable, |(name, _)| name);
+            if name.is_empty() {
+                return Err(format!(
+                    "line {number} is a comment `# env-dep:` that names no environment variable"
+                ));
+            }
+            variables.push(name.to_owned());
+            continue;
+        }
+        if !variables.is_empty() {
+            // Not shown: it may continue the value of a variable.
+            return Err(format!(
+                "line {number} follows the comments on environment variables but is not one, where the compiler writes nothing else"
+            ));
+        }
+        if line.starts_with('#') {
+            return Err(format!(
+                "line {number} is a comment of a kind that the gate does not read: {line}"
+            ));
         }
         if line.contains(": ") {
             outputs.push((number, line));
@@ -256,7 +318,10 @@ pub fn listed_files(text: &str) -> Result<Vec<String>, String> {
             ));
         }
     }
-    Ok(files.iter().map(|name| name.replace("\\ ", " ")).collect())
+    Ok(Record {
+        files: files.iter().map(|name| name.replace("\\ ", " ")).collect(),
+        variables,
+    })
 }
 
 /// A data file of `DATA_FILES`.
@@ -287,15 +352,18 @@ pub struct Comparison {
     read: BTreeSet<(usize, String)>,
     /// The Rust files that the compiler compiled into each member's units that ship, in the runs so far, as the file system names them.
     shipped: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The members whose units that ship may read any environment variable while they are compiled: those that `OUTSIDE_WORLD` lists with the whole module `std::env`.
+    environment_exempt: BTreeSet<String>,
 }
 
 impl Comparison {
-    /// Prepares the comparison for the workspace at `root`, whose members are named `members`. `sources` are the files that the source check read, and `data` the entries of `DATA_FILES`. Fails if an entry names no member, a member that does not exist, a file that does not exist or that the source check reads anyway, or a file that another entry lists too.
+    /// Prepares the comparison for the workspace at `root`, whose members are named `members`. `sources` are the files that the source check read, `data` the entries of `DATA_FILES`, and `environment_exempt` the members whose units that ship may read any environment variable while they are compiled. Fails if an entry of `data` names no member, a member that does not exist, a file that does not exist or that the source check reads anyway, or a file that another entry lists too, or if `environment_exempt` names a member that does not exist.
     pub fn new(
         root: &Path,
         sources: &BTreeSet<PathBuf>,
         data: &[DataFiles],
         members: &[&str],
+        environment_exempt: &[&str],
     ) -> Result<Self, String> {
         let root = canonical(root)?;
         let sources = sources
@@ -353,6 +421,14 @@ impl Comparison {
                 problems.join("\n")
             ));
         }
+        if let Some(unknown) = environment_exempt
+            .iter()
+            .find(|member| !members.contains(member))
+        {
+            return Err(format!(
+                "`{unknown}`, which may read any environment variable while it is compiled because OUTSIDE_WORLD lists the whole of std::env for it, is not a workspace member"
+            ));
+        }
         Ok(Self {
             root,
             sources,
@@ -360,15 +436,23 @@ impl Comparison {
             data: listed,
             read: BTreeSet::new(),
             shipped: BTreeMap::new(),
+            environment_exempt: environment_exempt
+                .iter()
+                .map(|member| (*member).to_owned())
+                .collect(),
         })
     }
 
-    /// Checks the dependency file of every unit of one Clippy run, which began at `run_started`: the dependency file of a unit that Cargo compiled in the run must have been written since then, each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file. Records the data files that each member read, and the Rust files of the units that ship. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, or the first thing it could not follow.
+    /// Checks the dependency file of every unit of one Clippy run, which began at `run_started`: the dependency file of a unit that Cargo compiled in the run must have been written since then, each file it lists must be one that the source check read, one of Clippy's own two, or a data file listed for the unit's member, and the list must contain the unit's root file; it must record Clippy's own environment variables, and, for a unit that ships of a member that may not read any variable while it is compiled, no other variables than those and Cargo's [`CARGO_PKG_VARIABLES`]. Records the data files that each member read, and the Rust files of the units that ship. Returns one line describing what was checked, or the problem: every unit that read another file, with each such file relative to the root, and every unit that read another variable, with each such variable's name; or the first thing it could not follow.
     pub fn check(&mut self, units: &[Unit], run_started: SystemTime) -> Result<String, String> {
         // Rounded down to the second, so that a file system that stores whole seconds cannot make a file written in the run's first second look older than the run.
         let run_started = whole_second(run_started);
         let mut unread = Vec::new();
         let mut data_read = BTreeSet::new();
+        let mut environment = Vec::new();
+        // The units whose variables were checked, and the variables of Cargo's that they read.
+        let mut environment_checked = 0;
+        let mut cargo_read = BTreeSet::new();
         for unit in units {
             let unit_name = format!("{}, {}", unit.package, unit.target);
             let dep_info = self.shown(&unit.dep_info);
@@ -391,9 +475,30 @@ impl Comparison {
                     ));
                 }
             }
-            let files = listed_files(&text).map_err(|problem| {
+            let Record { files, variables } = read_record(&text).map_err(|problem| {
                 format!("{unit_name}: cannot read its dependency file, {dep_info}: {problem}")
             })?;
+            let missing: Vec<&str> = CLIPPY_VARIABLES
+                .iter()
+                .copied()
+                .filter(|own| !variables.iter().any(|variable| variable == own))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "{unit_name}: its dependency file, {dep_info}, does not record Clippy's own environment variable {}, which Clippy reads for every unit it checks, so the gate cannot be sure that it records the variables that the compiler read for the unit",
+                    missing.join(" or ")
+                ));
+            }
+            if unit.shipped && !self.environment_exempt.contains(&unit.package) {
+                environment_checked += 1;
+                for variable in variables {
+                    if CARGO_PKG_VARIABLES.contains(&variable.as_str()) {
+                        cargo_read.insert(variable);
+                    } else if !CLIPPY_VARIABLES.contains(&variable.as_str()) {
+                        environment.push(format!("  {unit_name}: {variable}"));
+                    }
+                }
+            }
             let root_file =
                 canonical(&unit.root_file).map_err(|problem| format!("{unit_name}: {problem}"))?;
             let mut lists_root_file = false;
@@ -436,18 +541,24 @@ impl Comparison {
                 ));
             }
         }
-        if !unread.is_empty() {
-            return Err(format!(
-                "{}:\n{}\n{}",
-                UNREAD.0,
-                unread.join("\n"),
-                UNREAD.1
-            ));
+        let problems: Vec<String> = [(unread, UNREAD), (environment, ENVIRONMENT)]
+            .into_iter()
+            .filter(|(places, _)| !places.is_empty())
+            .map(|(places, (heading, why))| format!("{heading}:\n{}\n{why}", places.join("\n")))
+            .collect();
+        if !problems.is_empty() {
+            return Err(problems.join("\n"));
         }
+        let cargo_read: Vec<String> = cargo_read.into_iter().collect();
         Ok(format!(
-            "the {} units of workspace members: the compiler read only files that the source check read, besides Clippy's clippy.toml and Cargo.toml and {} data files that DATA_FILES lists for their members",
+            "the {} units of workspace members: the compiler read only files that the source check read, besides Clippy's clippy.toml and Cargo.toml and {} data files that DATA_FILES lists for their members; the {environment_checked} of them that ship, of the members that OUTSIDE_WORLD does not list with the whole of std::env, read no environment variable while they were compiled but Clippy's own and Cargo's CARGO_PKG_* ({})",
             units.len(),
-            data_read.len()
+            data_read.len(),
+            if cargo_read.is_empty() {
+                "none of these".to_owned()
+            } else {
+                cargo_read.join(", ")
+            }
         ))
     }
 
@@ -547,19 +658,47 @@ Cargo.toml:
     #[test]
     fn reads_the_files_that_a_dependency_file_lists() {
         assert_eq!(
-            listed_files(LINUX).unwrap(),
-            [
-                "/home/ana/bayan-core/clippy.toml",
-                "crates/bayan-units/src/lib.rs",
-                "crates/bayan-units/src/angle.rs",
-                // As the compiler reached it, not normalized.
-                "crates/bayan-units/src/../../../shared/sine.rs",
-                "Cargo.toml",
-            ]
+            read_record(LINUX).unwrap(),
+            Record {
+                files: [
+                    "/home/ana/bayan-core/clippy.toml",
+                    "crates/bayan-units/src/lib.rs",
+                    "crates/bayan-units/src/angle.rs",
+                    // As the compiler reached it, not normalized.
+                    "crates/bayan-units/src/../../../shared/sine.rs",
+                    "Cargo.toml",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                // Whether set or not.
+                variables: vec!["CLIPPY_ARGS".to_owned(), "CLIPPY_CONF_DIR".to_owned()],
+            }
         );
         // A dependency file with only one output, and without comments, is read the same way.
         let rmeta_only = "/r/liba-1.rmeta: crates/a/src/lib.rs\n\ncrates/a/src/lib.rs:\n";
-        assert_eq!(listed_files(rmeta_only).unwrap(), ["crates/a/src/lib.rs"]);
+        assert_eq!(
+            read_record(rmeta_only).unwrap(),
+            Record {
+                files: vec!["crates/a/src/lib.rs".to_owned()],
+                variables: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn reads_the_names_of_the_environment_variables_but_not_their_values() {
+        // As rustc 1.99 writes them, sorted, with `\n`, `\r` and `\` escaped; a name ends at the first `=`.
+        let text = "/r/liba-1.rmeta: crates/a/src/lib.rs\n\ncrates/a/src/lib.rs:\n\n# env-dep:CARGO_PKG_VERSION=0.0.0\n# env-dep:CLIPPY_ARGS=-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__\n# env-dep:CLIPPY_CONF_DIR\n# env-dep:HOME=/home/ana\n# env-dep:SETTING=a=b\\nc\\\\d\n";
+        assert_eq!(
+            read_record(text).unwrap().variables,
+            [
+                "CARGO_PKG_VERSION",
+                "CLIPPY_ARGS",
+                "CLIPPY_CONF_DIR",
+                "HOME",
+                "SETTING"
+            ]
+        );
     }
 
     #[test]
@@ -577,7 +716,7 @@ Cargo.toml:
 # env-dep:CLIPPY_CONF_DIR
 ";
         assert_eq!(
-            listed_files(text).unwrap(),
+            read_record(text).unwrap().files,
             [
                 r"\\?\C:\Users\Ana\bayan-core\clippy.toml",
                 r"crates\bayan-units\src\lib.rs",
@@ -602,7 +741,7 @@ Cargo.toml:
             files.join(":\n")
         );
         assert_eq!(
-            listed_files(&text).unwrap(),
+            read_record(&text).unwrap().files,
             [
                 "/home/ana/my repo/clippy.toml",
                 "crates/my lib/src/lib.rs",
@@ -664,9 +803,37 @@ Cargo.toml:
                 "/r/a.rmeta: crates/my lib.rs\n\ncrates/my lib.rs:\n".to_owned(),
                 "line 3 names a file with a space that `\\` does not escape",
             ),
+            // Comments of another kind, such as the checksums that a nightly compiler can write, and comments that name no variable.
+            (
+                format!("{output}{files}\n# checksum:blake3=00 file_len:1 crates/a/src/lib.rs\n"),
+                "line 6 is a comment of a kind that the gate does not read",
+            ),
+            (
+                format!("{output}{files}\n#env-dep:HOME\n"),
+                "line 6 is a comment of a kind that the gate does not read",
+            ),
+            (
+                format!("{output}{files}\n# env-dep:\n"),
+                "line 6 is a comment `# env-dep:` that names no environment variable",
+            ),
+            (
+                format!("{output}{files}\n# env-dep:=secret\n"),
+                "names no environment variable",
+            ),
+            // A line after the comments, where the compiler writes nothing else: a rule, a value continued on a line of its own, or another comment.
+            (
+                format!("# env-dep:CLIPPY_CONF_DIR\n{output}{files}"),
+                "line 2 follows the comments on environment variables but is not one",
+            ),
+            (
+                format!("{output}{files}\n# env-dep:TOKEN=first\nsecret\n"),
+                "line 7 follows the comments on environment variables but is not one",
+            ),
         ] {
-            let error = listed_files(&text).expect_err(&text);
+            let error = read_record(&text).expect_err(&text);
             assert!(error.contains(problem), "{text:?}: {error}");
+            // A comment's value is never shown.
+            assert!(!error.contains("secret"), "{text:?}: {error}");
         }
     }
 
@@ -987,8 +1154,19 @@ Cargo.toml:
                 .to_string()
         }
 
-        /// A unit of the library of the member `member`, whose dependency file, `target/debug/deps/<member>-<number>.d`, lists `files` (as rustc writes them, with `\ ` for a space), Clippy's two files after them.
+        /// A unit of the library of the member `member`, whose dependency file, `target/debug/deps/<member>-<number>.d`, lists `files` (as rustc writes them, with `\ ` for a space), Clippy's two files after them, and records Clippy's two environment variables.
         fn unit(&self, member: &str, number: u32, files: &[&str]) -> Unit {
+            self.unit_reading(member, number, files, &[])
+        }
+
+        /// [`Scratch::unit`], whose dependency file also records `variables`, each written as `NAME` or `NAME=value`.
+        fn unit_reading(
+            &self,
+            member: &str,
+            number: u32,
+            files: &[&str],
+            variables: &[&str],
+        ) -> Unit {
             let clippy_config = self.clippy_config();
             let mut listed: Vec<String> = files.iter().map(|file| (*file).to_owned()).collect();
             listed.extend([clippy_config, "Cargo.toml".to_owned()]);
@@ -997,8 +1175,18 @@ Cargo.toml:
             let dep_info = deps.join(format!("{member}-{number}.d"));
             let rmeta = deps.join(format!("lib{member}-{number}.rmeta"));
             let list = listed.join(" ");
+            let mut recorded: Vec<&str> = vec![
+                "CLIPPY_ARGS=-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__",
+                "CLIPPY_CONF_DIR",
+            ];
+            recorded.extend(variables);
+            recorded.sort_unstable();
+            let comments: String = recorded
+                .iter()
+                .map(|variable| format!("# env-dep:{variable}\n"))
+                .collect();
             let text = format!(
-                "{}: {list}\n\n{}: {list}\n\n{}:\n\n# env-dep:CLIPPY_CONF_DIR\n",
+                "{}: {list}\n\n{}: {list}\n\n{}:\n\n{comments}",
                 dep_info.display(),
                 rmeta.display(),
                 listed.join(":\n")
@@ -1015,9 +1203,9 @@ Cargo.toml:
             }
         }
 
-        /// The comparison for this workspace, with the members `a` and `c` and the data files `data`.
+        /// The comparison for this workspace, with the members `a` and `c`, of which `c` may read any environment variable while it is compiled, and the data files `data`.
         fn comparison(&self, data: &[DataFiles]) -> Comparison {
-            Comparison::new(&self.0, &self.sources(), data, &["a", "c"])
+            Comparison::new(&self.0, &self.sources(), data, &["a", "c"], &["c"])
                 .unwrap_or_else(|problem| panic!("{problem}"))
         }
     }
@@ -1300,7 +1488,7 @@ Cargo.toml:
         let problem = comparison.check(&[garbled], LONG_AGO).unwrap_err();
         assert!(
             problem.contains("cannot read its dependency file")
-                && problem.contains("is neither a rule nor a comment"),
+                && problem.contains("follows the comments on environment variables but is not one"),
             "{problem}"
         );
         // A file that does not exist.
@@ -1420,8 +1608,8 @@ Cargo.toml:
                 "is not a path relative to the root",
             ),
         ] {
-            let error =
-                Comparison::new(&scratch.0, &scratch.sources(), &[entry], &["a", "c"]).unwrap_err();
+            let error = Comparison::new(&scratch.0, &scratch.sources(), &[entry], &["a", "c"], &[])
+                .unwrap_err();
             assert!(error.contains(problem), "{error}");
             assert!(
                 error.starts_with("DATA_FILES in xtask/src/verify.rs is not right:"),
@@ -1430,8 +1618,99 @@ Cargo.toml:
         }
         let twice = [table(&["a"]), table(&["c"])];
         let error =
-            Comparison::new(&scratch.0, &scratch.sources(), &twice, &["a", "c"]).unwrap_err();
+            Comparison::new(&scratch.0, &scratch.sources(), &twice, &["a", "c"], &[]).unwrap_err();
         assert!(error.contains("data/table.txt is listed twice"), "{error}");
+        // A member that may read any environment variable must exist.
+        let error =
+            Comparison::new(&scratch.0, &scratch.sources(), &[], &["a", "c"], &["b"]).unwrap_err();
+        assert!(
+            error.starts_with("`b`, which may read any environment variable while it is compiled"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn accepts_only_cargos_package_variables_in_the_code_that_ships() {
+        let scratch = Scratch::new("environment");
+        let mut comparison = scratch.comparison(&[]);
+        // `env!("CARGO_PKG_VERSION")`, as the engine's version string reads it.
+        let version = scratch.unit_reading(
+            "a",
+            1,
+            &["crates/a/src/lib.rs"],
+            &["CARGO_PKG_VERSION=0.0.0"],
+        );
+        let line = comparison
+            .check(std::slice::from_ref(&version), LONG_AGO)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(
+            line.ends_with("the 1 of them that ship, of the members that OUTSIDE_WORLD does not list with the whole of std::env, read no environment variable while they were compiled but Clippy's own and Cargo's CARGO_PKG_* (CARGO_PKG_VERSION)"),
+            "{line}"
+        );
+        // `option_env!("HOME")` where HOME is not set, and where it is; Cargo's other variables; and a name that only looks like Cargo's.
+        let home = scratch.unit_reading(
+            "a",
+            2,
+            &["crates/a/src/lib.rs"],
+            &["HOME", "CARGO_MANIFEST_DIR=/repo/crates/a"],
+        );
+        let set = scratch.unit_reading(
+            "a",
+            3,
+            &["crates/a/src/lib.rs"],
+            &["CARGO_PKG_TOKEN=secret", "HOME=/home/secret"],
+        );
+        let problem = comparison
+            .check(&[version, home, set], LONG_AGO)
+            .unwrap_err();
+        assert_eq!(
+            problem,
+            format!(
+                "{}:\n  a, lib target `a`: CARGO_MANIFEST_DIR\n  a, lib target `a`: HOME\n  a, lib target `a`: CARGO_PKG_TOKEN\n  a, lib target `a`: HOME\n{}",
+                ENVIRONMENT.0, ENVIRONMENT.1
+            )
+        );
+        // A test unit, and a unit of a member that may read any variable while it runs, may read any while they are compiled too.
+        let mut as_tests = scratch.unit_reading(
+            "a",
+            4,
+            &["crates/a/src/lib.rs"],
+            &[
+                "CARGO_MANIFEST_DIR=/repo/crates/a",
+                "CARGO_TARGET_TMPDIR=/repo/target/tmp",
+                "HOME",
+            ],
+        );
+        as_tests.shipped = false;
+        let exempt = scratch.unit_reading("c", 5, &["crates/c/src/lib.rs"], &["HOME=/home/ana"]);
+        let line = comparison
+            .check(&[as_tests, exempt], LONG_AGO)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(
+            line.ends_with("the 0 of them that ship, of the members that OUTSIDE_WORLD does not list with the whole of std::env, read no environment variable while they were compiled but Clippy's own and Cargo's CARGO_PKG_* (none of these)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn requires_clippys_own_variables_in_every_record() {
+        let scratch = Scratch::new("clippy-variables");
+        let mut comparison = scratch.comparison(&[]);
+        // Without CLIPPY_ARGS, whose value changes with each run's arguments, the record of variables cannot be trusted, also for a member that may read any.
+        let unit = scratch.unit("c", 1, &["crates/c/src/lib.rs"]);
+        let text = std::fs::read_to_string(&unit.dep_info).unwrap();
+        let without: String = text
+            .lines()
+            .filter(|line| !line.starts_with("# env-dep:CLIPPY_ARGS"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&unit.dep_info, without).unwrap();
+        let problem = comparison.check(&[unit], LONG_AGO).unwrap_err();
+        assert!(
+            problem.contains("c, lib target `c`: its dependency file")
+                && problem.contains("does not record Clippy's own environment variable CLIPPY_ARGS, which Clippy reads for every unit it checks"),
+            "{problem}"
+        );
     }
 
     #[test]
@@ -1450,8 +1729,14 @@ Cargo.toml:
             .iter()
             .map(|package| package.name.as_str())
             .collect();
-        Comparison::new(&root, &sources, &crate::verify::DATA_FILES, &members)
-            .unwrap_or_else(|problem| panic!("{problem}"));
+        Comparison::new(
+            &root,
+            &sources,
+            &crate::verify::DATA_FILES,
+            &members,
+            &crate::outside_world::environment_exempt(&crate::verify::OUTSIDE_WORLD),
+        )
+        .unwrap_or_else(|problem| panic!("{problem}"));
         for entry in &crate::verify::DATA_FILES {
             assert!(!entry.reason.is_empty(), "{entry:?}");
         }

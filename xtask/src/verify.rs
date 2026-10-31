@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::dep_info::{self, DataFiles};
 use crate::lint_audit::{self, Guarded};
-use crate::outside_world::{self, Exemption};
+use crate::outside_world::{self, Approved, Exemption, Uses};
 use crate::policy::Package;
 use crate::process::{self, cargo};
 use crate::sources::{self, Condition};
@@ -127,49 +127,57 @@ pub const DATA_FILES: [DataFiles; 8] = [
     },
 ];
 
-/// Workspace members whose code that ships may name modules of Rust's standard library that exist for the outside world, with the modules that each may use and the reason. The engine never touches the outside world itself (ADR-0012 §5). After its runs, the Clippy step checks that the code that ships of every other member names none of `std::env`, `std::fs`, `std::net`, `std::process` and `std::time`, also not in the strings of attributes: it reads every line of the Rust files that the compiler compiled into each member's units that are not tests, as their dependency files list them, so tests may use these modules in integration tests and in modules declared with `#[cfg(test)] mod name;`, never in a test module written in place (`outside_world.rs`). xtask reads the source text itself, so no attribute can switch the check off. It covers these five modules in the workspace's own code; `outside_world.rs` lists what it does not see, such as the file-system methods of `std::path::Path`. A member that the list does not name may not depend on one that it names, except for its tests, and the list cannot go stale: an entry for a member that does not exist, or a module that the member's code that ships no longer uses, fails too.
+/// Workspace members whose code that ships may reach the outside world, each with what it may use and the reason: whole modules of Rust's standard library that exist for the outside world, or exactly some items of them. The engine never touches the outside world itself (ADR-0012 §5). After its runs, the Clippy step checks that the code that ships of every other member names none of `std::env`, `std::fs`, `std::net`, `std::process` and `std::time` and uses none of the items of `ITEMS` in `outside_world.rs`, through which std reaches the outside world outside those modules (the file-system methods of `std::path::Path`, `RandomState`, threads without a stack size, sleeping and timeouts, backtraces, `available_parallelism` and the standard streams), except where [`APPROVED_ITEMS`] approves an item for a file; this includes the strings of attributes. It reads every line of the Rust files that the compiler compiled into each member's units that are not tests, as their dependency files list them, so tests may use these modules and items in integration tests and in modules declared with `#[cfg(test)] mod name;`, never in a test module written in place (`outside_world.rs`). xtask reads the source text itself, so no attribute can switch the check off. An entry that lists whole modules is a tool that reaches the outside world anyway: its code is not checked for `ITEMS`, and with `std::env` its units that ship may read any environment variable while they are compiled, where the Clippy step allows the others only Cargo's `CARGO_PKG_*` and Clippy's own (`dep_info.rs`). An entry that lists items allows exactly those, named right after their module, and none of `ITEMS`. It covers the standard library in the workspace's own code; `outside_world.rs` lists what it does not see, such as a dependency's re-export of std. A member that the list does not name may not depend on one that it names, except for its tests, and the list cannot go stale: an entry for a member that does not exist, or a module or item that the member's code that ships no longer uses, fails too.
 pub const OUTSIDE_WORLD: [Exemption; 8] = [
     Exemption {
         member: "bayan-cli",
-        modules: &["std::env", "std::process"],
-        reason: "the command-line tool, which developers run and the shells never do, reads its command line (`std::env::args`) and reports how it ended through its exit status (`std::process::ExitCode`)",
+        uses: Uses::Modules(&["std::env", "std::process"]),
+        reason: "the command-line tool, which developers run and the shells never do, reads its command line (`std::env::args`) and reports how it ended through its exit status (`std::process::ExitCode`); listed with whole modules, as a tool that reaches the outside world anyway, so that what else it uses of the outside world, such as `std::io::stdout` for its output, needs no list of its own",
     },
     Exemption {
         member: "bayan-ffi",
-        modules: &["std::process", "std::time"],
-        reason: "the C interface is the desktop host's side of the boundary: it stamps every message and tile request with the milliseconds since the engine was created (`std::time::Instant`), the clock of recordings that the host provides (engine protocol §10), as bayan-wasm takes it from the worker host, and it stops the process (`std::process::abort`) when the shell's callback unwinds, which the C interface forbids and nothing could recover from",
+        uses: Uses::Items(&["std::process::abort", "std::time::Instant"]),
+        reason: "the C interface is the desktop host's side of the boundary: it stamps every message and tile request with the milliseconds since the engine was created (`std::time::Instant`), the clock of recordings that the host provides (engine protocol §10), as bayan-wasm takes it from the worker host, and it stops the process (`std::process::abort`) when the shell's callback unwinds, which the C interface forbids and nothing could recover from; listed with exactly these two items, not their modules, because it ships in the desktop app, so that the rest of them (other processes through `std::process::Command`, the wall clock through `std::time::SystemTime`) and every item of ITEMS stay out of it",
     },
     Exemption {
         member: "bayan-lab",
-        modules: &["std::env", "std::fs", "std::process", "std::time"],
-        reason: "the Fidelity Lab's command-line tool, which works on corpus files and their storage on a developer's machine or in CI: it reads its command line, settings and credentials (`std::env`), reads and writes files (`std::fs`), runs curl for its S3 and HTTPS stores (`std::process`) and waits between retries (`std::time`)",
+        uses: Uses::Modules(&["std::env", "std::fs", "std::process", "std::time"]),
+        reason: "the Fidelity Lab's command-line tool, which works on corpus files and their storage on a developer's machine or in CI: it reads its command line, settings and credentials (`std::env`), reads and writes files (`std::fs`), runs curl for its S3 and HTTPS stores (`std::process`) and waits between retries (`std::time`); listed with whole modules, as a tool that reaches the outside world anyway, so that what else it uses of the outside world, such as `Path::exists` and the standard streams, needs no list of its own",
     },
     Exemption {
         member: "crdt-model",
-        modules: &["std::env", "std::fs", "std::process", "std::time"],
-        reason: "the CORE-004 spike's command-line tool, which never ships: it reads its command line (`std::env`), times its benchmarks and runs (`std::time`), writes its results and fuzzing corpora (`std::fs`) and runs its fuzzer in child processes that it restarts after an abort (`std::process`)",
+        uses: Uses::Modules(&["std::env", "std::fs", "std::process", "std::time"]),
+        reason: "the CORE-004 spike's command-line tool, which never ships: it reads its command line (`std::env`), times its benchmarks and runs (`std::time`), writes its results and fuzzing corpora (`std::fs`) and runs its fuzzer in child processes that it restarts after an abort (`std::process`); listed with whole modules, as a spike, so that what else it uses of the outside world, such as its scoped threads and their stack size, needs no list of its own",
     },
     Exemption {
         member: "crdt-model-automerge",
-        modules: &["std::env", "std::fs", "std::process", "std::time"],
-        reason: "the CORE-004 spike's comparison with Automerge, which never ships: it reads its command line (`std::env`), times its runs (`std::time`), writes its results (`std::fs`) and reports how it ended through its exit status (`std::process`)",
+        uses: Uses::Modules(&["std::env", "std::fs", "std::process", "std::time"]),
+        reason: "the CORE-004 spike's comparison with Automerge, which never ships: it reads its command line (`std::env`), times its runs (`std::time`), writes its results (`std::fs`) and reports how it ended through its exit status (`std::process`); listed with whole modules, as a spike",
     },
     Exemption {
         member: "crdt-workload",
-        modules: &["std::fs", "std::time"],
-        reason: "the CORE-004 spikes' shared workloads and measurements, which never ship: they measure durations (`std::time`) and read the process's memory use from /proc/self/status on Linux (`std::fs`)",
+        uses: Uses::Modules(&["std::fs", "std::time"]),
+        reason: "the CORE-004 spikes' shared workloads and measurements, which never ship: they measure durations (`std::time`) and read the process's memory use from /proc/self/status on Linux (`std::fs`); listed with whole modules, as a spike",
     },
     Exemption {
         member: "text-pipeline",
-        modules: &["std::env", "std::fs", "std::process", "std::time"],
-        reason: "the CORE-003 spike's native runner, which never ships: it reads its command line (`std::env`), reads fonts and writes results (`std::fs`), times the work with the host's clock, as its JavaScript runners do with `performance.now()` (`std::time`), and reports how it ended through its exit status (`std::process`)",
+        uses: Uses::Modules(&["std::env", "std::fs", "std::process", "std::time"]),
+        reason: "the CORE-003 spike's native runner, which never ships: it reads its command line (`std::env`), reads fonts and writes results (`std::fs`), times the work with the host's clock, as its JavaScript runners do with `performance.now()` (`std::time`), and reports how it ended through its exit status (`std::process`); listed with whole modules, as a spike, so that what else it uses of the outside world, such as its printed results, needs no list of its own",
     },
     Exemption {
         member: "xtask",
-        modules: &["std::env", "std::fs", "std::process", "std::time"],
-        reason: "this build automation: it runs Cargo, Git, curl and the gate's other tools (`std::process`), reads and writes the workspace's files (`std::fs`), reads its command line and the variables it checks, such as the compiler flags and `GITHUB_BASE_REF` (`std::env`), and times the gate's steps and its requests to crates.io (`std::time`)",
+        uses: Uses::Modules(&["std::env", "std::fs", "std::process", "std::time"]),
+        reason: "this build automation: it runs Cargo, Git, curl and the gate's other tools (`std::process`), reads and writes the workspace's files (`std::fs`), reads its command line and the variables it checks, such as the compiler flags and `GITHUB_BASE_REF` (`std::env`), and times the gate's steps and its requests to crates.io (`std::time`); listed with whole modules, as a tool that reaches the outside world on purpose, so that what else it uses of the outside world, such as `Path::exists` and the standard streams, needs no list of its own",
     },
 ];
+
+/// Uses of the items of `ITEMS` in `outside_world.rs` that one file of a member's code that ships may make, because they cannot reach the outside world, each with the reason. The Clippy step accepts an item of `ITEMS` in the code that ships of a member that [`OUTSIDE_WORLD`] does not list with whole modules only in a file that this list approves it for; a member listed with whole modules is not checked for `ITEMS` at all, so it cannot appear here. Reviewers check each use in full, together with its reason, and the list cannot go stale: an entry for a member that does not exist, an item that `ITEMS` does not list, and an approved item that the file no longer uses fail.
+pub const APPROVED_ITEMS: [Approved; 1] = [Approved {
+    member: "bayan-engine",
+    file: "crates/bayan-engine/src/thread.rs",
+    items: &["std::thread::Builder"],
+    reason: "the engine's own thread for native hosts (`EngineThread::spawn`), the only thread the engine starts, whose builder always sets the stack size to `ENGINE_THREAD_STACK_BYTES` (2 MiB), so that `RUST_MIN_STACK` does not decide how deeply an input may nest (FU-4); the test `the_environment_does_not_choose_the_engine_thread_s_stack` checks that the environment does not change it",
+}];
 
 /// The conditions that code may use in `cfg(…)`, `cfg!(…)` and the first argument of `cfg_attr(…)`, combined with `all`, `any`, `not`, `true` and `false`, each with the reason it is approved. The Clippy step compiles the code under every combination of their values ([`CLIPPY_RUNS`]), so no code can choose a configuration that Clippy does not check (ADR-0005 §4 and §5, ADR-0025); the preflight rejects every other condition (`sources.rs`). A condition is added only in a reviewed pull request, together with the Clippy runs that check the code with it both on and off: the test `the_clippy_runs_check_every_combination_of_the_approved_conditions` fails otherwise.
 pub const APPROVED_CONDITIONS: [Condition; 3] = [
@@ -431,10 +439,15 @@ fn preflight(root: &Path) -> Result<Gate, String> {
         println!("    {line}");
     }
 
-    // The members that may reach the outside world, and who depends on them; their code is checked after the Clippy runs, from the compiler's record.
+    // The members that may reach the outside world, who depends on them, and the files that may use an item of `ITEMS`; their code is checked after the Clippy runs, from the compiler's record.
     let member_names: Vec<&str> = members.iter().map(String::as_str).collect();
     let dependencies = policy::member_dependencies(&metadata, &packages)?;
-    let line = outside_world::check_list(&member_names, &dependencies, &OUTSIDE_WORLD)?;
+    let line = outside_world::check_list(
+        &member_names,
+        &dependencies,
+        &OUTSIDE_WORLD,
+        &APPROVED_ITEMS,
+    )?;
     println!("    {line}");
 
     // Checked before Clippy first runs, because code under a condition that no Clippy run sets, or that a macro builds, would pass the Clippy step unseen.
@@ -461,7 +474,7 @@ fn fmt(gate: &Gate) -> Result<(), String> {
     process::run(cargo(&gate.root).args(["fmt", "--all", "--check"]))
 }
 
-/// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails. After each run, compares the files that the compiler read for every unit of a workspace member, as its dependency files list them, with the files that the source check read, Clippy's own two and [`DATA_FILES`] (`dep_info.rs`); after the last, checks that every member named in [`DATA_FILES`] read its files, and that the code that ships, as the compiler's record shows it, names the modules of the standard library that exist for the outside world only as [`OUTSIDE_WORLD`] allows (`outside_world.rs`).
+/// Runs Clippy once for every entry of [`CLIPPY_RUNS`], printing which run it is, and stops at the first that fails. After each run, compares the files that the compiler read for every unit of a workspace member, as its dependency files list them, with the files that the source check read, Clippy's own two and [`DATA_FILES`], and checks the environment variables that the compiler read for the units that ship of the members that [`OUTSIDE_WORLD`] does not list with the whole of `std::env`: only Cargo's `CARGO_PKG_*` and Clippy's own `CLIPPY_ARGS` and `CLIPPY_CONF_DIR` (`dep_info.rs`). After the last, it checks that every member named in [`DATA_FILES`] read its files, and that the code that ships, as the compiler's record shows it, uses the modules of the standard library that exist for the outside world, and the items of `ITEMS` that reach it outside them, only as [`OUTSIDE_WORLD`] and [`APPROVED_ITEMS`] allow (`outside_world.rs`).
 ///
 /// Then the lint audit (`lint_audit/`): for every entry of [`CLIPPY_RUNS`] again, with the same platform and profile, Clippy compiles the workspace with every lint that the lint tables or the compiler turn on force-warned ([`audit_args`]), so that the compiler reports each occurrence also where an attribute silences it, and the step fails on every occurrence that no `#[expect(lint, reason = "…")]` written out in full in the source covers, whatever wrote the attribute that silences it: a macro of the workspace that assembles it from its arguments, a macro of another crate or a procedural macro. The audit runs judge nothing by their exit status; the Clippy runs before them stay the first line of enforcement.
 fn clippy_step(gate: &Gate) -> Result<(), String> {
@@ -470,8 +483,13 @@ fn clippy_step(gate: &Gate) -> Result<(), String> {
         .iter()
         .map(|package| package.name.as_str())
         .collect();
-    let mut comparison =
-        dep_info::Comparison::new(&gate.root, &gate.sources, &DATA_FILES, &members)?;
+    let mut comparison = dep_info::Comparison::new(
+        &gate.root,
+        &gate.sources,
+        &DATA_FILES,
+        &members,
+        &outside_world::environment_exempt(&OUTSIDE_WORLD),
+    )?;
     for (index, run) in CLIPPY_RUNS.iter().enumerate() {
         let heading = format!(
             "Clippy run {} of {}: {}",
@@ -504,7 +522,12 @@ fn clippy_step(gate: &Gate) -> Result<(), String> {
     }
     let line = comparison.check_stale()?;
     println!("    {line}");
-    let line = outside_world::check_code(&gate.root, comparison.shipped(), &OUTSIDE_WORLD)?;
+    let line = outside_world::check_code(
+        &gate.root,
+        comparison.shipped(),
+        &OUTSIDE_WORLD,
+        &APPROVED_ITEMS,
+    )?;
     println!("    {line}");
     lint_audit_runs(gate, &members)
 }
@@ -1242,7 +1265,7 @@ mod tests {
             .map(|package| package.name.as_str())
             .collect();
         let dependencies = policy::member_dependencies(&metadata, &packages).unwrap();
-        outside_world::check_list(&members, &dependencies, &OUTSIDE_WORLD)
+        outside_world::check_list(&members, &dependencies, &OUTSIDE_WORLD, &APPROVED_ITEMS)
             .unwrap_or_else(|problem| panic!("{problem}"));
         // The engine's crates, its WebAssembly binding among them, are not on the list.
         for engine in [
