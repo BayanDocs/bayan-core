@@ -1,0 +1,484 @@
+{
+  "$defs": {
+    "Direction": {
+      "description": "The base direction of a line.",
+      "oneOf": [
+        {
+          "const": "ltr",
+          "description": "Left to right.",
+          "type": "string"
+        },
+        {
+          "const": "rtl",
+          "description": "Right to left.",
+          "type": "string"
+        }
+      ]
+    },
+    "Element": {
+      "additionalProperties": false,
+      "description": "A positioned element other than text, by its bounding box.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ElementKind",
+          "description": "What it is."
+        },
+        "x0": {
+          "$ref": "#/$defs/Points",
+          "description": "The left edge."
+        },
+        "x0_blu": {
+          "description": "`x0` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "x1": {
+          "$ref": "#/$defs/Points",
+          "description": "The right edge, at least `x0`."
+        },
+        "x1_blu": {
+          "description": "`x1` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "y0": {
+          "$ref": "#/$defs/Points",
+          "description": "The top edge."
+        },
+        "y0_blu": {
+          "description": "`y0` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "y1": {
+          "$ref": "#/$defs/Points",
+          "description": "The bottom edge, at least `y0`."
+        },
+        "y1_blu": {
+          "description": "`y1` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "x0",
+        "y0",
+        "x1",
+        "y1"
+      ],
+      "type": "object"
+    },
+    "ElementKind": {
+      "description": "A kind of positioned element other than text.",
+      "oneOf": [
+        {
+          "const": "image",
+          "description": "An image, by the box it fills.",
+          "type": "string"
+        },
+        {
+          "const": "rule",
+          "description": "A straight line or a thin filled rectangle, horizontal or vertical: borders, underlines, separators.",
+          "type": "string"
+        },
+        {
+          "const": "cell",
+          "description": "The box of a table cell.",
+          "type": "string"
+        }
+      ]
+    },
+    "Font": {
+      "additionalProperties": false,
+      "description": "A font that glyphs use.",
+      "properties": {
+        "family": {
+          "description": "The font family, where the producer knows it: the PDF's `FontFamily`, or the engine's family name. Absent otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The font's name as the producer knows it: in a PDF the `BaseFont` without the six-letter subset tag (`Calibri-Bold`, `TimesNewRomanPSMT`), which is the font's PostScript name for TrueType and OpenType fonts; for the engine, the PostScript name of the font file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Glyph": {
+      "additionalProperties": false,
+      "description": "A glyph placed on a line.",
+      "properties": {
+        "advance": {
+          "$ref": "#/$defs/Points",
+          "description": "How far the glyph moves the pen along its baseline: its advance width at its size, with the producer's character and word spacing, without kerning or other positioning that moves the next glyph only."
+        },
+        "advance_blu": {
+          "description": "`advance` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "font": {
+          "description": "The index of its font in `fonts`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gid": {
+          "description": "The glyph identifier in the font, where the producer knows it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "length": {
+          "description": "How many characters of the line's `text` the glyph shows: more than one for a ligature, zero for a glyph that shows no character of the text. Glyphs of one cluster share the same characters; other glyphs never share any.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The index, in the line's `text`, of the first character that the glyph shows, counted in characters (Unicode scalar values).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "$ref": "#/$defs/Points",
+          "description": "The font size: the height of the em square, perpendicular to the baseline."
+        },
+        "size_blu": {
+          "description": "`size` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "x": {
+          "$ref": "#/$defs/Points",
+          "description": "The x of the glyph's origin."
+        },
+        "x_blu": {
+          "description": "`x` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "y": {
+          "$ref": "#/$defs/Points",
+          "description": "The y of the glyph's origin, on its baseline (above the line's baseline for a superscript)."
+        },
+        "y_blu": {
+          "description": "`y` in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "offset",
+        "length",
+        "x",
+        "y",
+        "advance",
+        "font",
+        "size"
+      ],
+      "type": "object"
+    },
+    "Line": {
+      "additionalProperties": false,
+      "description": "A line: text on one baseline.",
+      "properties": {
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Points"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The y of the line's baseline, where the producer knows it."
+        },
+        "baseline_blu": {
+          "description": "The baseline in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Direction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The line's base direction, where the producer knows it."
+        },
+        "end": {
+          "description": "The offset after its last character, where the producer knows it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "glyphs": {
+          "description": "The line's glyphs in display order, from left to right, where the producer knows them. Requires `text`.",
+          "items": {
+            "$ref": "#/$defs/Glyph"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "The offset of the line's first character, where the producer knows it (see `text_offsets`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The line's characters in logical (reading) order, by the text rules of `lab/schema/layout-json.md`, where the producer knows them.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LineCoverage": {
+      "description": "Whether the pages list every line.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every line of every page.",
+          "type": "string"
+        },
+        {
+          "const": "sampled",
+          "description": "Only some lines (Word's object model samples paragraphs).",
+          "type": "string"
+        }
+      ]
+    },
+    "Page": {
+      "additionalProperties": false,
+      "description": "A page.",
+      "properties": {
+        "elements": {
+          "description": "The page's images, rules and table cells, where the producer reports them, in drawing order; absent when it does not.",
+          "items": {
+            "$ref": "#/$defs/Element"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "height": {
+          "$ref": "#/$defs/Points",
+          "description": "The height of the page as displayed."
+        },
+        "height_blu": {
+          "description": "The height in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lines": {
+          "description": "The lines of the page in reading order (see `lab/schema/layout-json.md`).",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "type": "array"
+        },
+        "skipped_glyphs": {
+          "description": "The PDF extractor's count of glyphs that it drew on no line: text that is not upright, and invisible text (render modes 3 and 7). Absent for other producers.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "The offset of the page's first character, where the producer knows it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "width": {
+          "$ref": "#/$defs/Points",
+          "description": "The width of the page as displayed (in a PDF, the crop box turned by the page's rotation)."
+        },
+        "width_blu": {
+          "description": "The width in BLU, where the engine produced it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "Points": {
+      "description": "A length or coordinate in points, with at most three decimals (a fixed precision of a thousandth of a point).",
+      "maximum": 1000000000,
+      "minimum": -1000000000,
+      "type": "number"
+    },
+    "SchemaVersion": {
+      "description": "The version of the layout JSON.",
+      "oneOf": [
+        {
+          "const": "urn:bayandocs:lab:layout:v1",
+          "description": "Version 1, this one.",
+          "type": "string"
+        }
+      ]
+    },
+    "Source": {
+      "description": "Who produced a layout JSON, which tells what its fields can hold.",
+      "oneOf": [
+        {
+          "const": "pdf",
+          "description": "bayan-lab's PDF extractor, from a PDF (in the lab, the PDF that Word exported): glyphs, lines, images and rules, with offsets into its own text (`text_offsets` is `lines`).",
+          "type": "string"
+        },
+        {
+          "const": "word",
+          "description": "Word's object model, through the ground-truth harness of LAB-002: page sizes and the document positions where pages and sampled lines start; no glyphs.",
+          "type": "string"
+        },
+        {
+          "const": "engine",
+          "description": "BayanDocs' engine, through `bayan-cli`: everything, with lengths also in BLU.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextOffsets": {
+      "description": "What the `start` and `end` offsets of pages and lines count.",
+      "oneOf": [
+        {
+          "const": "lines",
+          "description": "Characters (Unicode scalar values) of the file's own text stream: the `text` of every line, page after page and line after line, each followed by one line feed (U+000A). Every line then has `start`, `end` and `text`, and `end - start` is the number of characters of its `text`.",
+          "type": "string"
+        },
+        {
+          "const": "document",
+          "description": "Positions in the source document's text, as its producer counts them (Word's character positions, or the engine's). They increase through the document but need not match the lines' `text`, which holds what is displayed.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "urn:bayandocs:lab:layout:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A layout JSON file: the layout of one document.",
+  "properties": {
+    "fonts": {
+      "description": "The fonts that glyphs refer to by their index in this list.",
+      "items": {
+        "$ref": "#/$defs/Font"
+      },
+      "type": "array"
+    },
+    "line_coverage": {
+      "$ref": "#/$defs/LineCoverage",
+      "description": "Whether the pages list every line."
+    },
+    "page_count": {
+      "description": "The number of pages; equal to the length of `pages`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pages": {
+      "description": "The pages, in order.",
+      "items": {
+        "$ref": "#/$defs/Page"
+      },
+      "type": "array"
+    },
+    "producer": {
+      "description": "The program and its version, such as `bayan-lab pdf-extract 1`: printable text of at most 256 characters.",
+      "type": "string"
+    },
+    "schema": {
+      "$ref": "#/$defs/SchemaVersion",
+      "description": "The format's version: always `urn:bayandocs:lab:layout:v1`."
+    },
+    "source": {
+      "$ref": "#/$defs/Source",
+      "description": "Who produced the file."
+    },
+    "text_offsets": {
+      "$ref": "#/$defs/TextOffsets",
+      "description": "What the offsets of pages and lines count."
+    }
+  },
+  "required": [
+    "schema",
+    "source",
+    "producer",
+    "text_offsets",
+    "line_coverage",
+    "page_count",
+    "fonts",
+    "pages"
+  ],
+  "title": "BayanDocs Fidelity Lab layout JSON, version 1",
+  "type": "object"
+}

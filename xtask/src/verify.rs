@@ -48,7 +48,7 @@ pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 pub const PROC_MACROS: [(&str, &str); 0] = [];
 
 /// Files that workspace members read as data, with `include_str!` or `include_bytes!`, although the source check does not read them, with the members that read them and the reason. After each Clippy run, the Clippy step compares the files that the compiler read for every unit of a workspace member, as the dependency file it wrote for the unit lists them, with the files that the source check read (`dep_info.rs`). Any other file fails the step, unless it is one of Clippy's own two (the root clippy.toml and Cargo.toml, named as Clippy names them) or listed here for the unit's member. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every file listed here is data, never Rust code. A file that a member it is listed for read in none of the runs, a file that the source check reads anyway, and a member that does not exist fail the step too, so the list cannot go stale.
-pub const DATA_FILES: [DataFiles; 8] = [
+pub const DATA_FILES: [DataFiles; 10] = [
     DataFiles {
         files: &[
             "crates/bayan-crdt/tests/fixtures/loro-panic-base.bin",
@@ -76,6 +76,26 @@ pub const DATA_FILES: [DataFiles; 8] = [
         ],
         members: &["bayan-xml"],
         reason: "synthetic document parts written for bayan-xml's tests, a document in the Strict conformance class and shapes in nested Markup Compatibility alternate content, compiled in like the .docx files",
+    },
+    DataFiles {
+        files: &[
+            "lab/bayan-lab-layout/tests/fixtures/chromium.pdf",
+            "lab/bayan-lab-layout/tests/fixtures/chromium.words",
+            "lab/bayan-lab-layout/tests/fixtures/libreoffice.pdf",
+            "lab/bayan-lab-layout/tests/fixtures/libreoffice.words",
+        ],
+        members: &["bayan-lab-layout"],
+        reason: "PDFs that LibreOffice and Chromium made from documents written for LAB-003's tests, with the word boxes that poppler's pdftotext found in them (how they were made is in the README.md next to them), compiled into the extractor's tests so that those tests read no files and also run in WebAssembly",
+    },
+    DataFiles {
+        files: &[
+            "lab/schema/samples/engine.json",
+            "lab/schema/samples/pdf-chromium.json",
+            "lab/schema/samples/pdf-libreoffice.json",
+            "lab/schema/samples/word.json",
+        ],
+        members: &["bayan-lab-layout"],
+        reason: "the sample layout JSON files of both sides of a comparison (two that the extractor wrote from the fixture PDFs, one of the engine and one of Word's object model, written by hand), which the schema tests validate and the extraction tests compare with (LAB-003 AC-3)",
     },
     DataFiles {
         files: &[

@@ -150,6 +150,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bayan-lab-layout"
+version = "0.0.0"
+dependencies = [
+ "icu_properties",
+ "miniz_oxide",
+ "schemars",
+ "serde",
+ "serde_json",
+ "unicode-bidi",
+]
+
+[[package]]
 name = "bayan-model"
 version = "0.0.0"
 dependencies = [

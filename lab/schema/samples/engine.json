@@ -1,0 +1,286 @@
+{
+  "schema": "urn:bayandocs:lab:layout:v1",
+  "source": "engine",
+  "producer": "bayan-cli layout dump (a hand-written sample of what the engine will write)",
+  "text_offsets": "document",
+  "line_coverage": "all",
+  "page_count": 1,
+  "fonts": [
+    {
+      "name": "Carlito",
+      "family": "Carlito"
+    },
+    {
+      "name": "NotoSansHebrew-Regular",
+      "family": "Noto Sans Hebrew"
+    }
+  ],
+  "pages": [
+    {
+      "width": 612.0,
+      "height": 792.0,
+      "width_blu": 15544800,
+      "height_blu": 20116800,
+      "start": 0,
+      "lines": [
+        {
+          "start": 0,
+          "end": 12,
+          "text": "Hello, world",
+          "direction": "ltr",
+          "baseline": 86.4,
+          "baseline_blu": 2194560,
+          "glyphs": [
+            {
+              "offset": 0,
+              "length": 1,
+              "x": 72.0,
+              "y": 86.4,
+              "advance": 6.854,
+              "font": 0,
+              "size": 11.0,
+              "gid": 36,
+              "x_blu": 1828800,
+              "y_blu": 2194560,
+              "advance_blu": 174079,
+              "size_blu": 279400
+            },
+            {
+              "offset": 1,
+              "length": 1,
+              "x": 78.854,
+              "y": 86.4,
+              "advance": 5.473,
+              "font": 0,
+              "size": 11.0,
+              "gid": 37,
+              "x_blu": 2002879,
+              "y_blu": 2194560,
+              "advance_blu": 139018,
+              "size_blu": 279400
+            },
+            {
+              "offset": 2,
+              "length": 1,
+              "x": 84.327,
+              "y": 86.4,
+              "advance": 2.524,
+              "font": 0,
+              "size": 11.0,
+              "gid": 38,
+              "x_blu": 2141897,
+              "y_blu": 2194560,
+              "advance_blu": 64120,
+              "size_blu": 279400
+            },
+            {
+              "offset": 3,
+              "length": 1,
+              "x": 86.851,
+              "y": 86.4,
+              "advance": 2.524,
+              "font": 0,
+              "size": 11.0,
+              "gid": 39,
+              "x_blu": 2206017,
+              "y_blu": 2194560,
+              "advance_blu": 64120,
+              "size_blu": 279400
+            },
+            {
+              "offset": 4,
+              "length": 1,
+              "x": 89.375,
+              "y": 86.4,
+              "advance": 5.801,
+              "font": 0,
+              "size": 11.0,
+              "gid": 40,
+              "x_blu": 2270137,
+              "y_blu": 2194560,
+              "advance_blu": 147340,
+              "size_blu": 279400
+            },
+            {
+              "offset": 5,
+              "length": 1,
+              "x": 95.176,
+              "y": 86.4,
+              "advance": 2.745,
+              "font": 0,
+              "size": 11.0,
+              "gid": 41,
+              "x_blu": 2417477,
+              "y_blu": 2194560,
+              "advance_blu": 69714,
+              "size_blu": 279400
+            },
+            {
+              "offset": 6,
+              "length": 1,
+              "x": 97.921,
+              "y": 86.4,
+              "advance": 2.487,
+              "font": 0,
+              "size": 11.0,
+              "gid": 42,
+              "x_blu": 2487191,
+              "y_blu": 2194560,
+              "advance_blu": 63165,
+              "size_blu": 279400
+            },
+            {
+              "offset": 7,
+              "length": 1,
+              "x": 100.408,
+              "y": 86.4,
+              "advance": 7.858,
+              "font": 0,
+              "size": 11.0,
+              "gid": 43,
+              "x_blu": 2550356,
+              "y_blu": 2194560,
+              "advance_blu": 199591,
+              "size_blu": 279400
+            },
+            {
+              "offset": 8,
+              "length": 1,
+              "x": 108.266,
+              "y": 86.4,
+              "advance": 5.801,
+              "font": 0,
+              "size": 11.0,
+              "gid": 44,
+              "x_blu": 2749947,
+              "y_blu": 2194560,
+              "advance_blu": 147340,
+              "size_blu": 279400
+            },
+            {
+              "offset": 9,
+              "length": 1,
+              "x": 114.066,
+              "y": 86.4,
+              "advance": 3.835,
+              "font": 0,
+              "size": 11.0,
+              "gid": 45,
+              "x_blu": 2897287,
+              "y_blu": 2194560,
+              "advance_blu": 97408,
+              "size_blu": 279400
+            },
+            {
+              "offset": 10,
+              "length": 1,
+              "x": 117.901,
+              "y": 86.4,
+              "advance": 2.524,
+              "font": 0,
+              "size": 11.0,
+              "gid": 46,
+              "x_blu": 2994695,
+              "y_blu": 2194560,
+              "advance_blu": 64120,
+              "size_blu": 279400
+            },
+            {
+              "offset": 11,
+              "length": 1,
+              "x": 120.426,
+              "y": 86.4,
+              "advance": 5.779,
+              "font": 0,
+              "size": 11.0,
+              "gid": 47,
+              "x_blu": 3058815,
+              "y_blu": 2194560,
+              "advance_blu": 146794,
+              "size_blu": 279400
+            }
+          ]
+        },
+        {
+          "start": 13,
+          "end": 17,
+          "text": "שלום",
+          "direction": "rtl",
+          "baseline": 102.24,
+          "baseline_blu": 2596896,
+          "glyphs": [
+            {
+              "offset": 3,
+              "length": 1,
+              "x": 520.245,
+              "y": 102.24,
+              "advance": 5.801,
+              "font": 1,
+              "size": 11.0,
+              "gid": 103,
+              "x_blu": 13214226,
+              "y_blu": 2596896,
+              "advance_blu": 147340,
+              "size_blu": 279400
+            },
+            {
+              "offset": 2,
+              "length": 1,
+              "x": 526.046,
+              "y": 102.24,
+              "advance": 2.75,
+              "font": 1,
+              "size": 11.0,
+              "gid": 102,
+              "x_blu": 13361566,
+              "y_blu": 2596896,
+              "advance_blu": 69850,
+              "size_blu": 279400
+            },
+            {
+              "offset": 1,
+              "length": 1,
+              "x": 528.796,
+              "y": 102.24,
+              "advance": 4.834,
+              "font": 1,
+              "size": 11.0,
+              "gid": 101,
+              "x_blu": 13431416,
+              "y_blu": 2596896,
+              "advance_blu": 122783,
+              "size_blu": 279400
+            },
+            {
+              "offset": 0,
+              "length": 1,
+              "x": 533.63,
+              "y": 102.24,
+              "advance": 6.37,
+              "font": 1,
+              "size": 11.0,
+              "gid": 100,
+              "x_blu": 13554199,
+              "y_blu": 2596896,
+              "advance_blu": 161801,
+              "size_blu": 279400
+            }
+          ]
+        }
+      ],
+      "elements": [
+        {
+          "kind": "cell",
+          "x0": 72.0,
+          "y0": 120.0,
+          "x1": 306.0,
+          "y1": 140.5,
+          "x0_blu": 1828800,
+          "y0_blu": 3048000,
+          "x1_blu": 7772400,
+          "y1_blu": 3568700
+        }
+      ]
+    }
+  ]
+}
