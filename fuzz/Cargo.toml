@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "=0.4.13"
 bayan-opc = { path = "../crates/bayan-opc" }
 bayan-xml = { path = "../crates/bayan-xml" }
+bayan-lab-layout = { path = "../lab/bayan-lab-layout" }
 
 [[bin]]
 name = "zip_archive"
@@ -83,6 +84,13 @@ bench = false
 [[bin]]
 name = "markup_compatibility"
 path = "fuzz_targets/markup_compatibility.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdf_extract"
+path = "fuzz_targets/pdf_extract.rs"
 test = false
 doc = false
 bench = false

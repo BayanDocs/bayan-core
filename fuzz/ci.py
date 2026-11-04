@@ -4,7 +4,7 @@
 Usage, from anywhere in the repository, after `cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu`:
 
   python3 -I fuzz/ci.py seeds SEEDS
-      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, and bayan-xml's two sample parts. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
+      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, and for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
   python3 -I fuzz/ci.py run --seconds N --seeds SEEDS [--work WORK] [--jobs J] (--all | TARGET ...)
       Runs each target for N seconds times its share (TARGETS below), J at a time (default 4), from its seeds and its corpus in WORK/corpus/<target>/, where it adds what it finds. WORK is this folder unless given, so that the corpora and artifacts are where cargo-fuzz keeps them. Inputs that crash, time out, run out of memory or leak go to WORK/artifacts/<target>/, each target's output to WORK/logs/<target>.log. Exits with 1 if any target failed.
   python3 -I fuzz/ci.py minimize [--work WORK] [--jobs J] (--all | TARGET ...)
@@ -34,6 +34,7 @@ FUZZ = Path(__file__).resolve().parent
 REPOSITORY = FUZZ.parent
 DOCUMENTS = REPOSITORY / "crates" / "bayan-opc" / "tests" / "fixtures" / "python-docx"
 XML_SAMPLES = REPOSITORY / "crates" / "bayan-xml" / "tests" / "fixtures"
+PDFS = REPOSITORY / "lab" / "bayan-lab-layout" / "tests" / "fixtures"
 BINARIES = FUZZ / "target" / "x86_64-unknown-linux-gnu" / "release"
 
 # The memory a target may take, AddressSanitizer's share included, before libFuzzer reports it out of memory: libFuzzer's default, which CORE-005 and CORE-006 used too. For the default-limits targets it was checked against the bound that bayan-opc documents (about 256 MiB to open a package and read its core properties): under AddressSanitizer, opening the worst packages of that bound's derivation takes 2.5 to 4.5 times the memory it takes natively, and package_default_limits, which opens a package and then its written copy, peaked at 1,082 MiB on the worst of them. 2,048 MiB leaves room for that, libFuzzer's corpus and AddressSanitizer's quarantine of freed memory, while an input that needs about three times the bound to be opened once, or one and a half times for each of the target's two openings, exceeds it. README.md gives the measurements.
@@ -79,6 +80,7 @@ TARGETS: Dict[str, Target] = {
     "package_default_limits": Target("zip.dict", 1 << 20, 60, 2, "documents", long_inputs=True),
     "xml_reader": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "xml_parts"),
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
+    "pdf_extract": Target("pdf.dict", 64 << 10, 10, 1, "pdfs"),
 }
 
 # How libFuzzer names the inputs it keeps, by what went wrong, and the kind of failure that ci.py reports for each: the only thing it shows about a failure. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
@@ -103,6 +105,49 @@ def check_targets(declared: Sequence[str]) -> List[str]:
     return problems
 
 
+def pdf_file(objects: Sequence[bytes]) -> bytes:
+    """A PDF of `objects`, numbered from 1 with the catalog first, and a cross-reference table."""
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)
+
+
+def stream_object(dictionary: bytes, data: bytes) -> bytes:
+    """An uncompressed stream object."""
+    return b"<< " + dictionary + b" /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
+
+
+def synthetic_pdfs() -> List[bytes]:
+    """Three small PDFs with uncompressed streams, which mutation can change token by token: text with every text operator in a simple font, right-to-left and Arabic text in a two-byte font with a ToUnicode map, and a form XObject, an image, an inline image and rules."""
+    catalog = b"<< /Type /Catalog /Pages 2 0 R >>"
+    pages = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+    widths = b" ".join(b"%d" % (250 if code in (32, 105, 108) else 500) for code in range(32, 127))
+    simple = b"<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Sans /FirstChar 32 /LastChar 126 /Widths [" + widths + b"] /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [39 /quoteright] >> >>"
+    text = b"BT /F1 12 Tf 1 Tc 2 Tw 90 Tz 14 TL 3 Ts 72 720 Td (Hello, world) Tj T* [(Kern) -120 (ing)] TJ 0 -20 TD (next) ' 1 0.5 (more) \" 0 Ts 100 Tz 2 0 0 2 72 600 Tm (big) Tj 3 Tr (hidden) Tj ET"
+    page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+    text_pdf = pdf_file([catalog, pages, page, simple, stream_object(b"", text)])
+    cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n1 begincodespacerange <0000> <FFFF> endcodespacerange\n2 beginbfchar <0003> <0020> <0004> <00660069> endbfchar\n2 beginbfrange <0010> <001A> <05D0> <0020> <0022> [<0645> <06440627> <0633>] endbfrange\nendcmap end end"
+    composite = b"<< /Type /Font /Subtype /Type0 /BaseFont /GHIJKL+Hebrew /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 6 0 R >>"
+    cid_font = b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GHIJKL+Hebrew /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 600 /W [3 [300] 32 34 400] >>"
+    rtl = b"BT /F2 10 Tf 300 700 Td <0013001200110003001500140010> Tj 0 -14 Td <002200210020> Tj ET"
+    page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F2 4 0 R >> >> /Contents 7 0 R >>"
+    rtl_pdf = pdf_file([catalog, pages, page, composite, cid_font, stream_object(b"", cmap), stream_object(b"", rtl)])
+    form = stream_object(b"/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 10 20] /Resources << /Font << /F1 4 0 R >> >>", b"BT /F1 10 Tf 0 0 Td (in a form) Tj ET")
+    image = stream_object(b"/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray", b"\x80")
+    drawing = b"q 1 0 0 1 50 500 cm /Fm1 Do Q q 100 0 0 50 200 600 cm /Im1 Do Q 0.5 w 72 400 m 540 400 l S 72 380 468 1 re f q 20 0 0 10 300 300 cm BI /W 2 /H 2 /BPC 8 /CS /G ID \x01\x02\x03\x04 EI Q /Tag << /MCID 0 >> BDC EMC"
+    page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Fm1 5 0 R /Im1 6 0 R >> >> /Contents 7 0 R >>"
+    drawing_pdf = pdf_file([catalog, pages, page, simple, form, image, stream_object(b"", drawing)])
+    return [text_pdf, rtl_pdf, drawing_pdf]
+
+
 def seeds(output: Path) -> Dict[str, int]:
     """Writes the seeds of every target into output/<target>/, each named by the SHA-1 of its content, as libFuzzer names its inputs, and returns how many each target has."""
     kinds: Dict[str, List[bytes]] = {"documents": [], "content_types": [], "relationships": [], "core_properties": [], "xml_parts": []}
@@ -123,6 +168,7 @@ def seeds(output: Path) -> Dict[str, int]:
                     kinds["xml_parts"].append(part)
     kinds["xml_parts"] += [sample.read_bytes() for sample in sorted(XML_SAMPLES.glob("*.xml"))]
     kinds["configured_xml_parts"] = [bytes([configuration]) + part for part in kinds["xml_parts"] for configuration in MC_CONFIGURATIONS]
+    kinds["pdfs"] = [pdf.read_bytes() for pdf in sorted(PDFS.glob("*.pdf"))] + synthetic_pdfs()
     counts = {}
     for name, target in TARGETS.items():
         folder = output / name
