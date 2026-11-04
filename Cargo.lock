@@ -141,6 +141,7 @@ dependencies = [
 name = "bayan-lab"
 version = "0.0.0"
 dependencies = [
+ "bayan-lab-layout",
  "miniz_oxide",
  "proptest",
  "schemars",

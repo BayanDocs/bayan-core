@@ -1,4 +1,4 @@
-//! The `bayan-lab corpus …` commands.
+//! The `bayan-lab corpus …` commands, and the layout JSON commands `bayan-lab pdf-extract` and `bayan-lab layout …` (LAB-003).
 //!
 //! Each command reads its arguments, does its work, and writes what it did to `out` and problems to `err`, so tests can run it in-process. [`run`] returns the process's exit status: 0 when everything succeeded, 1 when some documents or checks failed (refused documents, a failed verification), and 2 when the command could not run at all (wrong arguments, an unreadable manifest, an unreachable store).
 //!
@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{ErrorKind, Read as _, Write};
 use std::path::{Path, PathBuf};
+
+use bayan_lab_layout::layout::Layout;
+use bayan_lab_layout::pdf;
 
 use crate::exclusions::{Exclusions, MAX_LIST_SIZE};
 use crate::hash::Sha256;
@@ -26,8 +29,10 @@ const MAX_LICENSE_TEXT: u64 = 1024 * 1024;
 /// The usage text.
 pub const USAGE: &str = "\
 Usage: bayan-lab corpus <command> [options]
+       bayan-lab pdf-extract [--output FILE] PDF
+       bayan-lab layout schema | layout check FILE...
 
-Commands:
+Corpus commands:
   source add NAME --url URL --revision REV --license SPDX --copyright TEXT
                   --license-file PATH=FILE... [--notes TEXT]
                       Register a source and store its license texts. Sources never change:
@@ -50,7 +55,17 @@ Commands:
                       for manifests without private (T2) documents.
   schema              Print the JSON Schema of the manifest.
 
-Options for every command:
+Layout JSON commands (lab/schema/layout-json.md):
+  pdf-extract [--output FILE] PDF
+                      Extract the layout JSON of a PDF: its pages, its lines with their glyphs,
+                      and its images and rules. Writes it to FILE, or to standard output. A
+                      PDF the extractor refuses (malformed, unsupported or over a limit) fails
+                      with the reason; glyphs without characters or off the lines are counted.
+  layout schema       Print the JSON Schema of the layout JSON.
+  layout check FILE...
+                      Check layout JSON files against the format and its rules.
+
+Options for every corpus command:
   --manifest FILE     The corpus manifest (or the environment variable BAYAN_LAB_MANIFEST).
   --store ADDRESS     A directory; s3://BUCKET/PREFIX?endpoint=https://HOST&region=REGION; or
                       https://HOST/PATH, read-only and anonymous (or BAYAN_LAB_STORE). S3
@@ -214,6 +229,8 @@ pub fn run_in(
 ) -> Outcome {
     let result = match args.split_first() {
         Some((group, rest)) if group == "corpus" => corpus(environment, rest, out, err),
+        Some((command, rest)) if command == "pdf-extract" => pdf_extract(rest, out, err),
+        Some((group, rest)) if group == "layout" => layout(rest, out, err),
         Some((help, _)) if matches!(help.as_str(), "help" | "--help" | "-h") => {
             let _ = writeln!(out, "{USAGE}");
             Ok(Outcome::Success)
@@ -229,8 +246,129 @@ pub fn run_in(
     }
 }
 
-/// The options every command accepts.
+/// The options every corpus command accepts.
 const COMMON: [&str; 2] = ["manifest", "store"];
+
+/// The largest layout JSON file `layout check` reads, in bytes.
+const MAX_LAYOUT_FILE: u64 = 1 << 30;
+
+/// `bayan-lab pdf-extract [--output FILE] PDF`.
+fn pdf_extract(
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Outcome, String> {
+    let arguments = Arguments::parse(args, &["output"], &[])?;
+    let [input] = arguments.operands.as_slice() else {
+        return Err("`pdf-extract` takes exactly one PDF".to_owned());
+    };
+    let output = arguments.one("output")?;
+    if output == Some("") {
+        return Err("--output cannot be empty".to_owned());
+    }
+    let limits = pdf::Limits::DEFAULT;
+    let limit = u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX);
+    // Messages never repeat the PDF's name or content (AGENTS.md §6).
+    let bytes = match read_up_to(Path::new(input), limit) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            let _ = writeln!(
+                err,
+                "bayan-lab: {}",
+                pdf::Error::Limit(pdf::Limit::InputSize)
+            );
+            return Ok(Outcome::Failed);
+        }
+        Err(error) => return Err(format!("cannot read the PDF: {error}")),
+    };
+    let extraction = match pdf::extract(&bytes, &limits) {
+        Ok(extraction) => extraction,
+        Err(error) => {
+            let _ = writeln!(err, "bayan-lab: {error}");
+            return Ok(Outcome::Failed);
+        }
+    };
+    let json = extraction.layout.to_json()?;
+    match output {
+        Some(path) => fs::write(path, json)
+            .map_err(|error| format!("cannot write the layout JSON: {error}"))?,
+        None => out
+            .write_all(json.as_bytes())
+            .map_err(|error| error.to_string())?,
+    }
+    if extraction.unmapped_glyphs > 0 {
+        let _ = writeln!(
+            err,
+            "bayan-lab: warning: {} glyphs have characters that neither a ToUnicode map nor their font's encoding gives; their text is U+FFFD",
+            extraction.unmapped_glyphs
+        );
+    }
+    if extraction.skipped_glyphs > 0 {
+        let _ = writeln!(
+            err,
+            "bayan-lab: warning: {} glyphs are not upright or are invisible, and are on no line (each page's skipped_glyphs counts them)",
+            extraction.skipped_glyphs
+        );
+    }
+    Ok(Outcome::Success)
+}
+
+/// `bayan-lab layout schema` and `bayan-lab layout check FILE...`.
+fn layout(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<Outcome, String> {
+    match args.split_first() {
+        Some((command, rest)) if command == "schema" => {
+            if !rest.is_empty() {
+                return Err("`layout schema` takes no operand".to_owned());
+            }
+            let text = bayan_lab_layout::schema::json_schema_file()?;
+            out.write_all(text.as_bytes())
+                .map_err(|error| error.to_string())?;
+            Ok(Outcome::Success)
+        }
+        Some((command, rest)) if command == "check" => {
+            let arguments = Arguments::parse(rest, &[], &[])?;
+            if arguments.operands.is_empty() {
+                return Err("`layout check` needs at least one file".to_owned());
+            }
+            let mut outcome = Outcome::Success;
+            for file in &arguments.operands {
+                let name = printable(file, 200);
+                let result = match read_up_to(Path::new(file), MAX_LAYOUT_FILE) {
+                    Ok(Some(bytes)) => String::from_utf8(bytes)
+                        .map_err(|_| "not UTF-8 text".to_owned())
+                        .and_then(|text| Layout::from_json(&text).map(|_| ())),
+                    Ok(None) => Err(format!("larger than {MAX_LAYOUT_FILE} bytes")),
+                    Err(error) => return Err(format!("cannot read {name}: {error}")),
+                };
+                match result {
+                    Ok(()) => {
+                        let _ = writeln!(out, "{name}: ok");
+                    }
+                    Err(message) => {
+                        let _ = writeln!(err, "bayan-lab: {name}: {message}");
+                        outcome = Outcome::Failed;
+                    }
+                }
+            }
+            Ok(outcome)
+        }
+        _ => Err(format!(
+            "expected `layout schema` or `layout check`\n\n{USAGE}"
+        )),
+    }
+}
+
+/// Reads a local file if it has at most `limit` bytes; `None` if it has more.
+fn read_up_to(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(u64::try_from(bytes.len())
+        .is_ok_and(|length| length <= limit)
+        .then_some(bytes))
+}
 
 fn corpus(
     environment: &Environment,
