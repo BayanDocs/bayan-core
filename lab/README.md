@@ -39,7 +39,7 @@ bayan-lab corpus list --manifest lab/corpus/public/manifest.json --feature "Trac
 bayan-lab corpus verify --manifest lab/corpus/public/manifest.json --store ~/bayandocs-corpus/store
 ```
 
-`pdf-extract` turns a PDF, such as one that Word exported on the reference machine, into a layout JSON ([schema/layout-json.md](schema/layout-json.md)); it exits with 1 when it refuses the PDF (malformed, unsupported or over a limit) and says why, without quoting the document. `layout check` checks layout JSON files of any producer against the schema and its rules:
+`pdf-extract` turns a PDF, such as one that Word exported on the reference machine, into a layout JSON ([schema/layout-json.md](schema/layout-json.md)); it exits with 1 when it refuses the PDF (malformed, unsupported or over a limit) and says why, without quoting the document. It reads the PDF within the default limits of `bayan_lab_layout::pdf::Limits`, whose documentation works out what they allow at most: about 4.5 GiB of memory and a few minutes; it writes the JSON as it forms it, so the text of a large layout adds nothing to that. `layout check` checks layout JSON files of any producer against the schema and its rules, and reports each file by its number in the list and a JSON error by its kind, line and column, so that its messages quote neither a file's name nor its text:
 
 ```sh
 bayan-lab pdf-extract --output word-layout.json word.pdf

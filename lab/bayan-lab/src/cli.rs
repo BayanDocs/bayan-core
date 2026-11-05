@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{ErrorKind, Read as _, Write};
+use std::io::{self, ErrorKind, Read as _, Write};
 use std::path::{Path, PathBuf};
 
 use bayan_lab_layout::layout::Layout;
@@ -63,7 +63,8 @@ Layout JSON commands (lab/schema/layout-json.md):
                       with the reason; glyphs without characters or off the lines are counted.
   layout schema       Print the JSON Schema of the layout JSON.
   layout check FILE...
-                      Check layout JSON files against the format and its rules.
+                      Check layout JSON files against the format and its rules. Each file
+                      is reported by its number in the list, never by its name.
 
 Options for every corpus command:
   --manifest FILE     The corpus manifest (or the environment variable BAYAN_LAB_MANIFEST).
@@ -288,13 +289,19 @@ fn pdf_extract(
             return Ok(Outcome::Failed);
         }
     };
-    let json = extraction.layout.to_json()?;
+    // The JSON is written as it is formed: the text of a large layout is never in memory as a whole, so the command keeps within the memory that the extractor's limits allow.
     match output {
-        Some(path) => fs::write(path, json)
-            .map_err(|error| format!("cannot write the layout JSON: {error}"))?,
-        None => out
-            .write_all(json.as_bytes())
-            .map_err(|error| error.to_string())?,
+        Some(path) => {
+            let mut writer = fs::File::create(path)
+                .map(io::BufWriter::new)
+                .map_err(|error| format!("cannot write the layout JSON: {error}"))?;
+            extraction
+                .layout
+                .write_json(&mut writer)
+                .and_then(|()| writer.flush().map_err(|error| error.to_string()))
+                .map_err(|error| format!("cannot write the layout JSON: {error}"))?;
+        }
+        None => extraction.layout.write_json(&mut *out)?,
     }
     if extraction.unmapped_glyphs > 0 {
         let _ = writeln!(
@@ -330,27 +337,7 @@ fn layout(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<O
             if arguments.operands.is_empty() {
                 return Err("`layout check` needs at least one file".to_owned());
             }
-            let mut outcome = Outcome::Success;
-            for file in &arguments.operands {
-                let name = printable(file, 200);
-                let result = match read_up_to(Path::new(file), MAX_LAYOUT_FILE) {
-                    Ok(Some(bytes)) => String::from_utf8(bytes)
-                        .map_err(|_| "not UTF-8 text".to_owned())
-                        .and_then(|text| Layout::from_json(&text).map(|_| ())),
-                    Ok(None) => Err(format!("larger than {MAX_LAYOUT_FILE} bytes")),
-                    Err(error) => return Err(format!("cannot read {name}: {error}")),
-                };
-                match result {
-                    Ok(()) => {
-                        let _ = writeln!(out, "{name}: ok");
-                    }
-                    Err(message) => {
-                        let _ = writeln!(err, "bayan-lab: {name}: {message}");
-                        outcome = Outcome::Failed;
-                    }
-                }
-            }
-            Ok(outcome)
+            check_layouts(&arguments.operands, MAX_LAYOUT_FILE, out, err)
         }
         _ => Err(format!(
             "expected `layout schema` or `layout check`\n\n{USAGE}"
@@ -359,6 +346,36 @@ fn layout(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<O
 }
 
 /// Reads a local file if it has at most `limit` bytes; `None` if it has more.
+/// Checks each layout JSON of `files`, none larger than `max_bytes`, and reports each by its number in the list, counted from 1, never by its name: the name of a private-corpus document must not reach a log either.
+fn check_layouts(
+    files: &[String],
+    max_bytes: u64,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Outcome, String> {
+    let mut outcome = Outcome::Success;
+    for (index, file) in files.iter().enumerate() {
+        let number = index + 1;
+        let result = match read_up_to(Path::new(file), max_bytes) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .map_err(|_| "not UTF-8 text".to_owned())
+                .and_then(|text| Layout::from_json(&text).map(|_| ())),
+            Ok(None) => Err(format!("larger than {max_bytes} bytes")),
+            Err(error) => return Err(format!("cannot read file {number}: {error}")),
+        };
+        match result {
+            Ok(()) => {
+                let _ = writeln!(out, "file {number}: ok");
+            }
+            Err(message) => {
+                let _ = writeln!(err, "bayan-lab: file {number}: {message}");
+                outcome = Outcome::Failed;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 fn read_up_to(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
@@ -1155,6 +1172,36 @@ fn stats(arguments: &Arguments, out: &mut dyn Write) -> Result<Outcome, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_check_reads_no_file_larger_than_its_limit() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../schema/samples/word.json");
+        let size = fs::metadata(&sample).unwrap().len();
+        let files = [sample.to_str().unwrap().to_owned()];
+        let check = |max_bytes| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let outcome = check_layouts(&files, max_bytes, &mut out, &mut err).unwrap();
+            (
+                outcome,
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        };
+        assert_eq!(
+            check(size),
+            (Outcome::Success, "file 1: ok\n".to_owned(), String::new())
+        );
+        assert_eq!(
+            check(size - 1),
+            (
+                Outcome::Failed,
+                String::new(),
+                format!("bayan-lab: file 1: larger than {} bytes\n", size - 1)
+            )
+        );
+        // The command itself checks against MAX_LAYOUT_FILE: a gibibyte.
+        assert_eq!(MAX_LAYOUT_FILE, 1 << 30);
+    }
 
     #[test]
     fn a_command_never_writes_a_manifest_it_made_inconsistent() {

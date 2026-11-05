@@ -49,6 +49,36 @@ fn the_committed_schema_is_current() {
     );
 }
 
+// Reads both copies of the validator, so it runs on the host only: the tests in WebAssembly have no files.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_validator_is_bayan_engines() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let code = |path: &str| {
+        // The module documentation says which copy a file is; the code below it must be the same.
+        std::fs::read_to_string(root.join(path))
+            .unwrap()
+            .replace("\r\n", "\n")
+            .lines()
+            .filter(|line| !line.starts_with("//!"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let engine = code("crates/bayan-engine/tests/engine/support/schema_validator.rs");
+    let ours = code("lab/bayan-lab-layout/tests/layout/support/schema_validator.rs");
+    // The one function only the engine's tests use, which this copy leaves out.
+    let validate_definition = "    }\n\n    /// Validates a value against the definition `name` of the document.\n    pub fn validate_definition(&self, name: &str, value: &Value) -> Result<(), String> {\n        let schema = self.definition(name)?;\n        self.check(schema, value, \"$\")\n";
+    assert_eq!(
+        engine.matches(validate_definition).count(),
+        1,
+        "bayan-engine's validator no longer has the `validate_definition` this test expects"
+    );
+    assert!(
+        ours == engine.replacen(validate_definition, "", 1),
+        "tests/layout/support/schema_validator.rs differs from bayan-engine's copy: change them together"
+    );
+}
+
 /// Checks a file both ways: against the JSON Schema with the independent validator, and with the Rust types and their rules.
 fn validate(text: &str) -> (Result<(), String>, Result<Layout, String>) {
     let schema = schema::json_schema();
@@ -207,6 +237,50 @@ fn the_rules_refuse_what_the_schema_cannot_see() {
         let error = by_rules.expect_err(what);
         assert!(error.contains(message), "{what}: {error}");
     }
+}
+
+#[test]
+fn errors_say_where_and_never_quote_a_value() {
+    // A layout JSON holds a document's text: an error may name a position, never a value of the file.
+    let secret = "Zanzibar";
+    let cases = [
+        (
+            "a string where a length belongs",
+            engine_with(|value| value["pages"][0]["width"] = json!(secret)),
+        ),
+        (
+            "a text where a direction belongs",
+            engine_with(|value| value["pages"][0]["lines"][0]["direction"] = json!(secret)),
+        ),
+        (
+            "an unknown field",
+            engine_with(|value| value[secret] = json!(1)),
+        ),
+        (
+            "a number where a line's text belongs",
+            engine_with(|value| value["pages"][0]["lines"][0]["text"] = json!(12)),
+        ),
+        ("text that is not JSON", format!("{{\"{secret}\": tru")),
+        (
+            "text that ends too early",
+            format!("{{\"producer\": \"{secret}"),
+        ),
+    ];
+    for (what, text) in cases {
+        let error = Layout::from_json(&text).unwrap_err();
+        assert!(!error.contains(secret), "{what}: {error}");
+        assert!(
+            error.starts_with("line ") && error.contains(", column "),
+            "{what}: {error}"
+        );
+    }
+    // The checks of lengths quote nothing, and keep their own messages.
+    let precise = engine_with(|value| value["pages"][0]["width"] = json!(612.0001));
+    let error = Layout::from_json(&precise).unwrap_err();
+    assert!(
+        error.starts_with("line ") && error.ends_with("a length has more than three decimals"),
+        "{error}"
+    );
 }
 
 #[test]

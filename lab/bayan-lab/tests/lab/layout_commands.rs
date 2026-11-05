@@ -175,13 +175,11 @@ fn layout_check_reports_each_file() {
     let good = samples.join("word.json");
     let ran = lab(&["layout", "check", text(&good), text(&broken)]);
     assert_eq!(ran.outcome, Outcome::Failed);
-    assert_eq!(ran.out, format!("{}: ok\n", text(&good)));
+    // Files are reported by their number in the list, never by their names.
+    assert_eq!(ran.out, "file 1: ok\n");
     assert_eq!(
         ran.err,
-        format!(
-            "bayan-lab: {}: page_count is 3 but there are 1 pages\n",
-            text(&broken)
-        )
+        "bayan-lab: file 2: page_count is 3 but there are 1 pages\n"
     );
     let ran = lab(&["layout", "check", text(&good)]);
     assert_eq!(ran.outcome, Outcome::Success);

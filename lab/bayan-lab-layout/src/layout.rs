@@ -10,6 +10,7 @@ use std::fmt;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::error::Category;
 
 /// The identifier of version 1 of the layout JSON, the value of every file's `schema` field.
 pub const SCHEMA_ID: &str = "urn:bayandocs:lab:layout:v1";
@@ -125,6 +126,12 @@ impl<'de> Deserialize<'de> for Points {
 /// Reads a JSON number of points.
 struct PointsVisitor;
 
+/// The message for a length beyond [`MAX_MILLIPOINTS`] thousandths of a point.
+const OUT_OF_RANGE: &str = "the length is out of range";
+
+/// The message for a length with more than three decimals.
+const TOO_PRECISE: &str = "a length has more than three decimals";
+
 impl Visitor<'_> for PointsVisitor {
     type Value = Points;
 
@@ -136,12 +143,12 @@ impl Visitor<'_> for PointsVisitor {
         value
             .checked_mul(1000)
             .and_then(Points::from_millis)
-            .ok_or_else(|| E::custom("the length is out of range"))
+            .ok_or_else(|| E::custom(OUT_OF_RANGE))
     }
 
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Points, E> {
         i64::try_from(value)
-            .map_err(|_| E::custom("the length is out of range"))
+            .map_err(|_| E::custom(OUT_OF_RANGE))
             .and_then(|value| self.visit_i64(value))
     }
 
@@ -150,10 +157,10 @@ impl Visitor<'_> for PointsVisitor {
         let rounded = scaled.round();
         let millis = whole_f64_to_i64(rounded)
             .and_then(Points::from_millis)
-            .ok_or_else(|| E::custom("the length is out of range"))?;
+            .ok_or_else(|| E::custom(OUT_OF_RANGE))?;
         // A number written with at most three decimals is within a rounding error of a whole number of thousandths; the tolerance is far larger than that error for every length in range, and far smaller than a ten-thousandth.
         if (scaled - rounded).abs() > 0.001 {
-            return Err(E::custom("a length has more than three decimals"));
+            return Err(E::custom(TOO_PRECISE));
         }
         Ok(millis)
     }
@@ -395,7 +402,7 @@ impl Layout {
     ///
     /// A message if the text is not a layout JSON of version 1 or breaks one of its rules.
     pub fn from_json(text: &str) -> Result<Self, String> {
-        let layout: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        let layout: Self = serde_json::from_str(text).map_err(|error| json_error(&error))?;
         layout.check()?;
         Ok(layout)
     }
@@ -406,9 +413,19 @@ impl Layout {
     ///
     /// A message if serialization fails, which it cannot for these types.
     pub fn to_json(&self) -> Result<String, String> {
-        let mut text = serde_json::to_string(self).map_err(|error| error.to_string())?;
-        text.push('\n');
-        Ok(text)
+        let mut text = Vec::new();
+        self.write_json(&mut text)?;
+        String::from_utf8(text).map_err(|error| error.to_string())
+    }
+
+    /// Writes the text of [`Layout::to_json`] to `writer` as it is formed, so that a large layout's text is never in memory as a whole.
+    ///
+    /// # Errors
+    ///
+    /// A message if writing fails.
+    pub fn write_json(&self, mut writer: impl std::io::Write) -> Result<(), String> {
+        serde_json::to_writer(&mut writer, self).map_err(|error| error.to_string())?;
+        writer.write_all(b"\n").map_err(|error| error.to_string())
     }
 
     /// Checks the rules that the types and the JSON Schema cannot express. `lab/schema/layout-json.md` lists them; the first one broken is reported, with where.
@@ -603,6 +620,23 @@ impl Layout {
         }
         Ok(())
     }
+}
+
+/// The message for a JSON error: the kind of error and where it is, never a value of the file. serde_json's own messages quote the value they did not expect (`invalid type: string "…"`, an unknown variant or field), and a layout JSON's values can be a document's text, which must never reach a log. The messages of this module's own checks of lengths quote nothing and are kept.
+fn json_error(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    let own = [OUT_OF_RANGE, TOO_PRECISE]
+        .into_iter()
+        .find(|own| message.starts_with(own));
+    let kind = match error.classify() {
+        Category::Io => "the text could not be read",
+        Category::Syntax => "the text is not valid JSON",
+        Category::Eof => "the text ends in the middle of a value",
+        Category::Data => own.unwrap_or(
+            "a value does not fit the layout JSON (a value of the wrong type or out of range, an unknown or missing field, or an unknown name)",
+        ),
+    };
+    format!("line {}, column {}: {kind}", error.line(), error.column())
 }
 
 /// The number of characters of a line's text, which must not contain control characters other than the tab, nor U+FFFE, U+FFFF or other noncharacters.

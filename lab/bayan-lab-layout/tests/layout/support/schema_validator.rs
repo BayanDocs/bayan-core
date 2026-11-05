@@ -1,5 +1,7 @@
 //! A JSON Schema validator for exactly the part of draft 2020-12 that the layout JSON's schema uses: a copy of bayan-engine's (`crates/bayan-engine/tests/engine/support/schema_validator.rs`), which validates the engine protocol's schema the same way.
 //!
+//! It leaves out only `validate_definition`, which the layout JSON's tests do not use; `the_validator_is_bayan_engines` (in `schema.rs`) fails when the two differ in anything else, so change them together.
+//!
 //! It refuses every keyword it does not know instead of ignoring it, so a constraint can never be skipped silently; extending the schema with a new kind of constraint therefore means extending this validator first. Annotations (`description`, `default`, `title`, `$schema`, `$id` and `x-…`) are ignored, as the standard says. Integers must be written as JSON integers, which is stricter than JSON Schema (it also accepts `1.0`) and matches what the engine accepts.
 
 use serde_json::{Map, Value};
