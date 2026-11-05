@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.text">
+ <office:font-face-decls>
+  <style:font-face style:name="Liberation Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/>
+ </office:font-face-decls>
+ <office:styles>
+  <style:default-style style:family="paragraph">
+   <style:paragraph-properties fo:margin-top="0cm" fo:margin-bottom="0.2cm"/>
+   <style:text-properties style:font-name="Liberation Serif" fo:font-size="12pt" style:font-name-complex="Liberation Serif" style:font-size-complex="12pt" fo:language="en" fo:country="US" style:language-complex="he" style:country-complex="IL"/>
+  </style:default-style>
+  <style:style style:name="Standard" style:family="paragraph"/>
+ </office:styles>
+ <office:automatic-styles>
+  <style:page-layout style:name="pm1">
+   <style:page-layout-properties fo:page-width="21cm" fo:page-height="29.7cm" fo:margin-top="2cm" fo:margin-bottom="2cm" fo:margin-left="2cm" fo:margin-right="2cm"/>
+  </style:page-layout>
+  <style:style style:name="RTL" style:family="paragraph" style:parent-style-name="Standard">
+   <style:paragraph-properties style:writing-mode="rl-tb" fo:text-align="start"/>
+  </style:style>
+  <style:style style:name="Rule" style:family="paragraph" style:parent-style-name="Standard">
+   <style:paragraph-properties fo:border-bottom="0.75pt solid #000000" fo:padding="0.05cm"/>
+  </style:style>
+  <style:style style:name="Break" style:family="paragraph" style:parent-style-name="Standard">
+   <style:paragraph-properties fo:break-before="page"/>
+  </style:style>
+  <style:style style:name="Sup" style:family="text">
+   <style:text-properties style:text-position="super 58%"/>
+  </style:style>
+  <style:style style:name="Big" style:family="text">
+   <style:text-properties fo:font-size="18pt"/>
+  </style:style>
+  <style:style style:name="Wide" style:family="text">
+   <style:text-properties fo:letter-spacing="0.1cm"/>
+  </style:style>
+  <style:style style:name="Grid" style:family="table-cell">
+   <style:table-cell-properties fo:border="0.5pt solid #000000" fo:padding="0.1cm"/>
+  </style:style>
+ </office:automatic-styles>
+ <office:master-styles>
+  <style:master-page style:name="Standard" style:page-layout-name="pm1"/>
+ </office:master-styles>
+ <office:body>
+  <office:text>
+   <text:p text:style-name="Standard">The quick brown fox jumps over the lazy dog. Kerning: AVAWAY, To Te.</text:p>
+   <text:p text:style-name="Standard">Ligatures office fluffy affirm, <text:span text:style-name="Big">larger text</text:span>, and <text:span text:style-name="Wide">spaced</text:span> letters.</text:p>
+   <text:p text:style-name="Standard">Energy: E = mc<text:span text:style-name="Sup">2</text:span> with a superscript.</text:p>
+   <text:p text:style-name="RTL">שלום עולם, זהו טקסט בעברית.</text:p>
+   <text:p text:style-name="RTL">בשנת 2026 נכתב PDF חדש עם 3 עמודים.</text:p>
+   <text:p text:style-name="Standard">English with a Hebrew word: the word שלום means peace.</text:p>
+   <text:p text:style-name="Rule">A paragraph with a border below it.</text:p>
+   <table:table table:name="T1">
+    <table:table-column table:number-columns-repeated="2"/>
+    <table:table-row>
+     <table:table-cell table:style-name="Grid"><text:p>Alpha</text:p></table:table-cell>
+     <table:table-cell table:style-name="Grid"><text:p>1</text:p></table:table-cell>
+    </table:table-row>
+    <table:table-row>
+     <table:table-cell table:style-name="Grid"><text:p>Beta</text:p></table:table-cell>
+     <table:table-cell table:style-name="Grid"><text:p>22</text:p></table:table-cell>
+    </table:table-row>
+   </table:table>
+   <text:p text:style-name="Break">The second page starts here, with a final line.</text:p>
+  </office:text>
+ </office:body>
+</office:document>

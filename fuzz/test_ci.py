@@ -185,6 +185,11 @@ class Seeds(Isolated):
         self.assertGreaterEqual(counts["relationships"], documents)
         self.assertEqual(counts["compound_file"], 0)
         self.assertEqual(counts["markup_compatibility"], counts["xml_reader"] * len(ci.MC_CONFIGURATIONS))
+        pdfs = len(list(ci.PDFS.glob("*.pdf")))
+        self.assertGreater(pdfs, 0)
+        self.assertEqual(counts["pdf_extract"], pdfs + len(ci.synthetic_pdfs()))
+        for seed in (self.folder / "pdf_extract").iterdir():
+            self.assertTrue(seed.read_bytes().startswith(b"%PDF-1.") and seed.read_bytes().rstrip().endswith(b"%%EOF"), seed.name)
         for name, target in ci.TARGETS.items():
             for seed in (self.folder / name).iterdir():
                 data = seed.read_bytes()

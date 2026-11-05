@@ -1,0 +1,40 @@
+{
+  "schema": "urn:bayandocs:lab:layout:v1",
+  "source": "word",
+  "producer": "Word ground-truth harness (a hand-written sample of what LAB-002 will write)",
+  "text_offsets": "document",
+  "line_coverage": "sampled",
+  "page_count": 2,
+  "fonts": [],
+  "pages": [
+    {
+      "width": 612.0,
+      "height": 792.0,
+      "start": 0,
+      "lines": [
+        {
+          "start": 0
+        },
+        {
+          "start": 64
+        },
+        {
+          "start": 1180
+        }
+      ]
+    },
+    {
+      "width": 612.0,
+      "height": 792.0,
+      "start": 2311,
+      "lines": [
+        {
+          "start": 2311
+        },
+        {
+          "start": 2398
+        }
+      ]
+    }
+  ]
+}

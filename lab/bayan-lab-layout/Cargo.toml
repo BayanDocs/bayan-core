@@ -1,0 +1,20 @@
+[package]
+name = "bayan-lab-layout"
+description = "BayanDocs Fidelity Lab layout JSON: its types, rules and JSON Schema, and the strict PDF reader that extracts it from PDFs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+miniz_oxide.workspace = true
+unicode-bidi.workspace = true
+icu_properties.workspace = true
+
+[lints]
+workspace = true

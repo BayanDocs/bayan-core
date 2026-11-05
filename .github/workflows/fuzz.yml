@@ -13,8 +13,9 @@ on:
     paths:
       - crates/bayan-opc/**
       - crates/bayan-xml/**
+      - lab/bayan-lab-layout/**
       - fuzz/**
-      # bayan-opc and bayan-xml take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
+      # bayan-opc, bayan-xml and bayan-lab-layout take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
       - Cargo.toml
       - .cargo/**
       - .github/workflows/fuzz.yml
@@ -42,14 +43,14 @@ env:
   # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
   CARGO_FUZZ_VERSION: 0.13.2
   CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
-  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, every target has run after 3 × FUZZ_SECONDS: 7.5 minutes on a pull request, 45 minutes at night.
+  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 4 × FUZZ_SECONDS: 10 minutes on a pull request, an hour at night.
   FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 150 || 900 }}
 
 jobs:
   fuzz:
     name: Fuzzing
     runs-on: ubuntu-24.04
-    # A pull request's run takes about 10 minutes and a nightly one about an hour: the fuzzing takes 7.5 and 45 minutes (FUZZ_SECONDS above), and the setup, the build (under a minute) and, at night, the minimizing come on top.
+    # A pull request's run takes about 13 minutes and a nightly one about an hour and a quarter: the fuzzing takes 10 and 60 minutes (FUZZ_SECONDS above), and the setup, the build (about a minute) and, at night, the minimizing come on top.
     timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 90 }}
     permissions:
       contents: read # check out the repository
