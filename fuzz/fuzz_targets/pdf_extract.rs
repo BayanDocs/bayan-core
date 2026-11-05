@@ -10,8 +10,9 @@ use libfuzzer_sys::fuzz_target;
 /// The default limits, lowered where an input of 64 KiB could otherwise keep the target busy for seconds (a form XObject that draws itself twice at each of 16 levels runs its operators 65,536 times), so that libFuzzer's timeout catches work that grows faster than its input rather than work the limits allow.
 const LIMITS: Limits = Limits {
     max_objects: 65_536,
+    max_object_values: 262_144,
     max_stream_bytes: 4 << 20,
-    max_decoded_bytes: 16 << 20,
+    max_read_bytes: 16 << 20,
     max_operators: 500_000,
     max_glyphs: 100_000,
     max_font_entries: 500_000,

@@ -252,13 +252,41 @@ fn name_text(name: &[u8]) -> Box<str> {
         .into_boxed_str()
 }
 
-/// Skips an array or a dictionary whose opening token was `token`.
+/// Skips an array or a dictionary whose opening token was `token`, token by token: nothing of it is kept, so its size costs no memory. Its brackets must match, and nest no deeper than `max_nesting`.
 fn skip_composite(
     lexer: &mut Lexer<'_>,
     token: Token<'_>,
     max_nesting: usize,
 ) -> Result<(), Error> {
-    super::object::parse_from(token, lexer, false, max_nesting, 0).map(|_| ())
+    // Whether each open bracket is an array's (`true`) or a dictionary's.
+    let mut open: Vec<bool> = Vec::new();
+    let mut token = Some(token);
+    loop {
+        match token {
+            Some(Token::ArrayStart | Token::DictStart) => {
+                if open.len() >= max_nesting {
+                    return Err(Error::Limit(Limit::Nesting));
+                }
+                open.push(matches!(token, Some(Token::ArrayStart)));
+            }
+            Some(Token::ArrayEnd | Token::DictEnd) => {
+                let array = matches!(token, Some(Token::ArrayEnd));
+                if open.pop() != Some(array) {
+                    return Err(Error::malformed("a ToUnicode CMap's brackets do not match"));
+                }
+                if open.is_empty() {
+                    return Ok(());
+                }
+            }
+            Some(_) => {}
+            None => {
+                return Err(Error::malformed(
+                    "an array or a dictionary of a ToUnicode CMap does not end",
+                ));
+            }
+        }
+        token = lexer.next_token()?;
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +365,58 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "0041".repeat(MAX_GLYPH_CHARACTERS + 1)
         );
         assert!(ToUnicode::parse(long.as_bytes(), &mut 10, 8).is_err());
+    }
+
+    #[test]
+    fn skips_the_postscript_around_the_mappings_without_keeping_it() {
+        // However long, an array or dictionary outside the sections is skipped, not built.
+        let long = format!(
+            "[{}] << /A [1 << /B 2 >>] >> beginbfchar <01> <0041> endbfchar",
+            "/x ".repeat(100_000)
+        );
+        let mut entries = 1;
+        let cmap = ToUnicode::parse(long.as_bytes(), &mut entries, 8).unwrap();
+        assert_eq!(cmap.get(1, 1), Some("A"));
+        for broken in [&b"[ >>"[..], b"<< /A [ ]", b"<< [ >> ]"] {
+            assert!(
+                ToUnicode::parse(broken, &mut 10, 8).is_err(),
+                "{}",
+                String::from_utf8_lossy(broken)
+            );
+        }
+        let deep = [b"[".repeat(9), b"]".repeat(9)].concat();
+        assert_eq!(
+            ToUnicode::parse(&deep, &mut 10, 8).unwrap_err(),
+            Error::Limit(Limit::Nesting)
+        );
+        assert!(ToUnicode::parse(&deep[1..deep.len() - 1], &mut 10, 8).is_ok());
+    }
+
+    #[test]
+    fn a_range_covers_at_most_max_range_codes() {
+        // One code more than MAX_RANGE, with a budget that does not stop it: the range itself is refused, before a single entry is made.
+        let range = b"beginbfrange <00000000> <00010000> <0000> endbfrange";
+        let mut entries = usize::MAX;
+        assert_eq!(
+            ToUnicode::parse(range, &mut entries, 8).unwrap_err(),
+            Error::malformed(
+                "a ToUnicode `bfrange` entry's codes are out of order or out of range"
+            )
+        );
+        assert_eq!(entries, usize::MAX);
+        // The same for a range of one destination per code.
+        let array = format!(
+            "beginbfrange <00000000> <00010000> [{}] endbfrange",
+            "<0041> ".repeat(65_537)
+        );
+        assert!(ToUnicode::parse(array.as_bytes(), &mut entries, 8).is_err());
+        assert_eq!(entries, usize::MAX);
+        // Exactly MAX_RANGE codes are read.
+        let full = b"beginbfrange <00000000> <0000FFFF> <0000> endbfrange";
+        let mut entries = usize::MAX;
+        let cmap = ToUnicode::parse(full, &mut entries, 8).unwrap();
+        assert_eq!(cmap.get(4, 0xFFFF), Some("\u{FFFD}"));
+        assert_eq!(usize::MAX - entries, 0x1_0000);
     }
 
     #[test]

@@ -47,20 +47,23 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(limits.max_input_bytes, 256 << 20);
     assert_eq!(limits.max_objects, 4_194_304);
     assert_eq!(limits.max_nesting, 64);
+    assert_eq!(limits.max_object_values, 2_097_152);
+    assert_eq!(limits.max_operand_values, 65_536);
     assert_eq!(limits.max_xref_sections, 64);
     assert_eq!(limits.max_stream_bytes, 64 << 20);
-    assert_eq!(limits.max_decoded_bytes, 1 << 30);
+    assert_eq!(limits.max_read_bytes, 512 << 20);
     assert_eq!(limits.max_pages, 65_536);
     assert_eq!(limits.max_operators, 100_000_000);
     assert_eq!(limits.max_glyphs, 4_194_304);
     assert_eq!(limits.max_form_depth, 16);
     assert_eq!(limits.max_graphics_depth, 256);
     assert_eq!(limits.max_fonts, 4_096);
-    assert_eq!(limits.max_font_entries, 4_194_304);
+    assert_eq!(limits.max_font_entries, 2_097_152);
     assert_eq!(limits.max_path_segments, 1_048_576);
     assert_eq!(limits.max_elements, 1_048_576);
     assert_eq!(pdf::MAX_TOKEN_BYTES, 255);
     assert_eq!(pdf::MAX_GLYPH_CHARACTERS, 32);
+    assert_eq!(pdf::MAX_FILTERS, 8);
 }
 
 #[test]
@@ -90,8 +93,8 @@ fn every_limit_stops_the_extraction() {
         Error::Limit(Limit::StreamSize)
     );
     assert_eq!(
-        refuse_with(&text, &limited(|limits| limits.max_decoded_bytes = 30)),
-        Error::Limit(Limit::DecodedTotal)
+        refuse_with(&text, &limited(|limits| limits.max_read_bytes = 30)),
+        Error::Limit(Limit::ReadTotal)
     );
     assert_eq!(
         refuse_with(

@@ -7,12 +7,12 @@ use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_zlib_with_limit};
 use super::object::{Dict, Object};
 use super::{Error, Limit};
 
-/// How many decoded bytes are still allowed: per stream and in total ([`super::Limits::max_stream_bytes`] and [`super::Limits::max_decoded_bytes`]).
+/// How many bytes may still be read: what one filter may produce ([`super::Limits::max_stream_bytes`]), and what the reader may still read in all, the output of every filter included ([`super::Limits::max_read_bytes`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Budget {
     /// The most bytes one filter may produce.
     pub(crate) max_stream: usize,
-    /// The bytes all filters together may still produce.
+    /// The bytes the reader may still read, parse or decode, all together.
     pub(crate) remaining: u64,
 }
 
@@ -21,19 +21,19 @@ impl Budget {
     fn allowance(&self) -> (usize, Limit) {
         let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
         if remaining < self.max_stream {
-            (remaining, Limit::DecodedTotal)
+            (remaining, Limit::ReadTotal)
         } else {
             (self.max_stream, Limit::StreamSize)
         }
     }
 
-    /// Takes `produced` bytes from the total.
-    fn spend(&mut self, produced: usize) -> Result<(), Error> {
-        let produced = u64::try_from(produced).unwrap_or(u64::MAX);
+    /// Takes `read` bytes from the total.
+    pub(crate) fn spend(&mut self, read: usize) -> Result<(), Error> {
+        let read = u64::try_from(read).unwrap_or(u64::MAX);
         self.remaining = self
             .remaining
-            .checked_sub(produced)
-            .ok_or(Error::Limit(Limit::DecodedTotal))?;
+            .checked_sub(read)
+            .ok_or(Error::Limit(Limit::ReadTotal))?;
         Ok(())
     }
 
@@ -84,24 +84,24 @@ impl Filter {
     }
 }
 
-/// Decodes `data` through `filters`, in order, each with its parameters (already resolved).
+/// Decodes `data` through `filters`, in order, each FlateDecode with its predictor, if any. Each filter's output is taken from the budget.
 ///
 /// # Errors
 ///
-/// [`Error::Limit`] when a filter's output would pass the budget, [`Error::Malformed`] for damaged data or parameters, [`Error::Unsupported`] for predictors the reader does not implement.
+/// [`Error::Limit`] when a filter's output would pass the budget, [`Error::Malformed`] for damaged data.
 pub(crate) fn decode(
     data: &[u8],
-    filters: &[(Filter, Option<Dict>)],
+    filters: &[(Filter, Option<Predictor>)],
     budget: &mut Budget,
 ) -> Result<Vec<u8>, Error> {
     let mut current: Option<Vec<u8>> = None;
-    for (filter, params) in filters {
+    for (filter, predictor) in filters {
         let input = current.as_deref().unwrap_or(data);
         let output = match filter {
             Filter::Flate => {
                 let inflated = inflate(input, budget)?;
-                match params {
-                    Some(params) => predict(inflated, params, budget)?,
+                match predictor {
+                    Some(predictor) => predict(inflated, predictor, budget)?,
                     None => inflated,
                 }
             }
@@ -112,7 +112,10 @@ pub(crate) fn decode(
         budget.spend(output.len())?;
         current = Some(output);
     }
-    Ok(current.unwrap_or_else(|| data.to_vec()))
+    let mut decoded = current.unwrap_or_else(|| data.to_vec());
+    // The decoders grow their output as they go; what is kept holds no spare capacity.
+    decoded.shrink_to_fit();
+    Ok(decoded)
 }
 
 /// FlateDecode: a zlib stream (RFC 1950) whose Adler-32 checksum must match.
@@ -124,8 +127,9 @@ fn inflate(input: &[u8], budget: &Budget) -> Result<Vec<u8>, Error> {
     })
 }
 
-/// A predictor's parameters (§7.4.4.4).
-struct Predictor {
+/// A FlateDecode stream's predictor (§7.4.4.4), read from its `DecodeParms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Predictor {
     /// 2 for TIFF, 10 to 15 for PNG.
     kind: i64,
     /// Bytes per row, without the PNG tag byte.
@@ -144,7 +148,12 @@ fn parameter(params: &Dict, key: &[u8], default: i64) -> Result<i64, Error> {
 }
 
 impl Predictor {
-    fn from_params(params: &Dict) -> Result<Option<Self>, Error> {
+    /// The predictor that `params` describe; `None` for predictor 1, which predicts nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] for unknown predictors and parameters out of range, [`Error::Unsupported`] for the TIFF predictor with other than 8 bits per component.
+    pub(crate) fn from_params(params: &Dict) -> Result<Option<Self>, Error> {
         let kind = parameter(params, b"Predictor", 1)?;
         if kind == 1 {
             return Ok(None);
@@ -165,12 +174,17 @@ impl Predictor {
                 "the TIFF predictor with other than 8 bits per component",
             ));
         }
+        // `Columns` can be any integer: every step that uses it is checked.
+        let too_long = || Error::malformed("a predictor's row is too long");
         let bits_per_pixel = colors * bits;
-        let row_bits = bits_per_pixel
-            .checked_mul(columns)
-            .ok_or_else(|| Error::malformed("a predictor's row is too long"))?;
-        let row = usize::try_from((row_bits + 7) / 8)
-            .map_err(|_| Error::malformed("a predictor's row is too long"))?;
+        let row_bits = bits_per_pixel.checked_mul(columns).ok_or_else(too_long)?;
+        let row = row_bits
+            .checked_add(7)
+            .map(|bits| bits / 8)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            // A PNG row has a tag byte before its bytes, so its length plus one must fit too.
+            .filter(|row| row.checked_add(1).is_some())
+            .ok_or_else(too_long)?;
         let pixel = usize::try_from((bits_per_pixel + 7) / 8)
             .map_err(|_| Error::malformed("a predictor's pixel is too large"))?;
         Ok(Some(Self { kind, row, pixel }))
@@ -178,14 +192,19 @@ impl Predictor {
 }
 
 /// Undoes a predictor after FlateDecode.
-fn predict(data: Vec<u8>, params: &Dict, budget: &Budget) -> Result<Vec<u8>, Error> {
-    let Some(predictor) = Predictor::from_params(params)? else {
-        return Ok(data);
-    };
+fn predict(data: Vec<u8>, predictor: &Predictor, budget: &Budget) -> Result<Vec<u8>, Error> {
     if predictor.kind == 2 {
-        return Ok(tiff(data, &predictor));
+        return Ok(tiff(data, predictor));
     }
-    let stride = predictor.row + 1;
+    // No rows: nothing to undo, and no row to allocate, however long the parameters say it is.
+    if data.is_empty() {
+        return Ok(data);
+    }
+    let stride = predictor
+        .row
+        .checked_add(1)
+        .ok_or_else(|| Error::malformed("a predictor's row is too long"))?;
+    // A whole number of rows, at least one, so that a row is never longer than the data.
     if predictor.row == 0 || !data.len().is_multiple_of(stride) {
         return Err(Error::malformed(
             "a PNG-predicted stream is not a whole number of rows",
@@ -480,29 +499,73 @@ mod tests {
         );
     }
 
+    /// The predictor of a `DecodeParms` dictionary with these integer entries.
+    fn predictor(entries: &[(&[u8], i64)]) -> Result<Option<Predictor>, Error> {
+        let entries = entries
+            .iter()
+            .map(|&(key, value)| (key.to_vec(), Object::Integer(value)))
+            .collect();
+        Predictor::from_params(&Dict::from_entries(entries).unwrap())
+    }
+
     #[test]
     fn undoes_png_predictors() {
         // Two rows of three bytes: Sub, then Up.
         let rows = [1, 10, 5, 5, 2, 1, 1, 1];
-        let mut params = Dict::default();
-        params.set(b"Predictor".to_vec(), Object::Integer(12));
-        params.set(b"Columns".to_vec(), Object::Integer(3));
+        let png = predictor(&[(b"Predictor", 12), (b"Columns", 3)]).unwrap();
         let mut budget = budget();
-        let decoded = decode(
-            &zlib(&rows),
-            &[(Filter::Flate, Some(params.clone()))],
-            &mut budget,
-        )
-        .unwrap();
+        let decoded = decode(&zlib(&rows), &[(Filter::Flate, png)], &mut budget).unwrap();
         assert_eq!(decoded, [10, 15, 20, 11, 16, 21]);
         // A stream that is not a whole number of rows is refused.
+        assert!(decode(&zlib(&rows[..7]), &[(Filter::Flate, png)], &mut budget).is_err());
+        // No rows at all is an empty stream.
         assert!(
-            decode(
-                &zlib(&rows[..7]),
-                &[(Filter::Flate, Some(params))],
-                &mut budget
-            )
-            .is_err()
+            decode(&zlib(&[]), &[(Filter::Flate, png)], &mut budget)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(predictor(&[(b"Predictor", 1)]), Ok(None));
+    }
+
+    #[test]
+    fn predictor_rows_of_any_length_are_checked_arithmetic() {
+        let too_long = Err(Error::malformed("a predictor's row is too long"));
+        // A row of one bit per pixel and i64::MAX pixels: rounding its bits up to bytes overflows.
+        let one_bit = |columns| {
+            predictor(&[
+                (b"Predictor", 12),
+                (b"BitsPerComponent", 1),
+                (b"Columns", columns),
+            ])
+        };
+        assert_eq!(one_bit(i64::MAX), too_long);
+        // The bits of a row overflow.
+        assert_eq!(
+            predictor(&[
+                (b"Predictor", 12),
+                (b"Colors", 4),
+                (b"BitsPerComponent", 16),
+                (b"Columns", i64::MAX / 64 + 1)
+            ]),
+            too_long
+        );
+        // A row of exactly usize::MAX bytes leaves no room for its tag byte (on 32-bit targets; on 64-bit ones the row's bits overflow an i64 first).
+        let max_row = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
+        assert_eq!(
+            predictor(&[(b"Predictor", 12), (b"Columns", max_row)]),
+            too_long
+        );
+        // A row of 2^31 - 1 bytes fits everywhere: the data refuses it, without an overflow and without allocating the row.
+        let long = predictor(&[(b"Predictor", 12), (b"Columns", i64::from(i32::MAX))]).unwrap();
+        let mut budget = budget();
+        assert_eq!(
+            decode(&zlib(&[0, 0]), &[(Filter::Flate, long)], &mut budget).unwrap_err(),
+            Error::malformed("a PNG-predicted stream is not a whole number of rows")
+        );
+        assert!(
+            decode(&zlib(&[]), &[(Filter::Flate, long)], &mut budget)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -571,7 +634,7 @@ mod tests {
         );
         assert_eq!(
             decode(&compressed, &[(Filter::Flate, None)], &mut budget).unwrap_err(),
-            Error::Limit(Limit::DecodedTotal)
+            Error::Limit(Limit::ReadTotal)
         );
         let mut budget = Budget {
             max_stream: 100,

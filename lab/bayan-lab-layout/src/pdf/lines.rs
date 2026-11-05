@@ -3,6 +3,8 @@
 //! 1. **Grouping.** Glyphs are taken in drawing order. A glyph continues the current line when its baseline lies within half an em of the line's: the em of the larger of the glyph and the line's largest glyph so far, whose baseline is the line's reference. Otherwise it starts a new line. Word, LibreOffice, Typst and browsers draw text line by line, so drawing order keeps columns, table cells and floating text apart, and superscripts and subscripts join their lines.
 //! 2. **Display order.** A line's glyphs are sorted by the x of their origins, left to right; glyphs at the same x keep their drawing order.
 //! 3. **Reading order.** A line with no right-to-left character reads in display order. Otherwise its base direction is right to left when it holds more strong right-to-left characters (Bidi_Class R or AL) than left-to-right ones (L), or as many and its rightmost strong character is right to left. The Unicode Bidirectional Algorithm (UAX #9) then resolves the levels of its characters in display order and reverses their runs (rule L2): because the reordering of each run is its own inverse, this turns display order back into reading order. A glyph takes the level of its first character; a glyph without characters takes the level of the glyph before it.
+//!
+//!    A PDF keeps where glyphs are drawn, not the order in which their text is read, and display order does not always tell it: lines that are read differently can put their glyphs in the same places, and the extractor then gives the reading that this rule makes of what it sees. The left-to-right line `רחוב 15 in` and the right-to-left line `in רחוב 15` (both written here in reading order: a Hebrew word, a number and an English word) are displayed alike, the number at the left and the English word at the right; the extractor reads both as the right-to-left line, which has more right-to-left characters.
 //! 4. **Baseline.** The line's baseline is the y most of its largest glyphs share, the smaller y on a tie.
 //!
 //! The line's text is its glyphs' characters in reading order; each glyph, kept in display order, records where its characters start in that text.
@@ -132,7 +134,7 @@ fn build_line(mut glyphs: Vec<Placed>, stream: &mut Stream) -> Result<Line, Erro
         .map_or(Points::ZERO, |(&y, _)| y);
     // Rule 3: the reading order.
     let (direction, order) = reading_order(&glyphs);
-    let mut text = String::new();
+    let mut text = String::with_capacity(text_length(&glyphs));
     let mut offsets = vec![(0_u32, 0_u32); glyphs.len()];
     let mut characters = 0_u32;
     for &index in &order {
@@ -180,6 +182,11 @@ fn build_line(mut glyphs: Vec<Placed>, stream: &mut Stream) -> Result<Line, Erro
     })
 }
 
+/// The length in bytes of the characters of `glyphs`, so that a line's text takes exactly its length in memory.
+fn text_length(glyphs: &[Placed]) -> usize {
+    glyphs.iter().map(|glyph| glyph.raw.text.len()).sum()
+}
+
 /// The line's base direction, and the indices of its glyphs (in display order) in reading order.
 fn reading_order(glyphs: &[Placed]) -> (Direction, Vec<usize>) {
     let identity: Vec<usize> = (0..glyphs.len()).collect();
@@ -208,7 +215,7 @@ fn reading_order(glyphs: &[Placed]) -> (Direction, Vec<usize>) {
         || (right_to_left == left_to_right && rightmost_strong == Some(true));
     let base = if rtl { Level::rtl() } else { Level::ltr() };
     // The characters in display order, and where each glyph's characters start.
-    let mut text = String::new();
+    let mut text = String::with_capacity(text_length(glyphs));
     let mut starts = Vec::with_capacity(glyphs.len());
     for glyph in glyphs {
         starts.push((!glyph.raw.text.is_empty()).then_some(text.len()));

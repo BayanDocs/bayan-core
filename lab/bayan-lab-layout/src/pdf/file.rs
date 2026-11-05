@@ -5,10 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use super::filter::{self, Budget, Filter};
+use super::filter::{self, Budget, Filter, Predictor};
 use super::lexer::{Lexer, Token, is_regular, is_whitespace};
-use super::object::{Dict, Object, Ref, Stream, parse_object};
-use super::{Error, Limit, Limits};
+use super::object::{Dict, Object, Ref, Stream, Values, parse_object};
+use super::{Error, Limit, Limits, MAX_FILTERS};
 
 /// Where the newest cross-reference section puts an object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,16 +47,33 @@ impl core::ops::Deref for Value<'_> {
     }
 }
 
+impl Value<'_> {
+    /// The dictionary, if the value is one (a stream is not).
+    pub(crate) fn dict(&self) -> Option<&Dict> {
+        match &**self {
+            Object::Dict(dict) => Some(dict),
+            _ => None,
+        }
+    }
+}
+
 /// An open PDF file.
 pub(crate) struct File<'a> {
     data: &'a [u8],
     limits: Limits,
     entries: BTreeMap<u32, Entry>,
     trailer: Dict,
+    /// Every object read, kept for the whole extraction: the count of [`Limits::max_object_values`] bounds them.
     objects: BTreeMap<u32, Rc<Object>>,
     object_streams: BTreeMap<u32, Rc<ObjectStream>>,
+    /// The members that the object streams read so far declare, together: [`Limits::max_objects`] bounds them.
+    members: usize,
+    /// The decoded data of the streams that are used again and again (form XObjects), decoded once.
+    kept_streams: BTreeMap<Ref, Rc<Vec<u8>>>,
     loading: BTreeSet<u32>,
+    /// What may still be read: [`Limits::max_read_bytes`] and [`Limits::max_stream_bytes`].
     budget: Budget,
+    values: Values,
 }
 
 /// The bytes searched for `startxref` at the end of the file.
@@ -80,11 +97,14 @@ impl<'a> File<'a> {
             trailer: Dict::default(),
             objects: BTreeMap::new(),
             object_streams: BTreeMap::new(),
+            members: 0,
+            kept_streams: BTreeMap::new(),
             loading: BTreeSet::new(),
             budget: Budget {
                 max_stream: limits.max_stream_bytes,
-                remaining: limits.max_decoded_bytes,
+                remaining: limits.max_read_bytes,
             },
+            values: Values::kept(limits.max_object_values),
         };
         let start = find_startxref(data)?;
         file.read_sections(start)?;
@@ -160,11 +180,13 @@ impl<'a> File<'a> {
         Ok(())
     }
 
-    /// Reads the section at `offset`: adds its entries in use, and returns its trailer and its free objects, which the caller adds after a hybrid file's stream.
+    /// Reads the section at `offset`: adds its entries in use, and returns its trailer and its free objects, which the caller adds after a hybrid file's stream. A table and its trailer count as read here, a cross-reference stream as every object does.
     fn read_section(&mut self, offset: usize) -> Result<(Dict, Vec<u32>), Error> {
         let mut lexer = Lexer::new(self.data, offset);
         if lexer.eat_keyword(b"xref") {
-            self.read_table(&mut lexer)
+            let section = self.read_table(&mut lexer)?;
+            self.budget.spend(lexer.furthest().saturating_sub(offset))?;
+            Ok(section)
         } else {
             self.read_xref_stream(offset)
         }
@@ -219,7 +241,7 @@ impl<'a> File<'a> {
                 }
             }
         }
-        let trailer = parse_object(lexer, true, self.limits.max_nesting)?;
+        let trailer = parse_object(lexer, true, self.limits.max_nesting, &mut self.values)?;
         let Object::Dict(trailer) = trailer else {
             return Err(Error::malformed("the trailer is not a dictionary"));
         };
@@ -369,6 +391,8 @@ impl<'a> File<'a> {
     }
 
     /// Parses `n g obj … endobj` at the lexer, with its stream if it has one. With `expected`, the object must be that one. `indirect_length` allows a stream's `Length` to be an indirect object, which a cross-reference stream's may not be.
+    ///
+    /// Every byte the parse reads counts toward [`Limits::max_read_bytes`], except a stream's data, which counts whenever it is decoded. Objects can overlap, so that the same bytes are parsed again for another object; they count again each time.
     fn parse_indirect(
         &mut self,
         lexer: &mut Lexer<'a>,
@@ -400,7 +424,10 @@ impl<'a> File<'a> {
                 reference.number, reference.generation
             )));
         }
-        let object = parse_object(lexer, true, self.limits.max_nesting)?;
+        let object = parse_object(lexer, true, self.limits.max_nesting, &mut self.values)?;
+        // What the parse has read counts at once, before a stream's `Length` can make the reader read another object.
+        let parsed = lexer.furthest();
+        self.budget.spend(parsed.saturating_sub(start))?;
         if lexer.eat_keyword(b"stream") {
             let Object::Dict(dict) = object else {
                 return Err(Error::malformed(format!(
@@ -415,6 +442,11 @@ impl<'a> File<'a> {
                     reference.number
                 )));
             }
+            let around = lexer
+                .furthest()
+                .saturating_sub(parsed)
+                .saturating_sub(stream.length);
+            self.budget.spend(around)?;
             return Ok((reference, Object::Stream(stream)));
         }
         if !lexer.eat_keyword(b"endobj") {
@@ -423,6 +455,7 @@ impl<'a> File<'a> {
                 reference.number
             )));
         }
+        self.budget.spend(lexer.furthest().saturating_sub(parsed))?;
         Ok((reference, object))
     }
 
@@ -573,12 +606,14 @@ impl<'a> File<'a> {
             )));
         }
         let mut lexer = Lexer::new(&object_stream.data, offset);
-        let object = parse_object(&mut lexer, true, self.limits.max_nesting)?;
+        let object = parse_object(&mut lexer, true, self.limits.max_nesting, &mut self.values)?;
         if lexer.eat_keyword(b"stream") {
             return Err(Error::malformed(format!(
                 "object stream {stream} holds a stream"
             )));
         }
+        // Members can overlap as objects in the file can, and each counts what its parse read, looking ahead included.
+        self.budget.spend(lexer.furthest().saturating_sub(offset))?;
         Ok(object)
     }
 
@@ -620,9 +655,12 @@ impl<'a> File<'a> {
             .ok_or_else(|| {
                 Error::malformed(format!("object stream {number} has no offset `First`"))
             })?;
-        if count > self.limits.max_objects {
-            return Err(Error::Limit(Limit::Objects));
-        }
+        // Every member is an object of the file, so all object streams together may declare no more members than the cross-reference sections may list objects.
+        self.members = self
+            .members
+            .checked_add(count)
+            .filter(|&members| members <= self.limits.max_objects)
+            .ok_or(Error::Limit(Limit::Objects))?;
         let data = self.decode_stream(stream, false)?;
         let mut lexer = Lexer::new(&data, 0);
         let mut members = Vec::with_capacity(count.min(data.len() / 4 + 1));
@@ -701,7 +739,7 @@ impl<'a> File<'a> {
         }
     }
 
-    /// The decoded data of `stream`.
+    /// The decoded data of `stream`. Every use reads and decodes it again, and every use takes its bytes from the budget of [`Limits::max_read_bytes`].
     ///
     /// # Errors
     ///
@@ -710,42 +748,66 @@ impl<'a> File<'a> {
         self.decode_stream(stream, false)
     }
 
+    /// The decoded data of the stream `reference` (whose stream is `stream`), decoded once and kept, for streams used again and again: a form XObject drawn many times. Every later use takes the data's length from the budget again, since it is read again.
+    ///
+    /// # Errors
+    ///
+    /// As [`File::stream_data`].
+    pub(crate) fn kept_stream_data(
+        &mut self,
+        reference: Ref,
+        stream: &Stream,
+    ) -> Result<Rc<Vec<u8>>, Error> {
+        if let Some(data) = self.kept_streams.get(&reference) {
+            let data = Rc::clone(data);
+            self.budget.spend(data.len())?;
+            return Ok(data);
+        }
+        let data = Rc::new(self.decode_stream(stream, false)?);
+        self.kept_streams.insert(reference, Rc::clone(&data));
+        Ok(data)
+    }
+
     /// Decodes `stream`; for a cross-reference stream (`direct_only`), its filters and parameters must be direct objects.
+    ///
+    /// The stream's data counts toward the budget as it lies in the file, filtered or not (a decoder reads every byte of it), and so does every filter's output.
     fn decode_stream(&mut self, stream: &Stream, direct_only: bool) -> Result<Vec<u8>, Error> {
         let raw = self
             .data
             .get(stream.start..stream.start + stream.length)
             .ok_or_else(|| Error::malformed("a stream lies outside the file"))?;
         let filters = self.filters(&stream.dict, direct_only)?;
+        if filters.is_empty() && raw.len() > self.budget.max_stream {
+            return Err(Error::Limit(Limit::StreamSize));
+        }
+        self.budget.spend(raw.len())?;
         if filters.is_empty() {
-            if raw.len() > self.budget.max_stream {
-                return Err(Error::Limit(Limit::StreamSize));
-            }
             return Ok(raw.to_vec());
         }
         filter::decode(raw, &filters, &mut self.budget)
     }
 
-    /// A stream's filters with their parameters.
+    /// A stream's filters, each FlateDecode with its predictor; no more than [`MAX_FILTERS`]. Nothing is copied: the filter names and parameters are read where they are.
     fn filters(
         &mut self,
         dict: &Dict,
         direct_only: bool,
-    ) -> Result<Vec<(Filter, Option<Dict>)>, Error> {
-        let resolve = |file: &mut Self, object: &Object| -> Result<Object, Error> {
+    ) -> Result<Vec<(Filter, Option<Predictor>)>, Error> {
+        let direct = |object: &Object| -> Result<(), Error> {
             if direct_only && matches!(object, Object::Ref(_)) {
                 return Err(Error::malformed(
                     "a cross-reference stream's filters must be direct objects",
                 ));
             }
-            Ok((*file.resolve(object)?).clone())
+            Ok(())
         };
-        let names = match dict.get(b"Filter") {
-            None => return Ok(Vec::new()),
-            Some(object) => resolve(self, object)?,
+        let Some(names) = dict.get(b"Filter") else {
+            return Ok(Vec::new());
         };
-        let names: Vec<Object> = match names {
-            Object::Name(_) => vec![names],
+        direct(names)?;
+        let names = self.resolve(names)?;
+        let names: &[Object] = match &*names {
+            Object::Name(_) => core::slice::from_ref(&*names),
             Object::Array(items) => items,
             Object::Null => return Ok(Vec::new()),
             _ => {
@@ -754,13 +816,22 @@ impl<'a> File<'a> {
                 ));
             }
         };
-        let params: Vec<Object> = match dict.get(b"DecodeParms") {
-            None => Vec::new(),
-            Some(object) => match resolve(self, object)? {
-                Object::Array(items) => items,
-                Object::Null => Vec::new(),
-                single => vec![single],
-            },
+        if names.len() > MAX_FILTERS {
+            return Err(Error::malformed(format!(
+                "a stream has more than {MAX_FILTERS} filters"
+            )));
+        }
+        let params = match dict.get(b"DecodeParms") {
+            None => None,
+            Some(object) => {
+                direct(object)?;
+                Some(self.resolve(object)?)
+            }
+        };
+        let params: &[Object] = match params.as_deref() {
+            None | Some(Object::Null) => &[],
+            Some(Object::Array(items)) => items,
+            Some(single) => core::slice::from_ref(single),
         };
         if !params.is_empty() && params.len() != names.len() {
             return Err(Error::malformed(
@@ -769,24 +840,31 @@ impl<'a> File<'a> {
         }
         let mut filters = Vec::with_capacity(names.len());
         for (index, name) in names.iter().enumerate() {
-            let name = resolve(self, name)?;
+            direct(name)?;
             let filter = Filter::from_name(
-                name.as_name()
+                self.resolve(name)?
+                    .as_name()
                     .ok_or_else(|| Error::malformed("a stream's filter is not a name"))?,
             )?;
-            let params = match params.get(index) {
+            let predictor = match params.get(index) {
                 None => None,
-                Some(object) => match resolve(self, object)? {
-                    Object::Dict(params) => Some(params),
-                    Object::Null => None,
-                    _ => {
-                        return Err(Error::malformed(
-                            "a stream's `DecodeParms` entry is not a dictionary",
-                        ));
+                Some(object) => {
+                    direct(object)?;
+                    match &*self.resolve(object)? {
+                        // Only FlateDecode among the filters read has parameters: a predictor.
+                        Object::Dict(params) if filter == Filter::Flate => {
+                            Predictor::from_params(params)?
+                        }
+                        Object::Dict(_) | Object::Null => None,
+                        _ => {
+                            return Err(Error::malformed(
+                                "a stream's `DecodeParms` entry is not a dictionary",
+                            ));
+                        }
                     }
-                },
+                }
             };
-            filters.push((filter, params));
+            filters.push((filter, predictor));
         }
         Ok(filters)
     }
@@ -886,6 +964,7 @@ fn big_endian(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pdf::test_pdf;
 
     #[test]
     fn reads_table_entries() {
@@ -936,5 +1015,196 @@ mod tests {
         assert!(find_startxref(b"startxref\n3\n%%EOF garbage").is_err());
         assert!(find_startxref(b"startxref\n3\n").is_err());
         assert!(find_startxref(b"no keyword").is_err());
+    }
+
+    /// The bytes read so far, of the budget of `limits`.
+    fn read(file: &File<'_>, limits: &Limits) -> u64 {
+        limits.max_read_bytes - file.budget.remaining
+    }
+
+    #[test]
+    fn every_object_counts_the_bytes_its_parse_reads_again_where_objects_overlap() {
+        // Object 3 lies inside the string of object 2, where its cross-reference entry points.
+        let inner = format!("3 0 obj ({}) endobj", "A".repeat(1000));
+        let outer = format!("2 0 obj\n({inner})\nendobj");
+        let mut data = b"%PDF-1.7\n".to_vec();
+        let catalog = data.len();
+        data.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let second = data.len();
+        data.extend_from_slice(outer.as_bytes());
+        data.push(b'\n');
+        let third = second + "2 0 obj\n(".len();
+        let xref = data.len();
+        data.extend_from_slice(
+            format!("xref\n0 4\n0000000000 65535 f \n{catalog:010} 00000 n \n{second:010} 00000 n \n{third:010} 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let limits = Limits::DEFAULT;
+        let mut file = File::open(&data, limits).unwrap();
+        // Opening read the table and the trailer.
+        let opened = read(&file, &limits);
+        assert!(opened > 100);
+        file.get(Ref {
+            number: 2,
+            generation: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            read(&file, &limits),
+            opened + u64::try_from(outer.len()).unwrap()
+        );
+        // Object 3's bytes count again, although object 2's parse read them already.
+        file.get(Ref {
+            number: 3,
+            generation: 0,
+        })
+        .unwrap();
+        let all = opened + u64::try_from(outer.len() + inner.len()).unwrap();
+        assert_eq!(read(&file, &limits), all);
+        // An object read again comes from the cache, and reads nothing.
+        file.get(Ref {
+            number: 2,
+            generation: 0,
+        })
+        .unwrap();
+        assert_eq!(read(&file, &limits), all);
+        // With one byte less, the second object passes the limit.
+        let short = Limits {
+            max_read_bytes: all - 1,
+            ..limits
+        };
+        let mut file = File::open(&data, short).unwrap();
+        file.get(Ref {
+            number: 2,
+            generation: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            file.get(Ref {
+                number: 3,
+                generation: 0
+            })
+            .unwrap_err(),
+            Error::Limit(Limit::ReadTotal)
+        );
+        // A table and its trailer count too.
+        let tiny = Limits {
+            max_read_bytes: opened - 1,
+            ..limits
+        };
+        assert_eq!(
+            File::open(&data, tiny).err(),
+            Some(Error::Limit(Limit::ReadTotal))
+        );
+    }
+
+    #[test]
+    fn members_of_object_streams_count_what_their_parse_reads_looking_ahead_included() {
+        let data = test_pdf(&["<< /Type /Catalog >>"]);
+        let limits = Limits::DEFAULT;
+        let mut file = File::open(&data, limits).unwrap();
+        // Two members at the same offset: the integer 5, after which the parse looks for a generation number and `R`, and then for `stream`, through a comment to the end.
+        let stream = b"5 % a comment\n".to_vec();
+        let length = u64::try_from(stream.len()).unwrap();
+        file.object_streams.insert(
+            9,
+            Rc::new(ObjectStream {
+                data: stream,
+                members: vec![(10, 0), (11, 0)],
+            }),
+        );
+        for (number, index) in [(10, 0), (11, 1)] {
+            file.entries
+                .insert(number, Entry::InStream { stream: 9, index });
+        }
+        let opened = read(&file, &limits);
+        assert_eq!(
+            *file
+                .get(Ref {
+                    number: 10,
+                    generation: 0
+                })
+                .unwrap(),
+            Object::Integer(5)
+        );
+        assert_eq!(read(&file, &limits), opened + length);
+        file.get(Ref {
+            number: 11,
+            generation: 0,
+        })
+        .unwrap();
+        assert_eq!(read(&file, &limits), opened + 2 * length);
+    }
+
+    #[test]
+    fn all_object_streams_together_declare_at_most_max_objects_members() {
+        // Two object streams of three members each: either fits a limit of five objects, both together do not.
+        let object_stream = |members: [u32; 3]| {
+            let header = format!("{} 0 {} 2 {} 4\n", members[0], members[1], members[2]);
+            let data = format!("{header}1 2 3");
+            format!(
+                "<< /Type /ObjStm /N 3 /First {} /Length {} >>\nstream\n{data}\nendstream",
+                header.len(),
+                data.len()
+            )
+        };
+        let data = test_pdf(&[
+            "<< /Type /Catalog >>",
+            &object_stream([20, 22, 24]),
+            &object_stream([21, 23, 25]),
+        ]);
+        let limits = Limits {
+            max_objects: 5,
+            ..Limits::DEFAULT
+        };
+        let mut file = File::open(&data, limits).unwrap();
+        file.entries.insert(
+            20,
+            Entry::InStream {
+                stream: 2,
+                index: 0,
+            },
+        );
+        file.entries.insert(
+            21,
+            Entry::InStream {
+                stream: 3,
+                index: 0,
+            },
+        );
+        assert_eq!(
+            *file
+                .get(Ref {
+                    number: 20,
+                    generation: 0
+                })
+                .unwrap(),
+            Object::Integer(1)
+        );
+        assert_eq!(
+            file.get(Ref {
+                number: 21,
+                generation: 0
+            })
+            .unwrap_err(),
+            Error::Limit(Limit::Objects)
+        );
+        // Alone, the second stream fits.
+        let mut file = File::open(&data, limits).unwrap();
+        file.entries.insert(
+            21,
+            Entry::InStream {
+                stream: 3,
+                index: 0,
+            },
+        );
+        assert_eq!(
+            *file
+                .get(Ref {
+                    number: 21,
+                    generation: 0
+                })
+                .unwrap(),
+            Object::Integer(1)
+        );
     }
 }

@@ -6,11 +6,11 @@
 
 use std::rc::Rc;
 
-use super::file::File;
+use super::file::{File, Value};
 use super::font::{Font, FontCache, number};
 use super::lexer::{Lexer, Token, is_whitespace};
-use super::object::{Dict, Object, parse_from};
-use super::pages::PageInfo;
+use super::object::{Dict, Object, Values, parse_from};
+use super::pages::{Attribute, PageInfo};
 use super::{Counters, Error, Limit};
 use crate::layout::{Element, ElementKind, Points};
 
@@ -192,6 +192,7 @@ struct Path {
     subpaths: Vec<Vec<Segment>>,
     start: Option<(f64, f64)>,
     current: Option<(f64, f64)>,
+    /// Its segments and subpaths, which [`super::Limits::max_path_segments`] limits.
     segments: usize,
 }
 
@@ -207,10 +208,12 @@ pub(crate) fn interpret_page(
     counters: &mut Counters,
 ) -> Result<Drawn, Error> {
     let (matrix, width, height) = Matrix::page(page);
-    let resources = match &page.resources {
-        Some(object) => Some(dict_of(file, object, "the page's resources")?),
+    // The resources are borrowed where the file's cache keeps them, never copied.
+    let resources = match page.resources.as_ref().and_then(Attribute::value) {
+        Some(object) => Some(dictionary(file, object, "the page's resources")?),
         None => None,
     };
+    let resources = resources.as_ref().and_then(Value::dict);
     let data = page_content(file, page)?;
     let mut interpreter = Interpreter {
         file,
@@ -222,6 +225,7 @@ pub(crate) fn interpret_page(
         floor: 0,
         text: None,
         path: Path::default(),
+        held_segments: 0,
         drawn: Drawn {
             width,
             height,
@@ -231,7 +235,7 @@ pub(crate) fn interpret_page(
         marked: 0,
         compatibility: 0,
     };
-    interpreter.run(&data, resources.as_ref())?;
+    interpreter.run(&data, resources)?;
     Ok(interpreter.drawn)
 }
 
@@ -244,11 +248,11 @@ fn page_content(file: &mut File<'_>, page: &PageInfo) -> Result<Vec<u8>, Error> 
     let Some(contents) = dict.get(b"Contents") else {
         return Ok(Vec::new());
     };
-    let contents = (*file.resolve(contents)?).clone();
-    let streams = match contents {
-        Object::Stream(stream) => vec![Object::Stream(stream)],
+    let contents = file.resolve(contents)?;
+    let streams: &[Object] = match &*contents {
+        Object::Stream(_) => core::slice::from_ref(&*contents),
         Object::Array(items) => items,
-        Object::Null => Vec::new(),
+        Object::Null => &[],
         _ => {
             return Err(Error::malformed(
                 "the page's `Contents` is not a stream or an array of streams",
@@ -256,16 +260,12 @@ fn page_content(file: &mut File<'_>, page: &PageInfo) -> Result<Vec<u8>, Error> 
         }
     };
     let mut data = Vec::new();
-    for item in &streams {
+    for item in streams {
         let item = file.resolve(item)?;
-        let stream = item
-            .as_stream()
-            .ok_or_else(|| {
-                Error::malformed("the page's `Contents` holds something other than a stream")
-            })?
-            .clone();
-        drop(item);
-        let decoded = file.stream_data(&stream)?;
+        let stream = item.as_stream().ok_or_else(|| {
+            Error::malformed("the page's `Contents` holds something other than a stream")
+        })?;
+        let decoded = file.stream_data(stream)?;
         if data.len() + decoded.len() + 1 > file.limits().max_stream_bytes {
             return Err(Error::Limit(Limit::StreamSize));
         }
@@ -275,12 +275,13 @@ fn page_content(file: &mut File<'_>, page: &PageInfo) -> Result<Vec<u8>, Error> 
     Ok(data)
 }
 
-/// A dictionary, resolved and copied.
-fn dict_of(file: &mut File<'_>, object: &Object, what: &str) -> Result<Dict, Error> {
-    match &*file.resolve(object)? {
-        Object::Dict(dict) => Ok(dict.clone()),
-        _ => Err(Error::malformed(format!("{what} is not a dictionary"))),
+/// `object` resolved, which must be a dictionary: borrowed from the object or the file's cache, never copied (read it with [`Value::dict`]).
+fn dictionary<'o>(file: &mut File<'_>, object: &'o Object, what: &str) -> Result<Value<'o>, Error> {
+    let value = file.resolve(object)?;
+    if value.dict().is_none() {
+        return Err(Error::malformed(format!("{what} is not a dictionary")));
     }
+    Ok(value)
 }
 
 struct Interpreter<'i, 'a> {
@@ -295,6 +296,8 @@ struct Interpreter<'i, 'a> {
     /// The text matrix and the text line matrix, inside `BT` … `ET`.
     text: Option<(Matrix, Matrix)>,
     path: Path,
+    /// The segments of the paths saved around the form XObjects being drawn.
+    held_segments: usize,
     drawn: Drawn,
     form_depth: usize,
     marked: usize,
@@ -303,25 +306,35 @@ struct Interpreter<'i, 'a> {
 
 impl Interpreter<'_, '_> {
     fn run(&mut self, data: &[u8], resources: Option<&Dict>) -> Result<(), Error> {
-        let max_nesting = self.file.limits().max_nesting;
+        let limits = *self.file.limits();
         let mut lexer = Lexer::new(data, 0);
         let mut operands: Vec<Object> = Vec::new();
+        // The operands waiting for the next operator, and everything inside them, draw on a count of their own.
+        let mut values = Values::operands(limits.max_operand_values);
         while let Some(token) = lexer.next_token()? {
             let operator = match token {
                 Token::Keyword(keyword) if !matches!(keyword, b"true" | b"false" | b"null") => {
                     keyword
                 }
                 other => {
-                    operands.push(parse_from(other, &mut lexer, false, max_nesting, 0)?);
+                    operands.push(parse_from(
+                        other,
+                        &mut lexer,
+                        false,
+                        limits.max_nesting,
+                        0,
+                        &mut values,
+                    )?);
                     continue;
                 }
             };
             self.counters.operators += 1;
-            if self.counters.operators > self.file.limits().max_operators {
+            if self.counters.operators > limits.max_operators {
                 return Err(Error::Limit(Limit::Operators));
             }
             self.operator(operator, &operands, &mut lexer, resources)?;
             operands.clear();
+            values = Values::operands(limits.max_operand_values);
         }
         if !operands.is_empty() {
             return Err(Error::malformed(
@@ -391,7 +404,7 @@ impl Interpreter<'_, '_> {
             b"m" => {
                 let [x, y] = numbers::<2>(operands, "m")?;
                 let point = self.to_page(x, y);
-                self.path.subpaths.push(Vec::new());
+                self.start_subpath()?;
                 self.path.start = Some(point);
                 self.path.current = Some(point);
             }
@@ -434,7 +447,7 @@ impl Interpreter<'_, '_> {
                     self.to_page(x + width, y + height),
                     self.to_page(x, y + height),
                 ];
-                self.path.subpaths.push(Vec::new());
+                self.start_subpath()?;
                 for index in 0..4 {
                     self.add_segment(Segment::Line(corners[index], corners[(index + 1) % 4]))?;
                 }
@@ -664,14 +677,30 @@ impl Interpreter<'_, '_> {
     }
 
     fn add_segment(&mut self, segment: Segment) -> Result<(), Error> {
-        if self.path.segments >= self.file.limits().max_path_segments {
-            return Err(Error::Limit(Limit::PathSegments));
-        }
-        self.path.segments += 1;
+        self.count_segment()?;
         match self.path.subpaths.last_mut() {
             Some(subpath) => subpath.push(segment),
             None => self.path.subpaths.push(vec![segment]),
         }
+        Ok(())
+    }
+
+    /// Starts a subpath, which counts like a segment; a subpath that is still empty is reused, so that moves alone never grow the path.
+    fn start_subpath(&mut self) -> Result<(), Error> {
+        if self.path.subpaths.last().is_some_and(Vec::is_empty) {
+            return Ok(());
+        }
+        self.count_segment()?;
+        self.path.subpaths.push(Vec::new());
+        Ok(())
+    }
+
+    /// Counts one more segment or subpath of the path being built, together with those of the paths saved around the form XObjects being drawn: all of them are in memory at once.
+    fn count_segment(&mut self) -> Result<(), Error> {
+        if self.held_segments + self.path.segments >= self.file.limits().max_path_segments {
+            return Err(Error::Limit(Limit::PathSegments));
+        }
+        self.path.segments += 1;
         Ok(())
     }
 
@@ -809,11 +838,15 @@ impl Interpreter<'_, '_> {
             return Err(outside_text("Tj, TJ, ' or \""));
         }
         for (code, length) in font.codes(string)? {
-            self.counters.glyphs += 1;
+            let glyph = font.glyph(code, length);
+            // A glyph counts once for each of its characters, and at least once: the layout keeps every character, so what the glyphs take in memory follows the count, whatever text a font maps its codes to.
+            let count = u64::try_from(glyph.text.chars().count())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            self.counters.glyphs = self.counters.glyphs.saturating_add(count);
             if self.counters.glyphs > self.file.limits().max_glyphs {
                 return Err(Error::Limit(Limit::Glyphs));
             }
-            let glyph = font.glyph(code, length);
             let (text_matrix, _) = self.text.ok_or_else(|| outside_text("Tj"))?;
             let to_page = text_matrix.then(self.state.ctm).then(self.page);
             let (size, scale) = (self.state.size, self.state.scale);
@@ -860,49 +893,52 @@ impl Interpreter<'_, '_> {
 
     /// The font that the resources name `key`.
     fn font(&mut self, key: &[u8], resources: Option<&Dict>) -> Result<Rc<Font>, Error> {
-        let object = self.resource(resources, b"Font", key, "font")?;
-        self.fonts.font(self.file, &object)
+        let fonts = self.category(resources, b"Font", "font")?;
+        let font = entry(&fonts, key, "font")?;
+        self.fonts.font(self.file, font)
     }
 
-    /// An entry of a category of the resources (unresolved, so that fonts are cached by reference).
-    fn resource(
+    /// A category of the resources (`Font`, `XObject`, `ExtGState`), resolved and borrowed: never copied, however many entries it has, so that an operator that names a resource costs a lookup, not a copy.
+    fn category<'r>(
         &mut self,
-        resources: Option<&Dict>,
+        resources: Option<&'r Dict>,
         category: &[u8],
-        key: &[u8],
         what: &str,
-    ) -> Result<Object, Error> {
-        let missing = || Error::malformed(format!("a {what} that the resources do not name"));
-        let resources = resources.ok_or_else(missing)?;
-        let entries = match self.file.lookup(resources, category)? {
-            Some(value) => match &*value {
-                Object::Dict(entries) => entries.clone(),
-                _ => {
-                    return Err(Error::malformed(format!(
-                        "the resources' {what}s are not a dictionary"
-                    )));
-                }
-            },
-            None => return Err(missing()),
-        };
-        entries.get(key).cloned().ok_or_else(missing)
+    ) -> Result<Value<'r>, Error> {
+        let resources = resources.ok_or_else(|| not_named(what))?;
+        let value = self
+            .file
+            .lookup(resources, category)?
+            .ok_or_else(|| not_named(what))?;
+        if value.dict().is_none() {
+            return Err(Error::malformed(format!(
+                "the resources' {what}s are not a dictionary"
+            )));
+        }
+        Ok(value)
     }
 
     /// `gs`: the parts of a graphics state parameter dictionary that place things: the line width and the font.
     fn ext_g_state(&mut self, key: &[u8], resources: Option<&Dict>) -> Result<(), Error> {
-        let object = self.resource(resources, b"ExtGState", key, "graphics state")?;
-        let parameters = dict_of(self.file, &object, "a graphics state parameter dictionary")?;
+        let states = self.category(resources, b"ExtGState", "graphics state")?;
+        let state = entry(&states, key, "graphics state")?;
+        let parameters = dictionary(self.file, state, "a graphics state parameter dictionary")?;
+        let Some(parameters) = parameters.dict() else {
+            return Err(Error::malformed(
+                "a graphics state parameter dictionary is not a dictionary",
+            ));
+        };
         if let Some(width) = parameters.get(b"LW") {
             self.state.line_width = number(self.file, width, "a graphics state's `LW`")?;
         }
         if let Some(font) = parameters.get(b"Font") {
-            let font = (*self.file.resolve(font)?).clone();
-            let Object::Array(items) = font else {
+            let font = self.file.resolve(font)?;
+            let Some(items) = font.as_array() else {
                 return Err(Error::malformed(
                     "a graphics state's `Font` is not an array",
                 ));
             };
-            let [reference, size] = items.as_slice() else {
+            let [reference, size] = items else {
                 return Err(Error::malformed(
                     "a graphics state's `Font` is not a font and a size",
                 ));
@@ -917,13 +953,12 @@ impl Interpreter<'_, '_> {
 
     /// `Do`: an image's box, or a form XObject's content (§8.10).
     fn x_object(&mut self, key: &[u8], resources: Option<&Dict>) -> Result<(), Error> {
-        let object = self.resource(resources, b"XObject", key, "XObject")?;
-        let value = self.file.resolve(&object)?;
+        let x_objects = self.category(resources, b"XObject", "XObject")?;
+        let x_object = entry(&x_objects, key, "XObject")?;
+        let value = self.file.resolve(x_object)?;
         let stream = value
             .as_stream()
-            .ok_or_else(|| Error::malformed("an XObject is not a stream"))?
-            .clone();
-        drop(value);
+            .ok_or_else(|| Error::malformed("an XObject is not a stream"))?;
         if stream.dict.has_name(b"Subtype", b"Image") {
             return self.image();
         }
@@ -941,18 +976,27 @@ impl Interpreter<'_, '_> {
         let matrix = match stream.dict.get(b"Matrix") {
             None => Matrix::IDENTITY,
             Some(object) => {
-                let items = (*self.file.resolve(object)?).clone();
-                let Object::Array(items) = items else {
-                    return Err(Error::malformed("a form's `Matrix` is not an array"));
-                };
-                Matrix::new(numbers::<6>(&items, "a form's `Matrix`")?)
+                let items = self.file.resolve(object)?;
+                let items = items
+                    .as_array()
+                    .ok_or_else(|| Error::malformed("a form's `Matrix` is not an array"))?;
+                Matrix::new(numbers::<6>(items, "a form's `Matrix`")?)
             }
         };
-        let form_resources = match stream.dict.get(b"Resources") {
-            Some(object) => Some(dict_of(self.file, object, "a form's resources")?),
-            None => resources.cloned(),
+        // A form without resources uses those of the page or form that draws it (§7.8.3), borrowed like its own.
+        let own_resources = match stream.dict.get(b"Resources") {
+            Some(object) => Some(dictionary(self.file, object, "a form's resources")?),
+            None => None,
         };
-        let data = self.file.stream_data(&stream)?;
+        let form_resources = match &own_resources {
+            Some(value) => value.dict(),
+            None => resources,
+        };
+        // A form is decoded once, however often it is drawn; every drawing counts its bytes toward the budget again, since it reads them again.
+        let data = match x_object {
+            &Object::Ref(reference) => self.file.kept_stream_data(reference, stream)?,
+            _ => Rc::new(self.file.stream_data(stream)?),
+        };
         if self.saved.len() >= self.file.limits().max_graphics_depth {
             return Err(Error::Limit(Limit::GraphicsDepth));
         }
@@ -960,6 +1004,7 @@ impl Interpreter<'_, '_> {
         let floor = core::mem::replace(&mut self.floor, self.saved.len());
         // A form's content stands on its own (§8.10.1): its path, text objects, marked content and compatibility sections begin and end inside it.
         let path = core::mem::take(&mut self.path);
+        self.held_segments += path.segments;
         let text = self.text.take();
         let marked = core::mem::take(&mut self.marked);
         let compatibility = core::mem::take(&mut self.compatibility);
@@ -970,9 +1015,10 @@ impl Interpreter<'_, '_> {
             ));
         }
         self.form_depth += 1;
-        let result = self.run(&data, form_resources.as_ref());
+        let result = self.run(&data, form_resources);
         self.form_depth -= 1;
         result?;
+        self.held_segments -= path.segments;
         // The form's own unbalanced `q`s end with it.
         self.saved.truncate(self.floor);
         self.floor = floor;
@@ -989,8 +1035,9 @@ impl Interpreter<'_, '_> {
 
     /// `BI` … `ID` … `EI`: an inline image, whose box is placed like an image XObject's (§8.9.7).
     fn inline_image(&mut self, lexer: &mut Lexer<'_>) -> Result<(), Error> {
-        let max_nesting = self.file.limits().max_nesting;
-        let mut dict = Dict::default();
+        let limits = *self.file.limits();
+        let mut values = Values::operands(limits.max_operand_values);
+        let mut entries = Vec::new();
         loop {
             match lexer.next_token()? {
                 Some(Token::Keyword(b"ID")) => break,
@@ -998,13 +1045,9 @@ impl Interpreter<'_, '_> {
                     let token = lexer.next_token()?.ok_or_else(|| {
                         Error::malformed("an inline image's dictionary does not end")
                     })?;
-                    let value = parse_from(token, lexer, false, max_nesting, 0)?;
-                    if dict.contains(&key) {
-                        return Err(Error::malformed(
-                            "an inline image's dictionary has the same key twice",
-                        ));
-                    }
-                    dict.set(key, value);
+                    let value =
+                        parse_from(token, lexer, false, limits.max_nesting, 0, &mut values)?;
+                    entries.push((key, value));
                 }
                 _ => {
                     return Err(Error::malformed(
@@ -1013,6 +1056,9 @@ impl Interpreter<'_, '_> {
                 }
             }
         }
+        let dict = Dict::from_entries(entries).ok_or_else(|| {
+            Error::malformed("an inline image's dictionary has the same key twice")
+        })?;
         // `ID` is followed by one white-space byte, then the data.
         let start = lexer.position();
         let data = lexer.data();
@@ -1040,6 +1086,19 @@ impl Interpreter<'_, '_> {
         lexer.seek(after + 2);
         self.image()
     }
+}
+
+/// The entry `key` of a resource category, borrowed.
+fn entry<'c>(category: &'c Value<'_>, key: &[u8], what: &str) -> Result<&'c Object, Error> {
+    category
+        .dict()
+        .and_then(|entries| entries.get(key))
+        .ok_or_else(|| not_named(what))
+}
+
+/// The error for a resource that the resources do not name.
+fn not_named(what: &str) -> Error {
+    Error::malformed(format!("a {what} that the resources do not name"))
 }
 
 /// The length in bytes of an inline image's data, from its dictionary: unfiltered data has exactly its size, and ASCIIHexDecode and ASCII85Decode end at their end markers. Other filters give no length, and are refused.
@@ -1221,4 +1280,65 @@ fn thin_rectangle(path: &Path) -> Option<(f64, f64, f64, f64)> {
         (height, width)
     };
     (thin <= MAX_RULE_THICKNESS && long >= 2.0 * thin && long > 0.0).then_some((x0, y0, x1, y1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pdf::object::Ref;
+    use crate::pdf::{Limits, test_pdf};
+
+    #[test]
+    fn resource_lookups_borrow_and_never_copy() {
+        // The resources and their fonts are indirect objects, as the file's cache keeps them.
+        let data = test_pdf(&[
+            "<< /Font 2 0 R >>",
+            "<< /F1 << /Type /Font >> /F2 3 0 R >>",
+            "<< /Type /Font >>",
+        ]);
+        let mut file = File::open(&data, Limits::DEFAULT).unwrap();
+        let resources = file
+            .get(Ref {
+                number: 1,
+                generation: 0,
+            })
+            .unwrap();
+        let fonts = file
+            .get(Ref {
+                number: 2,
+                generation: 0,
+            })
+            .unwrap();
+        let (mut font_cache, mut counters) = (FontCache::default(), Counters::default());
+        let mut interpreter = Interpreter {
+            file: &mut file,
+            fonts: &mut font_cache,
+            counters: &mut counters,
+            page: Matrix::IDENTITY,
+            state: State::default(),
+            saved: Vec::new(),
+            floor: 0,
+            text: None,
+            path: Path::default(),
+            held_segments: 0,
+            drawn: Drawn::default(),
+            form_depth: 0,
+            marked: 0,
+            compatibility: 0,
+        };
+        let category = interpreter
+            .category(resources.as_dict(), b"Font", "font")
+            .unwrap();
+        // The category is the very dictionary in the file's cache, and an entry is borrowed from it: a lookup copies nothing, however large the dictionary.
+        let cached = fonts.as_dict().unwrap();
+        assert!(core::ptr::eq(category.dict().unwrap(), cached));
+        assert!(core::ptr::eq(
+            entry(&category, b"F1", "font").unwrap(),
+            cached.get(b"F1").unwrap()
+        ));
+        assert_eq!(
+            entry(&category, b"F3", "font").unwrap_err(),
+            Error::malformed("a font that the resources do not name")
+        );
+    }
 }

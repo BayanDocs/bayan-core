@@ -204,6 +204,47 @@ fn rotated_pages_and_crop_boxes_give_the_page_as_displayed() {
 }
 
 #[test]
+fn pages_turned_180_and_270_degrees_give_the_page_as_displayed() {
+    // The crop box of the test above, turned upside down: the page is 500 wide and 600 high, and text that is upright on it runs right to left, upside down, on the unrotated page.
+    let pdf = one_page_with(
+        "BT /F1 10 Tf -1 0 0 -1 300 200 Tm (Ro) Tj ET",
+        "",
+        "/CropBox [50 100 550 700] /Rotate 180",
+    );
+    let layout = extract(&pdf).layout;
+    let page = &layout.pages[0];
+    assert_eq!(
+        (page.width.to_points(), page.height.to_points()),
+        (500.0, 600.0)
+    );
+    let glyphs = page.lines[0].glyphs.as_deref().unwrap();
+    // The origin (300, 200) is 550 - 300 = 250 from the displayed left edge (the unrotated right edge) and 200 - 100 = 100 from its top (the unrotated bottom edge); the next glyph is 5 points further right.
+    assert_glyph(&glyphs[0], 250.0, 100.0, 5.0, 10.0);
+    assert_glyph(&glyphs[1], 255.0, 100.0, 5.0, 10.0);
+    // Turned 270 degrees clockwise, the page is 600 wide and 500 high, and upright text runs down the unrotated page.
+    let turned = |rotate: &str| {
+        extract(&one_page_with(
+            "BT /F1 10 Tf 0 -1 1 0 300 200 Tm (Ro) Tj ET",
+            "",
+            &format!("/CropBox [50 100 550 700] /Rotate {rotate}"),
+        ))
+        .layout
+    };
+    let layout = turned("270");
+    let page = &layout.pages[0];
+    assert_eq!(
+        (page.width.to_points(), page.height.to_points()),
+        (600.0, 500.0)
+    );
+    let glyphs = page.lines[0].glyphs.as_deref().unwrap();
+    // The origin (300, 200) is 700 - 200 = 500 from the displayed left edge (the unrotated top edge) and 550 - 300 = 250 from its top (the unrotated right edge).
+    assert_glyph(&glyphs[0], 500.0, 250.0, 5.0, 10.0);
+    assert_glyph(&glyphs[1], 505.0, 250.0, 5.0, 10.0);
+    // A quarter turn counterclockwise is the same page.
+    assert_eq!(turned("-90"), layout);
+}
+
+#[test]
 fn invisible_text_is_counted_and_left_off_the_lines() {
     let extraction = extract(&one_page(
         "BT /F1 10 Tf 100 700 Td 3 Tr (hidden) Tj 0 Tr (shown) Tj ET",

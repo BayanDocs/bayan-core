@@ -6,6 +6,7 @@
 
 mod hostile;
 mod known_tools;
+mod limits;
 mod positions;
 mod reading_order;
 mod schema;

@@ -161,3 +161,24 @@ fn right_to_left_paragraphs_are_grouped_into_lines_by_baseline() {
     assert_eq!(lines(&layout)[0].baseline.unwrap().to_points(), 100.0);
     assert_eq!(lines(&layout)[1].baseline.unwrap().to_points(), 114.0);
 }
+
+#[test]
+fn a_line_whose_display_does_not_tell_its_reading_order() {
+    // The left-to-right paragraph "רחוב 15 in" displays as "15 בוחר in", and so does the right-to-left text "in רחוב 15": the same glyphs at the same places. The PDF does not say which was written; the extractor reads the line by its majority of right-to-left letters, so it returns the second (`layout-json.md`, "Lines from a PDF", and its known differences). Only the document, or a tagged PDF's structure, could tell.
+    let shown = [31_u16, 35, 40, 2, 6, 8, 25];
+    let content = format!(
+        "{}BT /F1 10 Tf 160 700 Td ( in) Tj ET\n",
+        draw(&shown, 100.0, 700.0)
+    );
+    let layout = extract(&one_page(&content)).layout;
+    let [line] = lines(&layout) else {
+        panic!("one line")
+    };
+    // רחוב: resh, het, vav, bet.
+    let street = hebrew(&[25, 8, 6, 2]);
+    assert_eq!(
+        line.text.as_deref(),
+        Some(format!("in {street} 15").as_str())
+    );
+    assert_eq!(line.direction, Some(Direction::Rtl));
+}

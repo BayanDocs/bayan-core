@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use super::file::File;
-use super::object::{Dict, Object, Ref};
+use super::object::{Object, Ref};
 use super::{Error, Limit};
 
 /// A rectangle in default user space, normalized so that `x0 < x1` and `y0 < y1`.
@@ -23,27 +23,54 @@ pub(crate) struct PageInfo {
     pub(crate) number: usize,
     /// The page dictionary.
     pub(crate) dict: Rc<Object>,
-    /// The page's resource dictionary (or a reference to it), if it has one.
-    pub(crate) resources: Option<Object>,
+    /// The page's resource dictionary (or a reference to it), if it has one: shared with the node that holds it.
+    pub(crate) resources: Option<Attribute>,
     /// The visible area: the crop box, clipped to the media box.
     pub(crate) visible: Rect,
     /// The clockwise rotation for display: 0, 90, 180 or 270 degrees.
     pub(crate) rotate: u16,
 }
 
+/// An attribute of a page, held by the page or by the page tree node it inherits it from, and shared with that node rather than copied: however many pages inherit a large attribute, it is in memory once.
+#[derive(Clone, Debug)]
+pub(crate) struct Attribute {
+    /// The node that holds it, as the file's cache keeps it.
+    node: Rc<Object>,
+    /// Its key in the node's dictionary.
+    key: &'static [u8],
+}
+
+impl Attribute {
+    /// The attribute of `node` under `key`, if the node has one.
+    fn of(node: &Rc<Object>, key: &'static [u8]) -> Option<Self> {
+        node.as_dict()
+            .is_some_and(|dict| dict.contains(key))
+            .then(|| Self {
+                node: Rc::clone(node),
+                key,
+            })
+    }
+
+    /// The attribute's value as the node holds it: an object or a reference to one.
+    pub(crate) fn value(&self) -> Option<&Object> {
+        self.node.as_dict().and_then(|dict| dict.get(self.key))
+    }
+}
+
 /// The attributes a page inherits from its ancestors (§7.7.3.4).
 #[derive(Clone, Default)]
 struct Inherited {
-    resources: Option<Object>,
-    media_box: Option<Object>,
-    crop_box: Option<Object>,
-    rotate: Option<Object>,
+    resources: Option<Attribute>,
+    media_box: Option<Attribute>,
+    crop_box: Option<Attribute>,
+    rotate: Option<Attribute>,
 }
 
 impl Inherited {
-    fn update(&self, dict: &Dict) -> Self {
-        let pick = |key: &[u8], current: &Option<Object>| {
-            dict.get(key).cloned().or_else(|| current.clone())
+    /// The attributes below `node`: its own, else those it inherits.
+    fn update(&self, node: &Rc<Object>) -> Self {
+        let pick = |key: &'static [u8], current: &Option<Attribute>| {
+            Attribute::of(node, key).or_else(|| current.clone())
         };
         Self {
             resources: pick(b"Resources", &self.resources),
@@ -129,10 +156,10 @@ fn walk(
                 node.number
             ))
         })?;
-    let inherited = inherited.update(dict);
+    let inherited = inherited.update(&object);
     if dict.has_name(b"Type", b"Pages") {
         let kids = match dict.get(b"Kids") {
-            Some(kids) => (*file.resolve(kids)?).clone(),
+            Some(kids) => file.resolve(kids)?,
             None => {
                 return Err(Error::malformed(format!(
                     "page tree node {} has no `Kids`",
@@ -140,14 +167,14 @@ fn walk(
                 )));
             }
         };
-        let Object::Array(kids) = kids else {
-            return Err(Error::malformed(format!(
+        let kids = kids.as_array().ok_or_else(|| {
+            Error::malformed(format!(
                 "the `Kids` of page tree node {} are not an array",
                 node.number
-            )));
-        };
+            ))
+        })?;
         for kid in kids {
-            let Object::Ref(kid) = kid else {
+            let &Object::Ref(kid) = kid else {
                 return Err(Error::malformed(format!(
                     "page tree node {} has a kid that is not a reference",
                     node.number
@@ -188,11 +215,11 @@ fn page_info(
     {
         return Err(Error::unsupported("a user unit other than 1 (`UserUnit`)"));
     }
-    let media_box = match &inherited.media_box {
+    let media_box = match inherited.media_box.as_ref().and_then(Attribute::value) {
         Some(object) => rect(file, object)?,
         None => return Err(Error::malformed("the page has no media box")),
     };
-    let crop_box = match &inherited.crop_box {
+    let crop_box = match inherited.crop_box.as_ref().and_then(Attribute::value) {
         Some(object) => rect(file, object)?,
         None => media_box,
     };
@@ -224,7 +251,7 @@ fn page_info(
             "the page's crop box lies outside its media box",
         ));
     }
-    let rotate = match &inherited.rotate {
+    let rotate = match inherited.rotate.as_ref().and_then(Attribute::value) {
         None => 0,
         Some(object) => {
             let value = file
@@ -271,4 +298,52 @@ fn rect(file: &mut File<'_>, object: &Object) -> Result<Rect, Error> {
         x1: if ax < bx { bx } else { ax },
         y1: if ay < by { by } else { ay },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pdf::object::Dict;
+    use crate::pdf::{Limits, test_pdf};
+
+    #[test]
+    fn inherited_attributes_are_shared_not_copied() {
+        // The root node holds the resources and the media box directly; two of its three pages inherit them.
+        let data = test_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 600 800] /Resources << /Font << /F1 6 0 R >> >> >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /Resources << >> >>",
+            "<< /Type /Font >>",
+        ]);
+        let mut file = File::open(&data, Limits::DEFAULT).unwrap();
+        let pages = collect(&mut file).unwrap();
+        let resources: Vec<&Object> = pages
+            .iter()
+            .map(|page| page.resources.as_ref().and_then(Attribute::value).unwrap())
+            .collect();
+        // The pages that inherit the resources see the very object of the root node, not copies of it.
+        assert!(core::ptr::eq(resources[0], resources[1]));
+        let root = file
+            .get(Ref {
+                number: 2,
+                generation: 0,
+            })
+            .unwrap();
+        assert!(core::ptr::eq(
+            resources[0],
+            root.as_dict().unwrap().get(b"Resources").unwrap()
+        ));
+        // A page's own attribute replaces the inherited one.
+        assert!(!core::ptr::eq(resources[0], resources[2]));
+        assert_eq!(resources[2], &Object::Dict(Dict::default()));
+        let whole = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 600.0,
+            y1: 800.0,
+        };
+        assert!(pages.iter().all(|page| page.visible == whole));
+    }
 }

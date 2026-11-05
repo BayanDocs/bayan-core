@@ -58,12 +58,18 @@ pub(crate) const fn hex_value(byte: u8) -> Option<u8> {
 pub(crate) struct Lexer<'a> {
     data: &'a [u8],
     position: usize,
+    /// The furthest position the lexer has been at before it last moved back.
+    furthest: usize,
 }
 
 impl<'a> Lexer<'a> {
     /// A lexer at `position` of `data`.
     pub(crate) const fn new(data: &'a [u8], position: usize) -> Self {
-        Self { data, position }
+        Self {
+            data,
+            position,
+            furthest: position,
+        }
     }
 
     /// The position of the next byte.
@@ -71,8 +77,18 @@ impl<'a> Lexer<'a> {
         self.position
     }
 
+    /// The furthest position the lexer has reached, also when it has moved back since, as it does after looking ahead for what was not there: everything before it has been read, some bytes more than once (a few times at most), and the reader counts it as read.
+    pub(crate) const fn furthest(&self) -> usize {
+        if self.position > self.furthest {
+            self.position
+        } else {
+            self.furthest
+        }
+    }
+
     /// Moves to `position`.
     pub(crate) const fn seek(&mut self, position: usize) {
+        self.furthest = self.furthest();
         self.position = position;
     }
 
@@ -330,7 +346,7 @@ impl<'a> Lexer<'a> {
         if matches {
             self.position = end;
         } else {
-            self.position = saved;
+            self.seek(saved);
         }
         matches
     }
@@ -467,5 +483,20 @@ mod tests {
         let mut lexer = Lexer::new(b"endobjx", 0);
         assert!(!lexer.eat_keyword(b"endobj"));
         assert_eq!(lexer.position(), 0);
+    }
+
+    #[test]
+    fn remembers_how_far_it_has_read() {
+        // Looking for a keyword that is not there reads the white space and the comment before it, and then goes back.
+        let mut lexer = Lexer::new(b"1 % a comment\n2", 1);
+        assert!(!lexer.eat_keyword(b"R"));
+        assert_eq!(lexer.position(), 1);
+        assert_eq!(lexer.furthest(), 14);
+        // Going back by seeking keeps the mark too, and reading on moves it.
+        lexer.seek(0);
+        assert_eq!(lexer.furthest(), 14);
+        assert_eq!(lexer.next_token().unwrap(), Some(Token::Integer(1)));
+        assert_eq!(lexer.next_token().unwrap(), Some(Token::Integer(2)));
+        assert_eq!(lexer.furthest(), 15);
     }
 }

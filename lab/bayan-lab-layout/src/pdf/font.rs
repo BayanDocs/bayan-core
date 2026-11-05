@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::cmap::{ToUnicode, displayable};
 use super::encoding::BaseEncoding;
-use super::file::File;
+use super::file::{File, Value};
 use super::glyph_names;
 use super::object::{Dict, Object, Ref};
 use super::{Error, Limit};
@@ -83,28 +83,30 @@ pub(crate) struct GlyphInfo {
 }
 
 impl Font {
-    /// The character codes of a string shown with this font, with their lengths in bytes.
+    /// The character codes of a string shown with this font, with their lengths in bytes, one after the other: nothing is collected, however long the string.
     ///
     /// # Errors
     ///
     /// [`Error::Malformed`] for a string of a two-byte font with an odd number of bytes.
-    pub(crate) fn codes(&self, bytes: &[u8]) -> Result<Vec<(u32, u8)>, Error> {
-        match self.kind {
-            Kind::Simple { .. } => Ok(bytes.iter().map(|&byte| (u32::from(byte), 1)).collect()),
-            Kind::Composite { .. } => {
-                if !bytes.len().is_multiple_of(2) {
-                    return Err(Error::malformed(
-                        "a string shown with a two-byte font has an odd number of bytes",
-                    ));
-                }
-                Ok(bytes
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&pair| (u32::from(u16::from_be_bytes(pair)), 2))
-                    .collect())
-            }
+    pub(crate) fn codes<'s>(
+        &self,
+        bytes: &'s [u8],
+    ) -> Result<impl Iterator<Item = (u32, u8)> + use<'s>, Error> {
+        let length: u8 = match self.kind {
+            Kind::Simple { .. } => 1,
+            Kind::Composite { .. } => 2,
+        };
+        if !bytes.len().is_multiple_of(usize::from(length)) {
+            return Err(Error::malformed(
+                "a string shown with a two-byte font has an odd number of bytes",
+            ));
         }
+        Ok(bytes.chunks_exact(usize::from(length)).map(move |code| {
+            let value = code
+                .iter()
+                .fold(0_u32, |value, &byte| (value << 8) | u32::from(byte));
+            (value, length)
+        }))
     }
 
     /// What the code `code` of `length` bytes shows.
@@ -254,9 +256,8 @@ impl FontCache {
             Some(value) => {
                 let stream = value
                     .as_stream()
-                    .ok_or_else(|| Error::malformed("a font's `ToUnicode` is not a stream"))?
-                    .clone();
-                let data = file.stream_data(&stream)?;
+                    .ok_or_else(|| Error::malformed("a font's `ToUnicode` is not a stream"))?;
+                let data = file.stream_data(stream)?;
                 let mut left = self.entries_left(file);
                 let before = left;
                 let map = ToUnicode::parse(&data, &mut left, file.limits().max_nesting)?;
@@ -307,9 +308,7 @@ impl FontCache {
         };
         let widths_items = widths_value
             .as_array()
-            .ok_or_else(|| Error::malformed("a font's `Widths` is not an array"))?
-            .to_vec();
-        drop(widths_value);
+            .ok_or_else(|| Error::malformed("a font's `Widths` is not an array"))?;
         let first = integer_entry(file, dict, b"FirstChar")?;
         let last = integer_entry(file, dict, b"LastChar")?;
         let (Ok(first), Ok(last)) = (u32::try_from(first), u32::try_from(last)) else {
@@ -328,11 +327,12 @@ impl FontCache {
         }
         self.spend(file, widths_items.len())?;
         let mut widths = Vec::with_capacity(widths_items.len());
-        for item in &widths_items {
+        for item in widths_items {
             widths.push(number(file, item, "a font's `Widths`")?);
         }
         let descriptor = descriptor(file, dict)?;
-        let missing = match &descriptor {
+        let descriptor = descriptor.as_ref().and_then(Value::dict);
+        let missing = match descriptor {
             Some(descriptor) => match descriptor.get(b"MissingWidth") {
                 Some(width) => number(file, width, "a font's `MissingWidth`")?,
                 None => 0.0,
@@ -351,7 +351,7 @@ impl FontCache {
             None if type3 => "Type3".to_owned(),
             None => return Err(Error::malformed("a font has no `BaseFont`")),
         };
-        let family = family(file, descriptor.as_ref())?;
+        let family = family(file, descriptor)?;
         Ok((
             Kind::Simple {
                 first,
@@ -375,9 +375,8 @@ impl FontCache {
         let Some(value) = file.lookup(dict, b"Encoding")? else {
             return Ok((None, BTreeMap::new()));
         };
-        let value = (*value).clone();
-        match value {
-            Object::Name(name) => Ok((Some(base_encoding(&name)?), BTreeMap::new())),
+        match &*value {
+            Object::Name(name) => Ok((Some(base_encoding(name)?), BTreeMap::new())),
             Object::Dict(encoding) => {
                 let base = match encoding.get(b"BaseEncoding") {
                     None => None,
@@ -389,16 +388,13 @@ impl FontCache {
                     }
                 };
                 let mut differences = BTreeMap::new();
-                if let Some(list) = file.lookup(&encoding, b"Differences")? {
-                    let list = list
-                        .as_array()
-                        .ok_or_else(|| {
-                            Error::malformed("an encoding's `Differences` is not an array")
-                        })?
-                        .to_vec();
+                if let Some(list) = file.lookup(encoding, b"Differences")? {
+                    let list = list.as_array().ok_or_else(|| {
+                        Error::malformed("an encoding's `Differences` is not an array")
+                    })?;
                     self.spend(file, list.len())?;
                     let mut code: Option<u32> = None;
-                    for item in &list {
+                    for item in list {
                         match item {
                             Object::Integer(value) => {
                                 code = Some(u32::try_from(*value).ok().filter(|&value| value <= 255).ok_or_else(|| {
@@ -411,11 +407,17 @@ impl FontCache {
                                         "an encoding's `Differences` starts with a name",
                                     ));
                                 };
+                                // Codes are single bytes: a run of names may not count past 255.
+                                if current > 255 {
+                                    return Err(Error::malformed(
+                                        "an encoding's `Differences` runs past code 255",
+                                    ));
+                                }
                                 let text = glyph_names::characters(name)
                                     .filter(|text| text.chars().all(displayable))
                                     .unwrap_or_else(|| char::REPLACEMENT_CHARACTER.to_string());
                                 differences.insert(current, text.into_boxed_str());
-                                code = Some(current + 1);
+                                code = current.checked_add(1);
                             }
                             _ => {
                                 return Err(Error::malformed(
@@ -453,17 +455,14 @@ impl FontCache {
             }
             None => return Err(Error::malformed("a composite font has no `Encoding`")),
         }
-        let descendants = match file.lookup(dict, b"DescendantFonts")? {
-            Some(value) => value.as_array().map(<[Object]>::to_vec),
-            None => None,
-        };
-        let Some([descendant]) = descendants.as_deref() else {
+        let descendants = file.lookup(dict, b"DescendantFonts")?;
+        let Some([descendant]) = descendants.as_ref().and_then(|value| value.as_array()) else {
             return Err(Error::malformed(
                 "a composite font does not have exactly one descendant font",
             ));
         };
-        let descendant = (*file.resolve(descendant)?).clone();
-        let Object::Dict(cid_font) = descendant else {
+        let descendant = file.resolve(descendant)?;
+        let Some(cid_font) = descendant.dict() else {
             return Err(Error::malformed(
                 "a composite font's descendant is not a dictionary",
             ));
@@ -481,23 +480,21 @@ impl FontCache {
             Some(width) => number(file, width, "a CIDFont's `DW`")?,
             None => 1000.0,
         };
-        let widths = match file.lookup(&cid_font, b"W")? {
+        let widths = match file.lookup(cid_font, b"W")? {
             None => BTreeMap::new(),
             Some(value) => {
                 let items = value
                     .as_array()
-                    .ok_or_else(|| Error::malformed("a CIDFont's `W` is not an array"))?
-                    .to_vec();
-                self.cid_widths(file, &items)?
+                    .ok_or_else(|| Error::malformed("a CIDFont's `W` is not an array"))?;
+                self.cid_widths(file, items)?
             }
         };
         let cid_to_gid = if type2 {
-            match file.lookup(&cid_font, b"CIDToGIDMap")?.as_deref() {
+            match file.lookup(cid_font, b"CIDToGIDMap")?.as_deref() {
                 None => CidToGid::Identity,
                 Some(Object::Name(name)) if name == b"Identity" => CidToGid::Identity,
                 Some(Object::Stream(stream)) => {
-                    let stream = stream.clone();
-                    let data = file.stream_data(&stream)?;
+                    let data = file.stream_data(stream)?;
                     if !data.len().is_multiple_of(2) {
                         return Err(Error::malformed(
                             "a `CIDToGIDMap` has an odd number of bytes",
@@ -525,8 +522,8 @@ impl FontCache {
             Some(Object::Name(name)) => clean_name(name),
             _ => return Err(Error::malformed("a composite font has no `BaseFont`")),
         };
-        let descriptor = descriptor(file, &cid_font)?;
-        let family = family(file, descriptor.as_ref())?;
+        let descriptor = descriptor(file, cid_font)?;
+        let family = family(file, descriptor.as_ref().and_then(Value::dict))?;
         Ok((
             Kind::Composite {
                 default,
@@ -574,10 +571,9 @@ impl FontCache {
                     let Object::Array(list) = &*list else {
                         return Err(malformed());
                     };
-                    let list = list.clone();
                     self.spend(file, list.len().max(1))?;
                     let mut widths = Vec::with_capacity(list.len());
-                    for item in &list {
+                    for item in list {
                         widths.push(number(file, item, "a CIDFont's `W`")?);
                     }
                     let count = u32::try_from(widths.len()).map_err(|_| malformed())?;
@@ -667,16 +663,14 @@ fn font_matrix_scale(file: &mut File<'_>, dict: &Dict) -> Result<f64, Error> {
     Ok(a)
 }
 
-/// A font's descriptor, if it has one.
-fn descriptor(file: &mut File<'_>, dict: &Dict) -> Result<Option<Dict>, Error> {
+/// A font's descriptor, if it has one, borrowed (read it with [`Value::dict`]).
+fn descriptor<'d>(file: &mut File<'_>, dict: &'d Dict) -> Result<Option<Value<'d>>, Error> {
     match file.lookup(dict, b"FontDescriptor")? {
         None => Ok(None),
-        Some(value) => match &*value {
-            Object::Dict(descriptor) => Ok(Some(descriptor.clone())),
-            _ => Err(Error::malformed(
-                "a font's `FontDescriptor` is not a dictionary",
-            )),
-        },
+        Some(value) if value.dict().is_some() => Ok(Some(value)),
+        Some(_) => Err(Error::malformed(
+            "a font's `FontDescriptor` is not a dictionary",
+        )),
     }
 }
 
