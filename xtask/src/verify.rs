@@ -1173,6 +1173,25 @@ mod tests {
         );
     }
 
+    /// The fuzz workspace builds bayan-crdt, and with it Loro, so it needs the advisory exceptions of Loro's dependencies that ADR-0008's amendment of 2026-10-08 accepts (CORE-010), and no other: its `deny.toml` copies the main policy's, with the same reasons, so that the two policies differ only by libFuzzer's NCSA license.
+    #[test]
+    fn the_fuzz_workspace_ignores_the_same_advisories() {
+        fn ignored(text: &str) -> Vec<&str> {
+            let start = text
+                .find("\nignore = [\n")
+                .expect("a deny.toml without advisory exceptions; update this test");
+            let rest = &text[start + "\nignore = [\n".len()..];
+            let end = rest
+                .find("\n]\n")
+                .expect("an advisory list that does not end; update this test");
+            rest[..end].lines().map(str::trim).collect()
+        }
+        let main = include_str!("../../deny.toml").replace("\r\n", "\n");
+        let fuzz = include_str!("../../fuzz/deny.toml").replace("\r\n", "\n");
+        assert!(!ignored(&main).is_empty());
+        assert_eq!(ignored(&fuzz), ignored(&main));
+    }
+
     #[test]
     fn reads_tool_versions() {
         assert_eq!(
@@ -1198,7 +1217,7 @@ mod tests {
         );
     }
 
-    /// The fuzzing workflow builds the fuzz workspace's dependencies, whose build scripts and procedural macros run code, in parallel with the gate, so it runs the gate's supply-chain checks first, after checking out the full history that the age check needs (bayan-core#22).
+    /// The fuzzing workflow builds the fuzz workspace's dependencies, whose build scripts and procedural macros run code, in parallel with the gate, so it runs the gate's supply-chain checks first, after checking out the full history that the age check needs (bayan-core#22), before it fetches, builds or tests anything of that workspace (the tests of the targets' harness too, CORE-010).
     #[test]
     fn the_fuzz_workflow_runs_the_supply_chain_checks_before_it_builds() {
         let workflow = include_str!("../../.github/workflows/fuzz.yml");
@@ -1208,14 +1227,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("fuzz.yml no longer contains `{text}`; update this test"))
         };
         let first_build = position("\"+$FUZZ_TOOLCHAIN\" fetch --locked")
-            .min(position("\"+$FUZZ_TOOLCHAIN\" fuzz build"));
+            .min(position("\"+$FUZZ_TOOLCHAIN\" fuzz build"))
+            .min(position("\"+$FUZZ_TOOLCHAIN\" test --locked"));
         for check in [
             "run: cargo xtask check-exact-pins",
             "run: cargo xtask check-lockfile-age",
         ] {
             assert!(
                 position(check) < first_build,
-                "fuzz.yml must run `{check}` before it fetches or builds the fuzz workspace"
+                "fuzz.yml must run `{check}` before it fetches, builds or tests the fuzz workspace"
             );
         }
         assert!(position("fetch-depth: 0") < position("run: cargo xtask check-lockfile-age"));

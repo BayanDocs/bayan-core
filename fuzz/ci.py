@@ -94,6 +94,19 @@ TARGETS: Dict[str, Target] = {
     "crdt_import": Target(None, 64 << 10, 10, 1, None, long_inputs=True),
 }
 
+# How many targets `run` fuzzes at a time unless --jobs says otherwise: the four processors of GitHub's runners.
+JOBS = 4
+
+
+def rounds(shares: Sequence[int], jobs: int = JOBS) -> int:
+    """How long `run` takes, in multiples of --seconds, for targets with these shares, `jobs` at a time and the longest first, as `run` schedules them: after that, every target has had its full time."""
+    finish = [0] * max(jobs, 1)
+    for share in sorted(shares, reverse=True):
+        slot = finish.index(min(finish))
+        finish[slot] += share
+    return max(finish)
+
+
 # How libFuzzer names the inputs it keeps, by what went wrong, and the kind of failure that ci.py reports for each: the only thing it shows about a failure. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
 FAILURE_PREFIXES = {"crash-": "crash", "timeout-": "timeout", "oom-": "out of memory", "leak-": "leak"}
 
@@ -637,7 +650,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         command.add_argument("targets", nargs="*")
         command.add_argument("--all", action="store_true", help="every target")
         command.add_argument("--work", type=Path, default=FUZZ, help="the folder of corpus/, artifacts/ and logs/ (default: this folder, as cargo-fuzz uses it)")
-        command.add_argument("--jobs", type=int, default=4, help="how many targets run at the same time (default 4)")
+        command.add_argument("--jobs", type=int, default=JOBS, help=f"how many targets run at the same time (default {JOBS})")
         command.add_argument("--binaries", type=Path, default=BINARIES, help="where cargo-fuzz built the targets")
         if name == "run":
             command.add_argument("--seconds", type=int, required=True, help="how long a target with a share of 1 runs")

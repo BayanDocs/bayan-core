@@ -1,15 +1,24 @@
 # cargo-deny configuration of the fuzz workspace (ADR-0017), checked by `cargo xtask verify` together with the main workspace's deny.toml, on every pull request and every night.
-# It is the main policy with one addition: the NCSA license of libFuzzer, which the owner accepted for fuzzing dependencies that never ship (ADR-0017, amendment of 2026-10-08). The exception lives here and only here, never in the main workspace's deny.toml, and only for the one crate that needs it.
+# It is the main policy with one addition: the NCSA license of libFuzzer, which the owner accepted for fuzzing dependencies that never ship (ADR-0017, amendment of 2026-10-08). The exception lives here and only here, never in the main workspace's deny.toml, and only for the one crate that needs it. Since the fuzz workspace builds bayan-crdt, and with it Loro (CORE-010), it also needs the main policy's advisory exceptions for Loro's dependencies, copied with the same reasons; an xtask test (the_fuzz_workspace_ignores_the_same_advisories) keeps the two lists equal.
 
 [graph]
 # Check the dependencies of every feature, so nothing escapes the check by hiding behind an optional feature.
 all-features = true
 
 [advisories]
-# Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version, as in the main workspace. The fuzz workspace has no exceptions.
+# Every RustSec advisory (vulnerable, unsound or unmaintained crate) fails the check, and so does a yanked version, as in the main workspace, with the main workspace's exceptions and no other.
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
+# Exceptions added by the CORE-004 spike for crates that Loro 1.16.2 (ADR-0008) pulls in, accepted by the owner on 2026-10-08 (ADR-0008, amendment 2026-10-08; spikes/crdt-model/REPORT.md §10, question 4). None of these crates has a fixed version: im, sized-chunks and bitmaps were archived on 2026-05-03, and atomic-polyfill in 2023. Four advisories say a crate is unmaintained; two say it is unsound (undefined behaviour reachable from safe code), and their reasons explain why Loro does not reach the affected code. Every monthly dependency session re-checks them (the docs repository's developer/dependency-update-runbook.md): each reason must still hold, and each is removed as soon as Loro no longer needs its crate (Loro is asked to move to the maintained replacements, imbl and imbl-sized-chunks).
+ignore = [
+  { id = "RUSTSEC-2026-0248", reason = "im 15.1.0 is unmaintained; its maintained fork is imbl. Outside its tests Loro uses only im::HashMap<PeerID, Counter> (loro-internal src/version.rs, ImVersionVector); the unsound OrdSet is RUSTSEC-2023-0126 below." },
+  { id = "RUSTSEC-2023-0126", reason = "im 15.1.0 is unsound when inserting into an OrdSet (an aliasing violation in sized_chunks::Chunk::force_copy). No Loro crate uses OrdSet at all (loro-internal 1.16.2 has none, tests and features included); the im::HashMap it uses is built on SparseChunk, not Chunk." },
+  { id = "RUSTSEC-2026-0251", reason = "sized-chunks 0.6.5 is unmaintained; its maintained fork is imbl-sized-chunks. Used only by im (see RUSTSEC-2026-0248); its unsound Chunk is RUSTSEC-2026-0255 below." },
+  { id = "RUSTSEC-2026-0255", reason = "sized-chunks 0.6.5: Chunk, RingBuffer and InlineArray free an element twice when the element's Drop panics. Loro reaches sized-chunks only through im::HashMap<PeerID, Counter>, which uses SparseChunk (not affected) and stores integers, whose Drop cannot panic; RingBuffer is not even compiled (its feature is off)." },
+  { id = "RUSTSEC-2026-0247", reason = "bitmaps 2.1.0 is unmaintained. Used only by im and sized-chunks (see above); it has no other advisory." },
+  { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill (unmaintained since 2023): heapless 0.7, which postcard uses inside Loro, depends on it only for avr, riscv32, thumbv6m and xtensa microcontroller targets, so it is never compiled for any BayanDocs platform (`cargo tree -i atomic-polyfill --target <triple>` is empty for Linux, macOS, Windows and wasm32); cargo-deny lists it because it checks every target." },
+]
 
 [licenses]
 # The license allowlist of ADR-0017 §8, the same as the main workspace's.

@@ -7,7 +7,9 @@ import base64
 import contextlib
 import hashlib
 import io
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -166,6 +168,14 @@ class Targets(Isolated):
             if target.dictionary:
                 self.assertTrue((ci.FUZZ / "dictionaries" / target.dictionary).is_file(), name)
 
+    def test_the_engine_and_crdt_targets_have_their_settings(self) -> None:
+        for name in ("engine_messages", "engine_tile", "engine_config", "engine_replay"):
+            target = ci.TARGETS[name]
+            self.assertEqual((target.dictionary, target.max_len, target.share, target.long_inputs), ("engine.dict", 64 << 10, 1, False), name)
+        # crdt_import's custom mutator makes its own seeds from real editing, and returns whole blobs from the start.
+        crdt = ci.TARGETS["crdt_import"]
+        self.assertEqual((crdt.seeds, crdt.dictionary, crdt.long_inputs), (None, None, True))
+
     def test_the_default_limits_targets_get_long_inputs_and_more_time(self) -> None:
         for name in ("zip_archive_default_limits", "package_default_limits"):
             target = ci.TARGETS[name]
@@ -204,6 +214,24 @@ class Seeds(Isolated):
                 self.assertLessEqual(len(data), target.max_len, f"{name}/{seed.name}")
         for seed in (self.folder / "markup_compatibility").iterdir():
             self.assertIn(seed.read_bytes()[0], ci.MC_CONFIGURATIONS)
+        self.assertEqual(counts["crdt_import"], 0)
+        # Sessions of messages, one per line, every line JSON but those written to be refused.
+        self.assertEqual(counts["engine_messages"], len(ci.engine_sessions()))
+        for seed in (self.folder / "engine_messages").iterdir():
+            lines = seed.read_bytes().split(b"\n")
+            parsed = [json.loads(line) for line in lines if line not in (b"not json",)]
+            self.assertGreater(len(parsed), 3, seed.name)
+            self.assertTrue(all(isinstance(message, (dict, list)) for message in parsed), seed.name)
+        # A flags byte, the tile's size and a request.
+        self.assertEqual(counts["engine_tile"], len(ci.tile_requests()))
+        for seed in (self.folder / "engine_tile").iterdir():
+            self.assertTrue(seed.read_bytes()[5:].startswith(b'{"doc_id":'), seed.name)
+        self.assertEqual(counts["engine_config"], len(ci.configurations()))
+        recordings = sorted(ci.RECORDINGS.glob("*.json"))
+        self.assertGreater(len(recordings), 0)
+        self.assertEqual(counts["engine_replay"], len(recordings))
+        for seed in (self.folder / "engine_replay").iterdir():
+            self.assertEqual(json.loads(seed.read_bytes())["format"], "bayan-engine-recording", seed.name)
         for name in ("content_types", "relationships", "core_properties", "xml_reader"):
             for seed in (self.folder / name).iterdir():
                 self.assertTrue(seed.read_bytes().lstrip(b"\xef\xbb\xbf").startswith(b"<"), f"{name}/{seed.name}")
@@ -211,6 +239,40 @@ class Seeds(Isolated):
     def test_writes_the_same_seeds_again(self) -> None:
         first = ci.seeds(self.folder)
         self.assertEqual(ci.seeds(self.folder), first)
+
+
+class Budget(Isolated):
+    """The fuzzing job's time limits leave every target its full time (LAB-003's follow-up 9, CORE-010)."""
+
+    # The minutes a run takes besides fuzzing, measured on CORE-010's runs with a margin: the setup, the supply-chain checks, the build (about four minutes since Loro is built with AddressSanitizer), the tests of the targets' harness and writing the seeds, and at night also minimizing and saving the corpora.
+    OTHER_MINUTES = {"pull_request": 15, "schedule": 30}
+
+    def workflow_values(self, name: str) -> dict[str, int]:
+        """The value of `name` in .github/workflows/fuzz.yml for pull requests and for the nightly runs."""
+        workflow = (ci.REPOSITORY / ".github" / "workflows" / "fuzz.yml").read_text()
+        found = re.search(rf"^\s*{name}: \$\{{\{{ github\.event_name == 'pull_request' && (\d+) \|\| (\d+) \}}\}}$", workflow, re.MULTILINE)
+        self.assertIsNotNone(found, name)
+        assert found is not None
+        return {"pull_request": int(found.group(1)), "schedule": int(found.group(2))}
+
+    def test_counts_rounds_as_run_schedules_the_targets(self) -> None:
+        self.assertEqual(ci.rounds([2, 2] + [1] * 10), 4)
+        self.assertEqual(ci.rounds([2, 2] + [1] * 12), 4)
+        self.assertEqual(ci.rounds([2, 2] + [1] * 13), 5)
+        self.assertEqual(ci.rounds([2, 2] + [1] * 16), 5)
+        self.assertEqual(ci.rounds([2, 2] + [1] * 17), 6)
+        self.assertEqual(ci.rounds([3, 1], jobs=2), 3)
+        self.assertEqual(ci.rounds([]), 0)
+
+    def test_the_workflow_leaves_every_target_its_full_time(self) -> None:
+        workflow = (ci.REPOSITORY / ".github" / "workflows" / "fuzz.yml").read_text()
+        rounds = ci.rounds([target.share for target in ci.TARGETS.values()])
+        # The workflow's comment states the rounds, which fuzz/README.md explains.
+        self.assertIn(f"every target has run after {rounds} × FUZZ_SECONDS", workflow)
+        seconds, timeout = self.workflow_values("FUZZ_SECONDS"), self.workflow_values("timeout-minutes")
+        for event in ("pull_request", "schedule"):
+            needed = rounds * seconds[event] / 60 + self.OTHER_MINUTES[event]
+            self.assertLessEqual(needed, timeout[event], f"{event}: {rounds} rounds of {seconds[event]} s and {self.OTHER_MINUTES[event]} minutes besides fuzzing need {needed} minutes")
 
 
 class Commands(Isolated):
