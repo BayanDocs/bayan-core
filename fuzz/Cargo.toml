@@ -25,8 +25,9 @@ bayan-lab-layout = { path = "../lab/bayan-lab-layout" }
 bayan-lab-compare = { path = "../lab/bayan-lab-compare" }
 bayan-engine = { path = "../crates/bayan-engine" }
 bayan-crdt = { path = "../crates/bayan-crdt" }
-# The engine's answers, read as JSON to check them against the protocol's schema; the version of the main workspace, which bayan-engine uses too (published 2026-07-20).
-serde_json = "=1.0.151"
+# The engine's answers, read as JSON to check them against the protocol's schema; and the messages and recordings that the engine's harness reads before the engine, to count the pixels they ask for, with serde's derived readers and serde_json's `RawValue`, as the engine reads them (src/engine.rs). The versions and features of the main workspace, which bayan-engine uses too (serde published 2026-07-18, serde_json 2026-07-20; both MIT OR Apache-2.0).
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["raw_value"] }
 
 [[bin]]
 name = "zip_archive"

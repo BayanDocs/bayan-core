@@ -87,7 +87,7 @@ TARGETS: Dict[str, Target] = {
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
     "pdf_extract": Target("pdf.dict", 64 << 10, 10, 1, "pdfs"),
     "docx_hints": Target("ooxml.dict", 64 << 10, 10, 1, "hint_documents"),
-    # The engine boundary (CORE-010). Their harness renders at most 2^22 pixels per input (fuzz/src/engine.rs), so that the tiles the engine's limits allow do not reach the timeout.
+    # The engine boundary (CORE-010). Their harness renders at most 2^22 pixels per input, replays and its own tiles included (fuzz/src/engine.rs), so that the tiles the engine's limits allow do not reach the timeout.
     "engine_messages": Target("engine.dict", 64 << 10, 10, 1, "engine_sessions"),
     "engine_tile": Target("engine.dict", 64 << 10, 10, 1, "tile_requests"),
     "engine_config": Target("engine.dict", 64 << 10, 10, 1, "configurations"),

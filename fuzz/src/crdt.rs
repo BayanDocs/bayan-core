@@ -781,7 +781,6 @@ mod tests {
             assert_eq!(&seed[1..5], b"loro", "a Loro blob starts with its magic");
         }
         // Every seed but CORE-004's crafted one imports into its base (or is refused for the limits it is offered with), and none panics.
-        let panics = loro_panics();
         for seed in &corpus.seeds {
             let doc = Doc::new(PeerId(11), &FAMILIES).unwrap();
             let base = &corpus.bases[usize::from(seed[0] >> 1) % corpus.bases.len()];
@@ -799,7 +798,6 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        let _ = panics;
     }
 
     #[test]

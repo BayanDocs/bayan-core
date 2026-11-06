@@ -2,7 +2,7 @@
 //!
 //! Every engine here is created with its test switches off ([`config`]), so `diag.panic` is refused. libfuzzer-sys's panic hook aborts on every panic before anything can catch it, so a panic that the engine would catch and report (spec §12) still fails the run; bayan-ffi's silent hook is not linked into these targets. Each harness also checks the engine's answers itself, and fails on the error `panic` and on `engine.error` with `recoverable: false`, so that a caught panic fails the run even where no such hook runs (the tests of this crate show both).
 //!
-//! **Work.** The engine's limits allow requests that take long by design: a tile of 4,096 × 4,096 pixels takes about a third of a second natively and longer under AddressSanitizer, and one replay may render 2³⁰ pixels, about 20 seconds natively (spec §13). A short input could ask for many of them, and libFuzzer's timeout would then report work that the limits allow rather than work that grows faster than its input. So each harness renders at most [`PIXEL_BUDGET`] pixels per input: it reads each message (and each entry of a recording) as JSON before the engine does, counts the pixels it asks for, and leaves out a message, or the whole recording, that would exceed the budget. It reads them as leniently as the engine (invalid UTF-8 in strings is replaced, as the engine skips fields it does not know without checking them), and whatever it cannot read the engine refuses too, so it never counts less than the engine renders. A tile of up to 4,096 pixels on one side still fits, as long as the other side is short.
+//! **Work.** The engine's limits allow requests that take long by design: a tile of 4,096 × 4,096 pixels takes about a third of a second natively and longer under AddressSanitizer, and one replay may render 2³⁰ pixels, about 20 seconds natively (spec §13). A short input could ask for many of them, and libFuzzer's timeout would then report work that the limits allow rather than work that grows faster than its input. So each harness renders at most [`PIXEL_BUDGET`] pixels per input, its own tiles included: it reads each message (and each entry of a recording) before the engine does, counts the pixels it asks for, and leaves out a message, or the whole input, that would exceed the budget. It reads them as the engine does, only more leniently, so that it never counts less than the engine renders: with typed structures that skip every field they do not need with serde's `IgnoredAny`, which serde_json skips at any depth, as the engine skips the fields it does not know (a `serde_json::Value` refuses nesting deeper than 128 levels); with invalid UTF-8 replaced, because the engine skips such fields without checking them; with both the size and the message of a recording's entry counted, whatever its kind; and with a recording, or an entry, written as a JSON array, which serde's derived readers also accept, by position, counted as over the budget ([`is_array`]). Whatever else it cannot read, the engine refuses too. A tile of up to 4,096 pixels on one side still fits, as long as the other side is short.
 
 use std::sync::{Arc, OnceLock};
 
@@ -11,12 +11,20 @@ use bayan_engine::config::Config;
 use bayan_engine::limits::{MAX_MESSAGE_BYTES, MAX_TILE_SIDE};
 use bayan_engine::protocol::{ArgValue, ErrorCode, ErrorInfo, ReplayReport};
 use bayan_engine::{Engine, TileError, digest, recording, schema};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::schema_validator::Validator;
 
-/// The most pixels one input may make the engine render, in tiles and replays together: 2²², four times the pixels of a full page at the resolution the seeds use, and under a second under AddressSanitizer.
+/// The most pixels one input may make the engine render, in tiles and replays together, the harness's own tiles included (the last tile of `engine_messages`, and the replay of a recorded call and the reference tile of `engine_tile`): 2²², four times the pixels of a full page at the resolution the seeds use, and under a second under AddressSanitizer.
 pub const PIXEL_BUDGET: u64 = 1 << 22;
+
+/// What the harness counts for JSON whose pixels it does not read: more than any budget, so that the input that holds it is left out.
+const OVER_BUDGET: u64 = u64::MAX;
+
+/// The pixels of the tile of 8 × 10 that `engine_messages` renders after the input, to show that the engine still works.
+const LAST_TILE_PIXELS: u64 = 8 * 10;
 
 /// The most messages of one input that `engine_messages` hands to the engine; the rest is ignored. Each message's work is small or counted against [`PIXEL_BUDGET`], but the largest answer, the accessibility tree of the whole mock document (about 180 KB), takes about 30 ms under AddressSanitizer to answer and check, so 64 of them stay well within the timeout of 10 seconds.
 pub const MAX_MESSAGES: usize = 64;
@@ -71,9 +79,68 @@ pub fn check_answer(answer: &str) -> Value {
     value
 }
 
-/// Reads JSON as leniently as the engine does: invalid UTF-8 replaced, so that fields the engine would skip without checking them do not hide the rest.
-fn lenient_json(bytes: &[u8]) -> Option<Value> {
-    serde_json::from_str(&String::from_utf8_lossy(bytes)).ok()
+/// A message, read as far as its pixels go: its type, and its payload as the JSON text it was written as, as the engine's envelope reads them (`crates/bayan-engine/src/envelope.rs`). serde skips every other field with `IgnoredAny`, which serde_json skips at any depth without storing it, as the engine skips the fields it does not know; a `serde_json::Value` refuses nesting deeper than 128 levels, and would then count nothing for a message that the engine renders.
+#[derive(Deserialize)]
+struct MessageHead<'a> {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    #[serde(borrow)]
+    payload: Option<&'a RawValue>,
+}
+
+/// The size of a `render.tile`'s tile, read from its payload; every other field is skipped as [`MessageHead`] skips it.
+#[derive(Deserialize)]
+struct TileSize {
+    width: Option<u64>,
+    height: Option<u64>,
+}
+
+/// A recording, read as far as its pixels go: its entries, each as the JSON text it was written as; every other field is skipped as [`MessageHead`] skips it.
+#[derive(Deserialize)]
+struct RecordingHead<'a> {
+    #[serde(borrow)]
+    entries: Option<Vec<&'a RawValue>>,
+}
+
+/// An entry of a recording, read as far as its pixels go: its message or tile request, and its tile's size. Each field has the type of the engine's `Entry` (`crates/bayan-engine/src/recording.rs`) or a wider one, and every other field, the entry's kind among them, is skipped as [`MessageHead`] skips it.
+#[derive(Deserialize)]
+struct EntryHead {
+    text: Option<String>,
+    base64: Option<String>,
+    width: Option<u64>,
+    height: Option<u64>,
+}
+
+/// What a message asks the engine to render.
+enum Asks {
+    /// A tile of so many pixels: none for a size the engine refuses.
+    Tile(u64),
+    /// A replay of one of the harness's blobs.
+    Replay,
+    /// Nothing.
+    Nothing,
+}
+
+/// Reads what a message asks the engine to render, as [`MessageHead`] and [`TileSize`] read it, with invalid UTF-8 replaced, because the engine skips the fields it does not know without checking them. A message it cannot read, the engine refuses too, and a `render.tile` whose payload it cannot read, the engine refuses as `invalid_request`.
+fn asks(message: &[u8]) -> Asks {
+    let text = String::from_utf8_lossy(message);
+    let Ok(head) = serde_json::from_str::<MessageHead<'_>>(&text) else {
+        return Asks::Nothing;
+    };
+    match head.kind.as_deref() {
+        Some("render.tile") => Asks::Tile(
+            head.payload
+                .and_then(|payload| serde_json::from_str::<TileSize>(payload.get()).ok())
+                .map_or(0, |size| tile_pixels(size.width, size.height)),
+        ),
+        Some("diag.replay") => Asks::Replay,
+        _ => Asks::Nothing,
+    }
+}
+
+/// Whether JSON text is an array. serde's derived `Deserialize` reads a struct from an array too, by position, and so does the engine read a recording and its entries; the harness does not mirror that, and counts such JSON as [`OVER_BUDGET`].
+fn is_array(json: &str) -> bool {
+    json.trim_start().starts_with('[')
 }
 
 /// The pixels of a tile of `width` × `height` that the engine would render: none for a size it refuses.
@@ -91,16 +158,10 @@ fn tile_pixels(width: Option<u64>, height: Option<u64>) -> u64 {
 
 /// The pixels a message may make the engine render: a `render.tile`'s tile, and for `diag.replay` the most that any blob of the harness's can make it render (only [`RECORDING_BLOB`] is a recording, because the harness releases every blob the engine creates).
 fn message_pixels(message: &[u8]) -> u64 {
-    let Some(value) = lenient_json(message) else {
-        return 0;
-    };
-    match value.get("type").and_then(Value::as_str) {
-        Some("render.tile") => tile_pixels(
-            value.pointer("/payload/width").and_then(Value::as_u64),
-            value.pointer("/payload/height").and_then(Value::as_u64),
-        ),
-        Some("diag.replay") => recording_pixels(SESSION_RECORDING),
-        _ => 0,
+    match asks(message) {
+        Asks::Tile(pixels) => pixels,
+        Asks::Replay => recording_pixels(SESSION_RECORDING),
+        Asks::Nothing => 0,
     }
 }
 
@@ -128,45 +189,40 @@ fn lenient_base64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The most pixels that replaying `recording` may render: the tiles of its tile entries and of the `render.tile` messages among its message entries. Each entry is read as [`message_pixels`] reads a message; a recording that cannot be read at all is refused by the engine before it renders anything.
+/// The most pixels that replaying `recording` may render: the tiles of its tile entries and of the `render.tile` messages among its message entries. It reads the recording as the engine does (`RecordingFile` in `crates/bayan-engine/src/recording.rs`), as leniently as [`asks`] reads a message: a recording that it cannot read, or with an entry that it cannot read, the engine refuses before it renders anything, and one written as an array, or with an entry written as an array, counts as [`OVER_BUDGET`] ([`is_array`]).
 pub fn recording_pixels(recording: &[u8]) -> u64 {
-    let Some(value) = lenient_json(recording) else {
-        return 0;
-    };
-    let Some(entries) = value.get("entries").and_then(Value::as_array) else {
+    let text = String::from_utf8_lossy(recording);
+    if is_array(&text) {
+        return OVER_BUDGET;
+    }
+    let Ok(RecordingHead {
+        entries: Some(entries),
+    }) = serde_json::from_str(&text)
+    else {
         return 0;
     };
     let mut pixels = 0_u64;
     for entry in entries {
-        let bytes = match (
-            entry.get("text").and_then(Value::as_str),
-            entry.get("base64").and_then(Value::as_str),
-        ) {
-            (Some(text), _) => Some(text.as_bytes().to_vec()),
-            (None, Some(encoded)) => lenient_base64(encoded),
-            (None, None) => None,
+        if is_array(entry.get()) {
+            return OVER_BUDGET;
+        }
+        let Ok(entry) = serde_json::from_str::<EntryHead>(entry.get()) else {
+            return 0;
         };
-        let entry_pixels = match entry.get("kind").and_then(Value::as_str) {
-            Some("tile") => tile_pixels(
-                entry.get("width").and_then(Value::as_u64),
-                entry.get("height").and_then(Value::as_u64),
-            ),
-            // A replaying engine refuses diag.replay itself, so only tiles count.
-            Some("message") => bytes
-                .and_then(|bytes| lenient_json(&bytes))
-                .map_or(0, |message| {
-                    if message.get("type").and_then(Value::as_str) == Some("render.tile") {
-                        tile_pixels(
-                            message.pointer("/payload/width").and_then(Value::as_u64),
-                            message.pointer("/payload/height").and_then(Value::as_u64),
-                        )
-                    } else {
-                        0
-                    }
-                }),
-            _ => 0,
-        };
-        pixels = pixels.saturating_add(entry_pixels);
+        // A tile entry renders its size, a message entry its message (a replaying engine refuses diag.replay itself); counting both, whatever the entry's kind, never counts less.
+        let message = [
+            entry.text.map(String::into_bytes),
+            entry.base64.as_deref().and_then(lenient_base64),
+        ]
+        .iter()
+        .flatten()
+        .map(|bytes| match asks(bytes) {
+            Asks::Tile(pixels) => pixels,
+            Asks::Replay | Asks::Nothing => 0,
+        })
+        .max()
+        .unwrap_or(0);
+        pixels = pixels.saturating_add(tile_pixels(entry.width, entry.height).max(message));
     }
     pixels
 }
@@ -215,7 +271,7 @@ pub fn messages(data: &[u8]) {
 /// `engine_messages` with another configuration, for the tests of this harness. Properties: no panic, also none that the engine catches; every answer is a valid protocol message (the engine's `schema` module, as `hostile_input.rs` checks); and valid requests after the hostile ones still succeed: a new handshake, opening the mock document and rendering a tile of it.
 pub fn messages_with(config: Config, data: &[u8]) {
     let mut engine = engine_after_hello(config);
-    let mut pixels = 0_u64;
+    let mut pixels = LAST_TILE_PIXELS;
     for (index, message) in data
         .split(|&byte| byte == b'\n')
         .take(MAX_MESSAGES)
@@ -262,6 +318,12 @@ const REFERENCE_TILE: &[u8] =
     br#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":15544800,"height":20116800}}"#;
 const REFERENCE_SIZE: (u32, u32) = (32, 41);
 
+/// The pixels that `engine_tile` renders for a tile of `width` × `height`: the tile (none for a size the engine refuses), again in the replay when the call is recorded, and the reference tile afterwards.
+fn tile_cost(width: u32, height: u32, record: bool) -> u64 {
+    tile_pixels(Some(u64::from(width)), Some(u64::from(height))) * (1 + u64::from(record))
+        + u64::from(REFERENCE_SIZE.0) * u64::from(REFERENCE_SIZE.1)
+}
+
 /// An engine after the handshake with the mock document open as document 1, as `engine_tile` starts.
 fn engine_with_document(config: Config) -> Engine {
     let mut engine = engine_after_hello(config);
@@ -287,7 +349,7 @@ fn reference_digest() -> &'static str {
     })
 }
 
-/// `engine_tile`: [`Engine::render_tile`], the request behind `bayan_render_tile`, on an engine with the mock document open. The input is a flags byte, the tile's width and height in pixels as two little-endian 16-bit numbers, and the request; bit 0 of the flags records the call. Properties: no panic; a rendered tile has exactly its size and no messages; a refused request is refused as `invalid_argument` or `not_found`, never `internal`, and with no messages; a recorded call replays identically; and the engine is still usable afterwards: the reference tile renders exactly as on a fresh engine. A tile larger than [`PIXEL_BUDGET`] is not requested, so that the fuzzer does not spend its time filling memory; the size limits themselves (1 to 4,096 pixels a side) are cheap to reach.
+/// `engine_tile`: [`Engine::render_tile`], the request behind `bayan_render_tile`, on an engine with the mock document open. The input is a flags byte, the tile's width and height in pixels as two little-endian 16-bit numbers, and the request; bit 0 of the flags records the call. Properties: no panic; a rendered tile has exactly its size and no messages; a refused request is refused as `invalid_argument` or `not_found`, never `internal`, and with no messages; a recorded call replays identically; and the engine is still usable afterwards: the reference tile renders exactly as on a fresh engine. A request whose tiles would exceed [`PIXEL_BUDGET`], the replay of a recorded call and the reference tile counted ([`tile_cost`]), is not made, so that the fuzzer does not spend its time filling memory; the size limits themselves (1 to 4,096 pixels a side) are cheap to reach.
 pub fn tile(data: &[u8]) {
     let Some((&[flags, w0, w1, h0, h1], request)) = data.split_first_chunk::<5>() else {
         return;
@@ -296,10 +358,10 @@ pub fn tile(data: &[u8]) {
         u32::from(u16::from_le_bytes([w0, w1])),
         u32::from(u16::from_le_bytes([h0, h1])),
     );
-    if tile_pixels(Some(u64::from(width)), Some(u64::from(height))) > PIXEL_BUDGET {
+    let record = flags & 1 == 1;
+    if tile_cost(width, height, record) > PIXEL_BUDGET {
         return;
     }
-    let record = flags & 1 == 1;
     let mut engine = engine_with_document(config());
     if record {
         send(&mut engine, br#"{"v":0,"id":3,"type":"diag.record.start"}"#);
@@ -486,6 +548,86 @@ mod tests {
         );
         assert!(recording_pixels(SESSION_RECORDING) > 0);
         assert_eq!(message_pixels(b"not json"), 0);
+    }
+
+    /// JSON nested 200 levels deep, deeper than a `serde_json::Value` reads.
+    fn nested() -> String {
+        let nested = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(serde_json::from_str::<Value>(&nested).is_err());
+        nested
+    }
+
+    #[test]
+    fn counts_a_message_with_fields_nested_deeper_than_a_value_reads() {
+        let nested = nested();
+        let message = format!(
+            r#"{{"v":0,"id":4,"skipped":{nested},"type":"render.tile","payload":{{"skipped":{nested},"doc_id":1,"page":0,"rect":{{"skipped":{nested},"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":3}}}}"#
+        );
+        assert_eq!(message_pixels(message.as_bytes()), 24);
+        // The engine skips those fields and renders the tile: 8 pixels of 4 bytes a row.
+        let mut engine = engine_with_document(config());
+        let rendered = send(&mut engine, message.as_bytes());
+        assert_eq!(
+            rendered[0].pointer("/payload/stride"),
+            Some(&json!(32)),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn counts_a_recording_with_fields_nested_deeper_than_a_value_reads() {
+        let nested = nested();
+        let placeholder = "nested-200-levels";
+        let mut recording: Value = serde_json::from_slice(SESSION_RECORDING).unwrap();
+        recording["skipped"] = json!(placeholder);
+        for entry in recording["entries"].as_array_mut().unwrap() {
+            entry["skipped"] = json!(placeholder);
+            // Every message and tile request is an object; the field goes in first.
+            let text = entry["text"].as_str().unwrap();
+            assert!(text.starts_with('{'), "{text}");
+            entry["text"] = json!(text.replacen('{', &format!(r#"{{"skipped":{nested},"#), 1));
+        }
+        let recording = serde_json::to_string(&recording)
+            .unwrap()
+            .replace(&format!("\"{placeholder}\""), &nested);
+        assert_eq!(
+            recording_pixels(recording.as_bytes()),
+            recording_pixels(SESSION_RECORDING)
+        );
+        // The engine skips those fields and replays every entry as it was recorded, tiles included.
+        let report = recording::replay(config(), recording.as_bytes()).expect("a replay");
+        assert!(report.identical && !report.tiles.is_empty(), "{report:?}");
+        assert_eq!(Ok(report), recording::replay(config(), SESSION_RECORDING));
+    }
+
+    #[test]
+    fn counts_a_recording_or_an_entry_written_as_an_array_as_over_the_budget() {
+        assert_eq!(recording_pixels(b" [1, 2]"), OVER_BUDGET);
+        assert_eq!(
+            recording_pixels(br#"{"entries":[[0,"tile",null,null,8,3,"fnv1a64:0"]]}"#),
+            OVER_BUDGET
+        );
+        // An entry's size and its message both count, whatever its kind, which serde also reads from a map.
+        assert_eq!(
+            recording_pixels(br#"{"entries":[{"kind":{"tile":null},"width":8,"height":3}]}"#),
+            24
+        );
+        assert_eq!(
+            recording_pixels(
+                br#"{"entries":[{"kind":"tile","width":2,"height":2,"text":"{\"type\":\"render.tile\",\"payload\":{\"width\":8,\"height\":3}}"}]}"#
+            ),
+            24
+        );
+    }
+
+    #[test]
+    fn engine_tile_counts_the_replay_of_a_recorded_call_and_the_reference_tile() {
+        let reference = 32 * 41;
+        assert_eq!(tile_cost(2048, 1024, false), (1 << 21) + reference);
+        assert_eq!(tile_cost(2048, 1024, true), (1 << 22) + reference);
+        assert!(tile_cost(2048, 1024, true) > PIXEL_BUDGET);
+        assert_eq!(tile_cost(4097, 1, true), reference);
+        assert_eq!(tile_cost(0, 1, false), reference);
     }
 
     #[test]

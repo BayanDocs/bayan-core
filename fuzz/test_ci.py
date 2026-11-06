@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -283,6 +284,28 @@ class Budget(Isolated):
         for event in ("pull_request", "schedule"):
             needed = rounds * seconds[event] / 60 + self.OTHER_MINUTES[event]
             self.assertLessEqual(needed, timeout[event], f"{event}: {rounds} rounds of {seconds[event]} s and {self.OTHER_MINUTES[event]} minutes besides fuzzing need {needed} minutes")
+
+    @staticmethod
+    def jobs_options(workflow: str) -> list[str]:
+        """The value of every `--jobs` that a command of `workflow` passes to ci.py, also under an abbreviation, which argparse accepts."""
+        values = []
+        for line in workflow.replace("\\\n", " ").splitlines():
+            if "fuzz/ci.py" not in line or line.lstrip().startswith("#"):
+                continue
+            tokens = shlex.split(line.split("fuzz/ci.py", 1)[1], comments=True)
+            for index, token in enumerate(tokens):
+                name, equals, value = token.partition("=")
+                if name.startswith("--j") and "--jobs".startswith(name):
+                    values.append(value if equals else (tokens[index + 1] if index + 1 < len(tokens) else ""))
+        return values
+
+    def test_the_workflow_runs_as_many_targets_at_a_time_as_the_budget_counts(self) -> None:
+        # The rounds above are counted with ci.JOBS, which the workflow uses by passing no other --jobs.
+        self.assertEqual(self.jobs_options("run: python3 -I fuzz/ci.py run --all --job 8 \\\n  --jobs=4 --seconds 1 # --jobs 2"), ["8", "4"])
+        workflow = (ci.REPOSITORY / ".github" / "workflows" / "fuzz.yml").read_text()
+        self.assertIn("fuzz/ci.py run --all", workflow)
+        for value in self.jobs_options(workflow):
+            self.assertEqual(value, str(ci.JOBS), "the workflow passes a --jobs other than the one the budget counts with")
 
 
 class Commands(Isolated):

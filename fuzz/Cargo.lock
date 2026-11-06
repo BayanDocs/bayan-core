@@ -99,6 +99,7 @@ dependencies = [
  "bayan-opc",
  "bayan-xml",
  "libfuzzer-sys",
+ "serde",
  "serde_json",
 ]
 
