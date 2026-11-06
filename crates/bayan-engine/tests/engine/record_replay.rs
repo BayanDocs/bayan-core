@@ -431,3 +431,78 @@ fn a_full_blob_store_does_not_lose_the_recording() {
     let report = replay(Config::default(), &recording).unwrap();
     assert_eq!(report.first_difference, Some(1));
 }
+
+/// A recording whose entries are written both ways a recording can write them: messages and a `bayan_render_tile` request that are UTF-8, as text, and a message and a request that are not, as base64 (spec §10), with a tile that renders and requests the engine refuses.
+fn recording_of_both_encodings() -> Vec<u8> {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    send(&mut engine, &request(3, "diag.record.start", json!({})));
+    send(&mut engine, &request(4, "view.set", view(doc_id, 2.0)));
+    let tile = serde_json::to_vec(&whole_page(doc_id, 1, 24, 31)).unwrap();
+    assert!(engine.render_tile(&tile, 24, 31, 10).pixels.is_ok());
+    // A request that is not UTF-8, and one for a size other than the call's.
+    let mut not_utf8 = tile.clone();
+    not_utf8.insert(1, 0xff);
+    assert!(engine.render_tile(&not_utf8, 24, 31, 20).pixels.is_err());
+    assert!(engine.render_tile(&tile, 25, 31, 30).pixels.is_err());
+    let answers = engine.handle(b"{\"v\":0,\"id\":5,\"type\":\"ui.manifest\",\"\xff\":1}", 40);
+    assert_eq!(answers.len(), 1);
+    send(
+        &mut engine,
+        &request(
+            6,
+            "input.text",
+            json!({ "doc_id": doc_id, "text": "שלום 😀" }),
+        ),
+    );
+    let stopped = send(&mut engine, &request(7, "diag.record.stop", json!({})));
+    let stopped = ok_payload(&stopped, 7);
+    assert_eq!(stopped["entries"], json!(6));
+    engine
+        .blobs()
+        .take(stopped["blob"].as_u64().unwrap())
+        .unwrap()
+        .to_vec()
+}
+
+/// The recordings committed in `tests/fixtures/recordings/`, which the fuzz targets `engine_replay` (as seeds) and `engine_messages` (as the blob that `diag.replay` reads) start from (CORE-010; `fuzz/README.md`), with the sessions that make them.
+fn committed_recordings() -> [(&'static str, Vec<u8>); 2] {
+    [
+        ("session.json", recorded_session().0),
+        ("encodings.json", recording_of_both_encodings()),
+    ]
+}
+
+/// The committed recordings are exactly what the sessions above record with this engine; regenerate them with `BAYAN_UPDATE_GENERATED=1 cargo test -p bayan-engine --test engine` after a change that alters them, and review the difference. Host only: it reads and writes files, which the tests in WebAssembly cannot.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_committed_recordings_are_current() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recordings");
+    for (name, recording) in committed_recordings() {
+        let path = folder.join(name);
+        let mut text = String::from_utf8(recording).unwrap();
+        text.push('\n');
+        if std::env::var_os("BAYAN_UPDATE_GENERATED").is_some() {
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert!(
+            committed == text,
+            "{} is out of date with the engine. Regenerate it with `BAYAN_UPDATE_GENERATED=1 cargo test -p bayan-engine --test engine` and review the difference.",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn the_committed_recordings_replay_identically() {
+    for (name, recording) in committed_recordings() {
+        let report = replay(Config::default(), &recording).unwrap();
+        assert!(report.identical, "{name}: {report:?}");
+        assert!(!report.tiles.is_empty(), "{name}");
+    }
+}

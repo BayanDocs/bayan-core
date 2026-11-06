@@ -10,6 +10,12 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+# The harness of the engine's and the CRDT's targets (CORE-010), which those targets share and this crate's tests check without a fuzzing engine: `cargo +nightly-2026-10-02 test --manifest-path fuzz/Cargo.toml --lib` (README.md).
+[lib]
+name = "bayan_fuzz"
+path = "src/lib.rs"
+doc = false
+
 [dependencies]
 # The fuzzing engine: LLVM's libFuzzer, which the crate compiles from C++ with its build script, and the `fuzz_target!` macro. Published 2026-06-04; (MIT OR Apache-2.0) AND NCSA, accepted for fuzzing dependencies only (ADR-0017, amendment of 2026-10-08).
 libfuzzer-sys = "=0.4.13"
@@ -17,6 +23,10 @@ bayan-opc = { path = "../crates/bayan-opc" }
 bayan-xml = { path = "../crates/bayan-xml" }
 bayan-lab-layout = { path = "../lab/bayan-lab-layout" }
 bayan-lab-compare = { path = "../lab/bayan-lab-compare" }
+bayan-engine = { path = "../crates/bayan-engine" }
+bayan-crdt = { path = "../crates/bayan-crdt" }
+# The engine's answers, read as JSON to check them against the protocol's schema; the version of the main workspace, which bayan-engine uses too (published 2026-07-20).
+serde_json = "=1.0.151"
 
 [[bin]]
 name = "zip_archive"
@@ -99,6 +109,42 @@ bench = false
 [[bin]]
 name = "docx_hints"
 path = "fuzz_targets/docx_hints.rs"
+test = false
+doc = false
+bench = false
+
+# The engine boundary and CRDT updates (CORE-010): their harness is the library in src/.
+[[bin]]
+name = "engine_messages"
+path = "fuzz_targets/engine_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_tile"
+path = "fuzz_targets/engine_tile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_config"
+path = "fuzz_targets/engine_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_replay"
+path = "fuzz_targets/engine_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crdt_import"
+path = "fuzz_targets/crdt_import.rs"
 test = false
 doc = false
 bench = false
