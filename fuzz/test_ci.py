@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -175,6 +176,15 @@ class Targets(Isolated):
         # crdt_import's custom mutator makes its own seeds from real editing, and returns whole blobs from the start.
         crdt = ci.TARGETS["crdt_import"]
         self.assertEqual((crdt.seeds, crdt.dictionary, crdt.long_inputs), (None, None, True))
+
+    def test_only_crdt_import_may_be_parked_and_only_with_a_reason(self) -> None:
+        # The orchestrator's decision for CORE-010: crdt_import, and no other target, may be left out of the automatic runs, and only with its reason written out.
+        parked = {name for name, target in ci.TARGETS.items() if target.parked is not None}
+        self.assertLessEqual(parked, {"crdt_import"})
+        for name in parked:
+            reason = ci.TARGETS[name].parked
+            assert reason is not None
+            self.assertGreater(len(reason.split()), 5, f"{name} is parked without a reason")
 
     def test_the_default_limits_targets_get_long_inputs_and_more_time(self) -> None:
         for name in ("zip_archive_default_limits", "package_default_limits"):
@@ -426,6 +436,38 @@ class Output(Isolated):
         self.assertNotIn("::", self.output.getvalue())
         self.assertNotIn(ci.KEPT_PRIVATE, summary.read_text())
         self.assertIn("| `zip_archive` | passed |", summary.read_text())
+
+    def test_all_leaves_a_parked_target_out_and_lists_it_as_parked(self) -> None:
+        os.environ["GITHUB_ACTIONS"] = "true"
+        summary = self.folder / "summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        parked = [name for name, target in ci.TARGETS.items() if target.parked]
+        # A fake for every target that is not parked: running a parked one would fail, because it has none.
+        binaries = self.fake_targets([name for name in ci.TARGETS if name not in parked + ["zip_archive"]])
+        work = self.folder / "work"
+        # zip_archive too, for this test only, so that the test also shows it when no target is parked any more.
+        with mock.patch.dict(ci.TARGETS, {"zip_archive": dataclasses.replace(ci.TARGETS["zip_archive"], parked="a reason given for this test only")}):
+            self.assertEqual(ci.main(["run", "--all", "--seconds", "1", "--seeds", str(self.folder / "seeds"), "--work", str(work), "--binaries", str(binaries)]), 0)
+            self.assertEqual(ci.main(["minimize", "--all", "--work", str(work), "--binaries", str(binaries)]), 0)
+        shown, log = summary.read_text(), self.output.getvalue()
+        for name in parked + ["zip_archive"]:
+            self.assertIn(f"| `{name}` | parked | | | | | | | |", shown)
+            self.assertIn(f"| `{name}` | parked | | | |", shown)
+            self.assertIn(f"{name}: parked, not fuzzed by the automatic runs", log)
+            self.assertNotIn(f"{name}: passed", log)
+            self.assertFalse((work / "logs" / f"{name}.log").exists(), name)
+        self.assertIn("| `package` | passed |", shown)
+        self.assertNotIn("::", log)
+        self.assertNotIn(ci.KEPT_PRIVATE, shown)
+
+    def test_a_parked_target_runs_when_it_is_named(self) -> None:
+        parked = [name for name, target in ci.TARGETS.items() if target.parked]
+        if not parked:
+            self.skipTest("no target is parked")
+        work = self.folder / "work"
+        self.assertEqual(ci.main(["run", *parked, "--seconds", "1", "--seeds", str(self.folder / "seeds"), "--work", str(work), "--binaries", str(self.fake_targets(parked))]), 0)
+        for name in parked:
+            self.assertIn(f"{name}: passed after", self.output.getvalue())
 
     def test_elsewhere_a_failure_also_says_where_its_log_and_inputs_are(self) -> None:
         work = self.folder / "work"

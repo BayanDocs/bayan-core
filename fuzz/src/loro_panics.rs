@@ -335,7 +335,7 @@ mod tests {
         let lockfile = Lockfile::parse(crate::LOCKFILE).unwrap();
         let loro = loro_packages(&lockfile, "bayan-fuzz").unwrap();
         let names: BTreeSet<&str> = loro.iter().map(|package| package.name.as_str()).collect();
-        for name in ["loro", "loro-internal", "loro-common", "generic-btree", "serde_columnar"] {
+        for name in ["loro", "loro-internal", "loro-common", "loro-delta", "generic-btree"] {
             assert!(names.contains(name), "{name}");
         }
         // Used by BayanDocs' own crates too, so not Loro's.
