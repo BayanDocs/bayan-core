@@ -349,6 +349,13 @@ pub fn tile(data: &[u8]) {
 
 /// `engine_config`: [`Config::from_json`]. Properties: no panic; the same input gives the same configuration; only an empty input or a JSON object is accepted; and an accepted configuration starts an engine that completes a handshake, and, with the test switch off, refuses `diag.panic`.
 pub fn config_json(data: &[u8]) {
+    // DO NOT MERGE (CORE-010, AC-4): a deliberate panic on inputs that start with `#`, which no seed does, with a message that quotes the input, as a failing property's message can. It shows that a failing run names only the target and the kind of failure, and publishes neither the input nor the log.
+    if data.first() == Some(&b'#') {
+        panic!(
+            "deliberate panic: the input starts with {:?}",
+            &data[..data.len().min(16)]
+        );
+    }
     let parsed = Config::from_json(data);
     assert_eq!(
         Config::from_json(data),
