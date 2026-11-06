@@ -4,7 +4,7 @@
 Usage, from anywhere in the repository, after `cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu`:
 
   python3 -I fuzz/ci.py seeds SEEDS
-      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, and for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
+      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here, and for the hint reader the documents, their main document parts and three small main document parts written here. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
   python3 -I fuzz/ci.py run --seconds N --seeds SEEDS [--work WORK] [--jobs J] (--all | TARGET ...)
       Runs each target for N seconds times its share (TARGETS below), J at a time (default 4), from its seeds and its corpus in WORK/corpus/<target>/, where it adds what it finds. WORK is this folder unless given, so that the corpora and artifacts are where cargo-fuzz keeps them. Inputs that crash, time out, run out of memory or leak go to WORK/artifacts/<target>/, each target's output to WORK/logs/<target>.log. Exits with 1 if any target failed.
   python3 -I fuzz/ci.py minimize [--work WORK] [--jobs J] (--all | TARGET ...)
@@ -81,6 +81,7 @@ TARGETS: Dict[str, Target] = {
     "xml_reader": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "xml_parts"),
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
     "pdf_extract": Target("pdf.dict", 64 << 10, 10, 1, "pdfs"),
+    "docx_hints": Target("ooxml.dict", 64 << 10, 10, 1, "hint_documents"),
 }
 
 # How libFuzzer names the inputs it keeps, by what went wrong, and the kind of failure that ci.py reports for each: the only thing it shows about a failure. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
@@ -148,6 +149,43 @@ def synthetic_pdfs() -> List[bytes]:
     return [text_pdf, rtl_pdf, drawing_pdf]
 
 
+def synthetic_hint_parts() -> List[bytes]:
+    """Small main document parts with everything the hint reader of docx_hints treats apart, as XML that mutation can change name by name: page break hints in runs and in a table cell, tracked insertions, deletions and moves, a complex field and a simple one, a hidden run and a shown one, a symbol, a non-breaking hyphen, and a text box in both alternatives of alternate content."""
+    namespaces = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+        'xmlns:v="urn:schemas-microsoft-com:vml" mc:Ignorable="wps"'
+    )
+
+    def part(body: str) -> bytes:
+        return f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {namespaces}><w:body>{body}</w:body></w:document>'.encode()
+
+    pages = (
+        "<w:p><w:r><w:t>Text with a page break</w:t></w:r></w:p>"
+        "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Second page</w:t></w:r></w:p>"
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:lastRenderedPageBreak/><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+    )
+    revisions = (
+        '<w:p><w:pPr><w:rPr><w:del w:id="9" w:author="A"/><w:vanish/></w:rPr></w:pPr>'
+        '<w:ins w:id="1" w:author="A"><w:r><w:t>Inserted</w:t></w:r></w:ins>'
+        '<w:del w:id="2" w:author="A"><w:r><w:delText>Deleted</w:delText></w:r></w:del>'
+        '<w:moveFrom w:id="3" w:author="A"><w:r><w:t>Moved</w:t></w:r></w:moveFrom>'
+        '<w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r>'
+        '<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>'
+        '<w:r><w:lastRenderedPageBreak/><w:sym w:font="Symbol" w:char="F0B7"/><w:noBreakHyphen/><w:tab/></w:r></w:p>'
+    )
+    fields = (
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>3</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        '<w:fldSimple w:instr="NUMPAGES"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>'
+        '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx></w:drawing></mc:Choice>'
+        '<mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:lastRenderedPageBreak/><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>'
+        '<w:r><w:t>After the box</w:t></w:r></w:p>'
+    )
+    return [part(pages), part(revisions), part(fields)]
+
+
 def seeds(output: Path) -> Dict[str, int]:
     """Writes the seeds of every target into output/<target>/, each named by the SHA-1 of its content, as libFuzzer names its inputs, and returns how many each target has."""
     kinds: Dict[str, List[bytes]] = {"documents": [], "content_types": [], "relationships": [], "core_properties": [], "xml_parts": []}
@@ -169,6 +207,14 @@ def seeds(output: Path) -> Dict[str, int]:
     kinds["xml_parts"] += [sample.read_bytes() for sample in sorted(XML_SAMPLES.glob("*.xml"))]
     kinds["configured_xml_parts"] = [bytes([configuration]) + part for part in kinds["xml_parts"] for configuration in MC_CONFIGURATIONS]
     kinds["pdfs"] = [pdf.read_bytes() for pdf in sorted(PDFS.glob("*.pdf"))] + synthetic_pdfs()
+    # The hint reader reads a whole package or, for any other input, a main document part.
+    main_parts = []
+    for document in sorted(DOCUMENTS.glob("*.docx")):
+        with zipfile.ZipFile(document) as archive:
+            part = archive.read("word/document.xml")
+            if len(part) <= TARGETS["docx_hints"].max_len:
+                main_parts.append(part)
+    kinds["hint_documents"] = kinds["documents"] + main_parts + synthetic_hint_parts()
     counts = {}
     for name, target in TARGETS.items():
         folder = output / name

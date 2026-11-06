@@ -18,10 +18,22 @@ checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 name = "bayan-fuzz"
 version = "0.0.0"
 dependencies = [
+ "bayan-lab-compare",
  "bayan-lab-layout",
  "bayan-opc",
  "bayan-xml",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "bayan-lab-compare"
+version = "0.0.0"
+dependencies = [
+ "bayan-lab-layout",
+ "bayan-opc",
+ "bayan-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

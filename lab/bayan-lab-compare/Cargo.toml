@@ -1,0 +1,22 @@
+[package]
+name = "bayan-lab-compare"
+description = "BayanDocs Fidelity Lab comparisons: the alignment of two layouts of a document, the metrics M1 to M7, their aggregation by tier, feature, script and compatibility mode, regressions against a baseline, and the HTML and JSON reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bayan-lab-layout = { path = "../bayan-lab-layout" }
+bayan-opc = { path = "../../crates/bayan-opc" }
+bayan-xml = { path = "../../crates/bayan-xml" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

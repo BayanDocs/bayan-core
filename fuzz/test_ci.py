@@ -190,6 +190,13 @@ class Seeds(Isolated):
         self.assertEqual(counts["pdf_extract"], pdfs + len(ci.synthetic_pdfs()))
         for seed in (self.folder / "pdf_extract").iterdir():
             self.assertTrue(seed.read_bytes().startswith(b"%PDF-1.") and seed.read_bytes().rstrip().endswith(b"%%EOF"), seed.name)
+        # The documents, their main document parts and the synthetic parts.
+        self.assertEqual(counts["docx_hints"], 2 * documents + len(ci.synthetic_hint_parts()))
+        for seed in (self.folder / "docx_hints").iterdir():
+            data = seed.read_bytes()
+            self.assertTrue(data.startswith(b"PK") or data.startswith(b"<?xml"), seed.name)
+        for part in ci.synthetic_hint_parts():
+            self.assertIn(b"lastRenderedPageBreak", part)
         for name, target in ci.TARGETS.items():
             for seed in (self.folder / name).iterdir():
                 data = seed.read_bytes()

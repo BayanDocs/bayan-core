@@ -16,6 +16,7 @@ libfuzzer-sys = "=0.4.13"
 bayan-opc = { path = "../crates/bayan-opc" }
 bayan-xml = { path = "../crates/bayan-xml" }
 bayan-lab-layout = { path = "../lab/bayan-lab-layout" }
+bayan-lab-compare = { path = "../lab/bayan-lab-compare" }
 
 [[bin]]
 name = "zip_archive"
@@ -91,6 +92,13 @@ bench = false
 [[bin]]
 name = "pdf_extract"
 path = "fuzz_targets/pdf_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "docx_hints"
+path = "fuzz_targets/docx_hints.rs"
 test = false
 doc = false
 bench = false

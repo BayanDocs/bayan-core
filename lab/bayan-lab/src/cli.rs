@@ -31,6 +31,9 @@ pub const USAGE: &str = "\
 Usage: bayan-lab corpus <command> [options]
        bayan-lab pdf-extract [--output FILE] PDF
        bayan-lab layout schema | layout check FILE...
+       bayan-lab compare [--hints DOCX] [--output FILE] REFERENCE CANDIDATE
+       bayan-lab report --manifest FILE [--references DIR] [--candidates DIR] [--store ADDRESS]
+                        [--baseline FILE] [--json FILE] [--html FILE] [--title TEXT]
 
 Corpus commands:
   source add NAME --url URL --revision REV --license SPDX --copyright TEXT
@@ -66,6 +69,25 @@ Layout JSON commands (lab/schema/layout-json.md):
                       Check layout JSON files against the format and its rules. Each file
                       is reported by its number in the list, never by its name.
 
+Fidelity commands (lab/compare.md):
+  compare [--hints DOCX] [--output FILE] REFERENCE CANDIDATE
+                      Compare two layout JSON files of one document, Word's (REFERENCE) and
+                      BayanDocs' (CANDIDATE): page counts (M1), page-break and line-break
+                      agreement (M2, M3) and glyph position error (M4); with --hints, the
+                      agreement of CANDIDATE's page starts with the w:lastRenderedPageBreak
+                      hints of the .docx file (M7). Writes the metrics as JSON to FILE, or to
+                      standard output.
+  report --manifest FILE [--references DIR] [--candidates DIR] [--store ADDRESS]
+         [--baseline FILE] [--json FILE] [--html FILE] [--title TEXT]
+                      Compare every document of the manifest: DIR/<sha256>.json of
+                      --references (Word's layouts) with that of --candidates (BayanDocs';
+                      a missing one counts as no pages), and with --store each document's
+                      hints (M7). Aggregates by tier, compatibility mode, script and feature,
+                      lists the worst public documents and the features most correlated with
+                      disagreement, and with --baseline (an earlier --json) the documents
+                      that lost agreement. Writes the JSON summary and the HTML report.
+                      Fails (1) when a document lost agreement or could not be compared.
+
 Options for every corpus command:
   --manifest FILE     The corpus manifest (or the environment variable BAYAN_LAB_MANIFEST).
   --store ADDRESS     A directory; s3://BUCKET/PREFIX?endpoint=https://HOST&region=REGION; or
@@ -100,17 +122,17 @@ impl Outcome {
 
 /// Command-line arguments split into options and operands.
 #[derive(Debug, Default)]
-struct Arguments {
+pub(crate) struct Arguments {
     options: BTreeMap<String, Vec<String>>,
     flags: BTreeSet<String>,
-    operands: Vec<String>,
+    pub(crate) operands: Vec<String>,
     /// Where `--manifest` and `--store` come from when they are not given.
-    environment: Environment,
+    pub(crate) environment: Environment,
 }
 
 impl Arguments {
     /// Splits `args`. Options listed in `valued` take a value (`--name value` or `--name=value`) and may repeat; those in `flags` take none; `--` ends the options.
-    fn parse(args: &[String], valued: &[&str], flags: &[&str]) -> Result<Self, String> {
+    pub(crate) fn parse(args: &[String], valued: &[&str], flags: &[&str]) -> Result<Self, String> {
         let mut parsed = Self::default();
         let mut index = 0;
         while let Some(arg) = args.get(index) {
@@ -153,7 +175,7 @@ impl Arguments {
     }
 
     /// The value of an option that may appear at most once.
-    fn one(&self, name: &str) -> Result<Option<&str>, String> {
+    pub(crate) fn one(&self, name: &str) -> Result<Option<&str>, String> {
         match self.options.get(name).map(Vec::as_slice) {
             None | Some([]) => Ok(None),
             Some([value]) => Ok(Some(value.as_str())),
@@ -232,6 +254,10 @@ pub fn run_in(
         Some((group, rest)) if group == "corpus" => corpus(environment, rest, out, err),
         Some((command, rest)) if command == "pdf-extract" => pdf_extract(rest, out, err),
         Some((group, rest)) if group == "layout" => layout(rest, out, err),
+        Some((command, rest)) if command == "compare" => crate::fidelity::compare(rest, out, err),
+        Some((command, rest)) if command == "report" => {
+            crate::fidelity::report(environment, rest, out, err)
+        }
         Some((help, _)) if matches!(help.as_str(), "help" | "--help" | "-h") => {
             let _ = writeln!(out, "{USAGE}");
             Ok(Outcome::Success)
@@ -248,10 +274,10 @@ pub fn run_in(
 }
 
 /// The options every corpus command accepts.
-const COMMON: [&str; 2] = ["manifest", "store"];
+pub(crate) const COMMON: [&str; 2] = ["manifest", "store"];
 
 /// The largest layout JSON file `layout check` reads, in bytes.
-const MAX_LAYOUT_FILE: u64 = 1 << 30;
+pub(crate) const MAX_LAYOUT_FILE: u64 = 1 << 30;
 
 /// `bayan-lab pdf-extract [--output FILE] PDF`.
 fn pdf_extract(
@@ -376,7 +402,7 @@ fn check_layouts(
     Ok(outcome)
 }
 
-fn read_up_to(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_up_to(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1))
@@ -461,14 +487,14 @@ fn corpus(
     }
 }
 
-fn with_common(options: &[&'static str]) -> Vec<&'static str> {
+pub(crate) fn with_common(options: &[&'static str]) -> Vec<&'static str> {
     let mut all = COMMON.to_vec();
     all.extend_from_slice(options);
     all
 }
 
 /// The manifest path from `--manifest` or `BAYAN_LAB_MANIFEST`.
-fn manifest_path(arguments: &Arguments) -> Result<PathBuf, String> {
+pub(crate) fn manifest_path(arguments: &Arguments) -> Result<PathBuf, String> {
     match arguments.one("manifest")? {
         // An empty path would mean the current folder.
         Some("") => Err("--manifest cannot be empty".to_owned()),
@@ -480,7 +506,7 @@ fn manifest_path(arguments: &Arguments) -> Result<PathBuf, String> {
 }
 
 /// The store from `--store` or `BAYAN_LAB_STORE`, if either is given.
-fn store_of(arguments: &Arguments) -> Result<Option<Box<dyn Store>>, String> {
+pub(crate) fn store_of(arguments: &Arguments) -> Result<Option<Box<dyn Store>>, String> {
     let address = match arguments.one("store")? {
         // An empty address would mean the current folder.
         Some("") => return Err("--store cannot be empty".to_owned()),
@@ -498,7 +524,7 @@ fn required_store(arguments: &Arguments) -> Result<Box<dyn Store>, String> {
 }
 
 /// Reads the manifest; a manifest that does not exist yet is empty when `create` is set.
-fn load(path: &Path, create: bool) -> Result<Manifest, String> {
+pub(crate) fn load(path: &Path, create: bool) -> Result<Manifest, String> {
     match fs::read_to_string(path) {
         Ok(text) => Manifest::from_json(&text),
         Err(error) if create && error.kind() == ErrorKind::NotFound => Ok(Manifest::default()),

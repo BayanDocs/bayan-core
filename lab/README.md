@@ -6,6 +6,8 @@ The Fidelity Lab measures how closely BayanDocs matches Microsoft Word ([Fidelit
 |---|---|
 | [bayan-lab/](bayan-lab/) | The `bayan-lab` command-line tool and its library (LAB-001): the corpus manifest, content-addressed storage, verification, and feature tagging of `.docx` documents; and the layout JSON commands `pdf-extract` and `layout` (LAB-003). |
 | [bayan-lab-layout/](bayan-lab-layout/) | The layout JSON's Rust types, rules and JSON Schema, and the strict PDF reader that extracts a layout JSON from a PDF (LAB-003). A library without input or output of its own, so that the gate's outside-world check covers the parser of untrusted PDFs, and its tests also run in WebAssembly. |
+| [bayan-lab-compare/](bayan-lab-compare/) | The comparisons (LAB-004): the alignment of two layouts' texts, the metrics M1 to M4 and M7 (M5's interface; M6 is a process of the reference machine), the `w:lastRenderedPageBreak` hints of `.docx` files, aggregation by tier, compatibility mode, script and feature, regressions against a baseline, and the JSON summary and static HTML report. A library without input or output of its own, like bayan-lab-layout, so that its numbers are checked in WebAssembly too. |
+| [compare.md](compare.md) | How two layouts are compared, what each metric means, and how to run and read the fidelity report. |
 | [schema/layout-json.md](schema/layout-json.md) | The layout JSON, version 1: every field, the text rules that make both sides comparable, how the extractor forms lines, and what it refuses; [schema/layout.schema.json](schema/layout.schema.json) is its generated JSON Schema, and [schema/samples/](schema/samples/) holds sample files of both sides. |
 | [corpus/manifest-schema.md](corpus/manifest-schema.md) | The corpus manifest, field by field; [corpus/manifest.schema.json](corpus/manifest.schema.json) is its generated JSON Schema. |
 | [corpus/tagging-rules.md](corpus/tagging-rules.md) | What each feature tag means and how the scanner stays safe on hostile files. |
@@ -28,6 +30,8 @@ bayan-lab corpus schema
 bayan-lab pdf-extract [--output FILE] PDF
 bayan-lab layout schema
 bayan-lab layout check FILE…
+bayan-lab compare [--hints DOCX] [--output FILE] REFERENCE CANDIDATE
+bayan-lab report --manifest FILE [--references DIR] [--candidates DIR] [--store ADDRESS] [--baseline FILE] [--json FILE] [--html FILE] [--title TEXT]
 ```
 
 Every corpus command takes `--manifest FILE` and, where it reads or writes documents, `--store ADDRESS` (or the environment variables `BAYAN_LAB_MANIFEST` and `BAYAN_LAB_STORE`); options are written `--name VALUE`, and a command refuses words it does not use. `corpus stats` reports on public manifests only, until LAB-101 adds the folding of rare names that a report on private documents needs. The exit status is 0 when everything succeeded, 1 when some documents or checks failed (the messages say which), and 2 when the command could not run.
@@ -45,6 +49,8 @@ bayan-lab corpus verify --manifest lab/corpus/public/manifest.json --store ~/bay
 bayan-lab pdf-extract --output word-layout.json word.pdf
 bayan-lab layout check word-layout.json
 ```
+
+`compare` compares Word's layout of a document with BayanDocs' and writes the metrics as JSON; `report` does it for every document of a manifest, with Word's and BayanDocs' layouts from two folders of `<sha256>.json` files and the documents from a store for M7, and writes the JSON summary and the HTML report. [compare.md](compare.md) explains both, the metrics and the reports; `.github/workflows/fidelity.yml` runs `report` over the public corpus and publishes the report as an artifact.
 
 ## Rules
 

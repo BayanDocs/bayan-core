@@ -14,8 +14,9 @@ on:
       - crates/bayan-opc/**
       - crates/bayan-xml/**
       - lab/bayan-lab-layout/**
+      - lab/bayan-lab-compare/**
       - fuzz/**
-      # bayan-opc, bayan-xml and bayan-lab-layout take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
+      # bayan-opc, bayan-xml, bayan-lab-layout and bayan-lab-compare take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
       - Cargo.toml
       - .cargo/**
       - .github/workflows/fuzz.yml
@@ -43,7 +44,7 @@ env:
   # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
   CARGO_FUZZ_VERSION: 0.13.2
   CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
-  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 4 × FUZZ_SECONDS: 10 minutes on a pull request, an hour at night.
+  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 4 × FUZZ_SECONDS: 10 minutes on a pull request, an hour at night. The twelve targets have 14 shares (two of 2, ten of 1) of the 16 that four rounds of four hold: two more targets of share 1 still fit, a third needs a fifth round, and then this comment, the timeouts below and fuzz/README.md change with it.
   FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 150 || 900 }}
 
 jobs:

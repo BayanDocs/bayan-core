@@ -34,6 +34,7 @@
 
 pub mod cli;
 pub mod exclusions;
+pub mod fidelity;
 pub mod hash;
 pub mod manifest;
 pub mod scan;

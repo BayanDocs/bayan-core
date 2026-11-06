@@ -1,0 +1,135 @@
+# Runs the Fidelity Lab's comparison over the public corpus (work package LAB-004, Fidelity Lab specification §6 and §9) and publishes the HTML report and the JSON summary as the artifact `fidelity-report`.
+# - The public corpus comes from its pinned sources with lab/corpus/public/import.sh, the way LAB-001's tools build it, and every document is checked against the SHA-256 in lab/corpus/public/manifest.json (`corpus verify`); the import must leave the committed manifest and frequency report unchanged. Once the public bucket exists (lab/corpus/storage.md), the job reads the documents from it instead.
+# - Word's side: ground truth from the reference machine (LAB-002), which does not exist yet, so no document is compared with Word's layout. BayanDocs' side: bayan-cli cannot lay out documents until Phase 1, so every document counts as laid out on no pages. The report's scores are therefore zero, and only M7, the agreement with the w:lastRenderedPageBreak hints that the documents themselves carry, has data. As ground truth and layouts arrive, the steps "Word's layouts" and "BayanDocs' layouts" fill their folders.
+# - It compares with no baseline yet: work package LAB-106 decides where the baselines of the fidelity gate are stored, and `bayan-lab report --baseline` is ready for it.
+# - The report and the summary hold public-corpus results only, and name documents by their public identifiers (SHA-256 and their source's path).
+# It runs on pull requests that change the lab, the package and XML readers that M7 uses, or the workspace's build settings, on pushes to main, weekly, and on demand. It is not a required check: a path filter skips it on most pull requests, and required checks are a setting of main's ruleset, which is the owner's.
+# Workflow conventions (AGENTS.md): permissions only to read the repository; no credentials kept after checkout; GitHub's own actions only, pinned to full commit SHAs with the version in a comment; a timeout; one concurrency group; no secrets; no cache. Before anything of the workspace is built, the job runs the supply-chain checks of the gate's first step, as the CodeQL and fuzzing jobs do (bayan-core#22): building runs the dependencies' build scripts and procedural macros, and the gate checks a pull request's Cargo.lock only in parallel with this job.
+name: fidelity
+
+on:
+  pull_request:
+    paths:
+      - lab/**
+      - crates/bayan-opc/**
+      - crates/bayan-xml/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - .github/workflows/fidelity.yml
+  push:
+    branches: [main]
+    paths:
+      - lab/**
+      - crates/bayan-opc/**
+      - crates/bayan-xml/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - .github/workflows/fidelity.yml
+  schedule:
+    # Weekly, so that a source of the corpus that disappears or changes is noticed even when nobody pushes; LAB-106 makes the fidelity runs nightly.
+    - cron: "41 4 * * 2"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation helps only when one machine rebuilds again and again, which this job never does.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  report:
+    name: Fidelity report (public corpus)
+    runs-on: ubuntu-24.04
+    # The supply-chain checks, the build of bayan-lab (a few minutes), the import of the corpus (about a minute) and the comparison (seconds) take about ten minutes; a run that hangs is still stopped.
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # rustup checks every component against the SHA-256 in the toolchain's release manifest.
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup set auto-self-update disable
+          rustup toolchain install
+          rustc --version
+
+      # They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
+
+      - name: Build bayan-lab
+        run: cargo build --release --locked --package bayan-lab
+
+      # Every source at its pinned commit, every document checked against the manifest's SHA-256 by `corpus verify` at the end of the import; the committed manifest and report must come out unchanged.
+      - name: Build the public corpus from its sources
+        run: |
+          BAYAN_LAB="$PWD/target/release/bayan-lab" lab/corpus/public/import.sh "$RUNNER_TEMP/corpus/sources" "$RUNNER_TEMP/corpus/store"
+          git diff --exit-code -- lab/corpus/public
+
+      # Ground truth from the reference machine (LAB-002), one layout JSON per document, named by its SHA-256: none yet.
+      - name: Word's layouts
+        run: mkdir -p "$RUNNER_TEMP/word"
+
+      # BayanDocs' layouts, one layout JSON per document, named by its SHA-256: none until bayan-cli can lay out documents (Phase 1). A document without one counts as laid out on no pages.
+      - name: BayanDocs' layouts
+        run: mkdir -p "$RUNNER_TEMP/bayandocs"
+
+      - name: Compare and write the report
+        run: |
+          mkdir -p "$RUNNER_TEMP/report"
+          target/release/bayan-lab report \
+            --manifest lab/corpus/public/manifest.json \
+            --store "$RUNNER_TEMP/corpus/store" \
+            --references "$RUNNER_TEMP/word" \
+            --candidates "$RUNNER_TEMP/bayandocs" \
+            --json "$RUNNER_TEMP/report/fidelity-summary.json" \
+            --html "$RUNNER_TEMP/report/fidelity-report.html" \
+            --title "Public corpus v1: fidelity report" | tee "$RUNNER_TEMP/report.txt"
+
+      # The report must render offline and load nothing from anywhere: bayan-lab-compare's tests check how it is written, and this checks the page that was published.
+      - name: Check that the report stands alone
+        run: |
+          page="$RUNNER_TEMP/report/fidelity-report.html"
+          if grep -Eiq '<(script|link|img|iframe|object|embed|base)[ >/]|[ "](src|href|srcset)=|url\(|@import|https?:' "$page"; then
+            echo "::error::The fidelity report refers to something outside itself"
+            exit 1
+          fi
+          {
+            echo "## Fidelity report (public corpus)"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/report.txt"
+            echo '```'
+            echo
+            echo "The HTML report and the JSON summary are in the artifact \`fidelity-report\` of this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fidelity-report
+          path: ${{ runner.temp }}/report
+          if-no-files-found: error
+          retention-days: 30

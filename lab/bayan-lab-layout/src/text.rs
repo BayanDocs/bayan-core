@@ -12,24 +12,54 @@
 /// Everything else stays as it is: no case folding and no Unicode normalization.
 #[must_use]
 pub fn comparable(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        if character.is_whitespace() || displays_nothing(character) {
-            continue;
-        }
-        match character {
-            '\u{AD}' | '\u{2010}' | '\u{2011}' => out.push('-'),
-            '\u{FB00}' => out.push_str("ff"),
-            '\u{FB01}' => out.push_str("fi"),
-            '\u{FB02}' => out.push_str("fl"),
-            '\u{FB03}' => out.push_str("ffi"),
-            '\u{FB04}' => out.push_str("ffl"),
-            '\u{FB05}' => out.push_str("\u{17F}t"),
-            '\u{FB06}' => out.push_str("st"),
-            other => out.push(other),
+    comparable_chars(text)
+        .map(|(_, character)| character)
+        .collect()
+}
+
+/// The characters of [`comparable`]`(text)`, each with the index of the character of `text` it comes from, counted in characters (Unicode scalar values) as the offsets of a layout JSON are. A ligature such as U+FB01 gives two characters with the same index; a removed character gives none.
+///
+/// The comparisons of LAB-004 use the indices to find the glyph that shows each character they align.
+pub fn comparable_chars(text: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    text.chars()
+        .enumerate()
+        .flat_map(|(index, character)| replacement(character).map(move |c| (index, c)))
+}
+
+/// What one character of a line's text becomes in the comparable form: nothing, itself, or the letters of a ligature.
+fn replacement(character: char) -> impl Iterator<Item = char> {
+    let letters: &[char] = match character {
+        _ if character.is_whitespace() || displays_nothing(character) => &[],
+        '\u{AD}' | '\u{2010}' | '\u{2011}' => &['-'],
+        '\u{FB00}' => &['f', 'f'],
+        '\u{FB01}' => &['f', 'i'],
+        '\u{FB02}' => &['f', 'l'],
+        '\u{FB03}' => &['f', 'f', 'i'],
+        '\u{FB04}' => &['f', 'f', 'l'],
+        '\u{FB05}' => &['\u{17F}', 't'],
+        '\u{FB06}' => &['s', 't'],
+        _ => return Replacement::One(Some(character)),
+    };
+    Replacement::Many(letters.iter())
+}
+
+/// The characters that one character becomes.
+enum Replacement {
+    /// The character itself, until it has been taken.
+    One(Option<char>),
+    /// Nothing, or the letters of a ligature or the hyphen.
+    Many(core::slice::Iter<'static, char>),
+}
+
+impl Iterator for Replacement {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        match self {
+            Self::One(character) => character.take(),
+            Self::Many(letters) => letters.next().copied(),
         }
     }
-    out
 }
 
 /// The format characters that rule 2 of [`comparable`] removes.
@@ -47,7 +77,18 @@ const fn displays_nothing(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::comparable;
+    use super::{comparable, comparable_chars};
+
+    #[test]
+    fn every_comparable_character_knows_where_it_comes_from() {
+        let pairs: Vec<(usize, char)> = comparable_chars("a \u{FB01}\u{AD}\u{200B}b").collect();
+        assert_eq!(
+            pairs,
+            [(0, 'a'), (2, 'f'), (2, 'i'), (3, '-'), (5, 'b')],
+            "the space and the zero-width space give nothing, the ligature two letters of one source character"
+        );
+        assert_eq!(comparable_chars("").count(), 0);
+    }
 
     #[test]
     fn whitespace_and_invisible_characters_are_removed() {
