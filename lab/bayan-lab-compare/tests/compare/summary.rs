@@ -622,3 +622,23 @@ fn a_damaged_baseline_is_refused() {
         sha('d')
     )));
 }
+
+/// A baseline that lists a document more than once is refused: the comparison would keep only one of its entries.
+#[test]
+fn a_baseline_that_lists_a_document_twice_is_refused() {
+    let text = Summary::new("Baseline", &run(), None)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let documents = value["documents"].as_array_mut().unwrap();
+    assert_eq!(documents.len(), 5);
+    // Document b again, at the end, after the others.
+    let copy = documents[1].clone();
+    assert_eq!(copy["sha256"], sha('b'));
+    documents.push(copy);
+    assert_eq!(
+        Summary::from_json(&value.to_string()).unwrap_err(),
+        format!("the document {} is listed more than once", sha('b'))
+    );
+}

@@ -593,7 +593,7 @@ impl Summary {
     ///
     /// # Errors
     ///
-    /// A message if the text is not a summary of this layout, its metrics are of another version, or a document's agreed breaks are not as this tool writes them (see [`Breaks::agreed_breaks`]): a damaged or edited baseline is refused rather than compared.
+    /// A message if the text is not a summary of this layout, its metrics are of another version, a document is listed more than once, or a document's agreed breaks are not as this tool writes them (see [`Breaks::agreed_breaks`]): a damaged or edited baseline is refused rather than compared.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let summary: Self = serde_json::from_str(text).map_err(|error| {
             format!(
@@ -613,7 +613,15 @@ impl Summary {
                 summary.metrics
             ));
         }
+        let mut listed = BTreeSet::new();
         for entry in &summary.documents {
+            // A document listed twice would leave the comparison with a baseline to keep only one of its entries.
+            if !listed.insert(entry.document.sha256.as_str()) {
+                return Err(format!(
+                    "the document {} is listed more than once",
+                    entry.document.sha256
+                ));
+            }
             let all = entry
                 .comparison
                 .iter()
