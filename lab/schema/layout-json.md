@@ -121,7 +121,7 @@ A line's `text` holds what a reader sees on that line, so that both sides of a c
 
 ### The comparable form
 
-Some differences remain between producers without the page looking any different. The comparisons of LAB-004 align the **comparable form** of each line's text, which the Rust function `bayan_lab_layout::text::comparable` computes:
+Some differences remain between producers without the page looking any different. The comparisons of LAB-004 ([../compare.md](../compare.md)) align the **comparable form** of each line's text, which the Rust function `bayan_lab_layout::text::comparable` computes (and `comparable_chars`, with the character of the line each comes from):
 
 1. whitespace (Unicode's `White_Space`: spaces, tabs, no-break spaces, line and paragraph separators) is removed;
 2. characters that display nothing are removed: U+200B to U+200D, U+2060 to U+2064, U+FEFF and the bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069);
@@ -143,10 +143,10 @@ A PDF has no lines: it draws glyphs at positions. The extractor forms lines in f
 
 Known differences from the engine's lines, which LAB-004's comparisons have to allow for:
 
-- Text on one baseline that the PDF draws in one go is one line, even where the engine has several: the cells of a table row whose cells each hold one line on the same baseline (`Alpha1` in the samples), or text on both sides of a tab. LAB-004 should join the engine's consecutive lines on one baseline the same way before it compares line breaks.
+- Text on one baseline that the PDF draws in one go is one line, even where the engine has several: the cells of a table row whose cells each hold one line on the same baseline (`Alpha1` in the samples), or text on both sides of a tab. The comparisons join consecutive lines of a page within half an em of each other's baseline, on both sides, before they compare line breaks ([../compare.md](../compare.md)).
 - A superscript or other piece of a line that a producer draws separately, after other lines, forms a line of its own on the same baseline.
 - Only upright text is placed on lines in version 1; rotated and vertical text is counted in `skipped_glyphs`.
-- A line whose display does not tell its reading order (step 3) comes out in the order step 3 gives it, which can differ from the engine's: the engine's left-to-right line `רחוב 15 in` is extracted as the right-to-left `in רחוב 15`. LAB-004 can compare such lines by their glyphs' positions, in display order, where their texts differ.
+- A line whose display does not tell its reading order (step 3) comes out in the order step 3 gives it, which can differ from the engine's: the engine's left-to-right line `רחוב 15 in` is extracted as the right-to-left `in רחוב 15`. The comparisons pair the glyphs of two lines by their positions, in display order, whenever both show the same glyphs from left to right, so such lines are measured all the same ([../compare.md](../compare.md)).
 
 ## The extractor
 
