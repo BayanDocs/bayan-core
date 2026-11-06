@@ -1,5 +1,5 @@
 # Fuzzes every parser of untrusted input that has a fuzz target in fuzz/ (ADR-0025 §4, ADR-0006 §5; bayan-core#21, the follow-up 1 of CORE-005): the targets are built with cargo-fuzz (libFuzzer with AddressSanitizer) on the pinned nightly toolchain, and run by fuzz/ci.py, which holds each target's settings.
-# - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved, which a pull request only reads.
+# - On a pull request that can change what the targets test (the paths below), every target runs for a few minutes (FUZZ_SECONDS, twice as long for the default-limits targets), four at a time, from the public seeds and the corpus the last nightly run saved, which a pull request only reads. A parked target (its `parked` reason in fuzz/ci.py) is built and the tests of its harness run, but it is not fuzzed, here or at night, and the job summary lists it as parked.
 # - Every night, and on demand (workflow_dispatch), every target runs longer from that corpus. If every target passed, the corpus is then minimized and saved with actions/cache for the next run, so it grows from run to run; a run in which a target failed saves nothing (see the step "Minimize the corpora"). Only these runs save a corpus, each into the cache of its own branch: the scheduled runs on main, and a manual run on the branch it was started on.
 # A crash, a timeout, running out of memory or a leak fails the run. Of a target that failed, fuzz/ci.py shows only its name and the kind of failure, in the job log, an annotation and the job summary, which everyone can read: it prints no target's log, and no step uploads an input that failed or a log. libFuzzer writes the input into the log, and a crashing input that mutation found is a working proof of concept, possibly of an undisclosed vulnerability in another project's code that the targets reach, which SECURITY.md asks everyone to keep private. Both stay on the runner, which GitHub deletes after the job; fuzz/README.md explains how to reproduce a failure privately and how to report it. Never add a step that uploads or prints fuzz/artifacts/ or fuzz/logs/.
 # It is not a required check: a path filter skips it on most pull requests, and a required check that never runs would block merging forever (docs/scripts/github-settings.py), as for text-pipeline.yml.
@@ -13,10 +13,12 @@ on:
     paths:
       - crates/bayan-opc/**
       - crates/bayan-xml/**
+      - crates/bayan-engine/**
+      - crates/bayan-crdt/**
       - lab/bayan-lab-layout/**
       - lab/bayan-lab-compare/**
       - fuzz/**
-      # bayan-opc, bayan-xml, bayan-lab-layout and bayan-lab-compare take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
+      # The crates the targets build from their folders take their dependency versions and lints from the root manifest, and Cargo reads .cargo/config.toml when it builds the targets.
       - Cargo.toml
       - .cargo/**
       - .github/workflows/fuzz.yml
@@ -44,15 +46,15 @@ env:
   # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
   CARGO_FUZZ_VERSION: 0.13.2
   CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
-  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 4 × FUZZ_SECONDS: 10 minutes on a pull request, an hour at night. The twelve targets have 14 shares (two of 2, ten of 1) of the 16 that four rounds of four hold: two more targets of share 1 still fit, a third needs a fifth round, and then this comment, the timeouts below and fuzz/README.md change with it.
+  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 5 × FUZZ_SECONDS: 12.5 minutes on a pull request, 75 minutes at night. The seventeen targets have 19 shares (two of 2, fifteen of 1) of the 20 that five rounds of four hold (CORE-010 added the five targets of the engine and of CRDT updates, and with them the fifth round): one more target of share 1 still fits, a second needs a sixth round. fuzz/test_ci.py checks that the job's timeout below leaves every target its full time, so a new target that needs another round fails it until the timeouts, this comment and fuzz/README.md change with it.
   FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 150 || 900 }}
 
 jobs:
   fuzz:
     name: Fuzzing
     runs-on: ubuntu-24.04
-    # A pull request's run takes about 13 minutes and a nightly one about an hour and a quarter: the fuzzing takes 10 and 60 minutes (FUZZ_SECONDS above), and the setup, the build (about a minute) and, at night, the minimizing come on top.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 90 }}
+    # A pull request's run takes about 25 minutes and a nightly one about an hour and a half: the fuzzing takes 12.5 and 75 minutes (FUZZ_SECONDS above), and the setup, the supply-chain checks, the build (about four minutes since Loro is built with AddressSanitizer, CORE-010), the harness's tests (about two minutes) and, at night, the minimizing come on top. fuzz/test_ci.py checks these limits against the rounds of fuzzing.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 120 }}
     permissions:
       contents: read # check out the repository
     steps:
@@ -105,6 +107,10 @@ jobs:
           cargo "+$FUZZ_TOOLCHAIN" fetch --locked --manifest-path fuzz/Cargo.toml
           cargo "+$FUZZ_TOOLCHAIN" fuzz build --target x86_64-unknown-linux-gnu
           git diff --exit-code fuzz/Cargo.lock
+
+      # The harness of the engine's and the CRDT's targets (fuzz/src), whose tests run each target's checks without a fuzzing engine: among them, that a panic the engine catches still fails an engine target, and that crdt_import fails on a panic in BayanDocs code but not on one of Loro's that bayan-crdt contains (CORE-010). From the same fuzz/Cargo.lock as the build above.
+      - name: Test the targets' harness (fuzz/src)
+        run: cargo "+$FUZZ_TOOLCHAIN" test --locked --manifest-path fuzz/Cargo.toml --lib
 
       - name: Write the seeds (public files only)
         run: python3 -I fuzz/ci.py seeds "$RUNNER_TEMP/seeds"

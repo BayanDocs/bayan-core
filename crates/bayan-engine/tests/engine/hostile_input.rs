@@ -1,6 +1,6 @@
 //! Hostile input (ADR-0006, engine protocol §13): random bytes and damaged versions of valid messages and recordings never make a handler panic, every answer is a valid protocol message, and the engine stays usable.
 //!
-//! This is a deterministic, bounded stand-in for fuzzing until the fuzzing workspace exists (CORE-005, CORE-006): it runs the same damaged inputs on every run and every platform.
+//! The fuzz targets `engine_messages`, `engine_tile`, `engine_config` and `engine_replay` (`fuzz/`, CORE-010) check the same properties with inputs that coverage-guided mutation finds, on Linux in CI. This test stays beside them as a deterministic, bounded one: it runs the same damaged inputs on every run and every platform, in WebAssembly too, as part of the verification gate.
 
 use std::cell::Cell;
 use std::sync::Once;

@@ -4,9 +4,9 @@
 Usage, from anywhere in the repository, after `cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu`:
 
   python3 -I fuzz/ci.py seeds SEEDS
-      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here, and for the hint reader the documents, their main document parts and three small main document parts written here. Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
+      Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here, for the hint reader the documents, their main document parts and three small main document parts written here, for the engine's targets sessions of protocol messages, tile requests and configurations written here and the recordings that bayan-engine's tests commit, and for crdt_import nothing, because its own mutator starts from blobs that real editing makes (fuzz/src/crdt.rs). Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
   python3 -I fuzz/ci.py run --seconds N --seeds SEEDS [--work WORK] [--jobs J] (--all | TARGET ...)
-      Runs each target for N seconds times its share (TARGETS below), J at a time (default 4), from its seeds and its corpus in WORK/corpus/<target>/, where it adds what it finds. WORK is this folder unless given, so that the corpora and artifacts are where cargo-fuzz keeps them. Inputs that crash, time out, run out of memory or leak go to WORK/artifacts/<target>/, each target's output to WORK/logs/<target>.log. Exits with 1 if any target failed.
+      Runs each target for N seconds times its share (TARGETS below), J at a time (default 4), from its seeds and its corpus in WORK/corpus/<target>/, where it adds what it finds. --all leaves out a parked target (TARGETS) and lists it as parked; a target named on the command line runs, parked or not. WORK is this folder unless given, so that the corpora and artifacts are where cargo-fuzz keeps them. Inputs that crash, time out, run out of memory or leak go to WORK/artifacts/<target>/, each target's output to WORK/logs/<target>.log. Exits with 1 if any target failed.
   python3 -I fuzz/ci.py minimize [--work WORK] [--jobs J] (--all | TARGET ...)
       Keeps only the inputs of each corpus that its coverage needs (libFuzzer's -merge=1), and reports that coverage.
 
@@ -19,6 +19,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -35,6 +36,8 @@ REPOSITORY = FUZZ.parent
 DOCUMENTS = REPOSITORY / "crates" / "bayan-opc" / "tests" / "fixtures" / "python-docx"
 XML_SAMPLES = REPOSITORY / "crates" / "bayan-xml" / "tests" / "fixtures"
 PDFS = REPOSITORY / "lab" / "bayan-lab-layout" / "tests" / "fixtures"
+# The recordings that bayan-engine's tests commit and keep current (the test the_committed_recordings_are_current); engine_messages also replays session.json from its blob 3.
+RECORDINGS = REPOSITORY / "crates" / "bayan-engine" / "tests" / "fixtures" / "recordings"
 BINARIES = FUZZ / "target" / "x86_64-unknown-linux-gnu" / "release"
 
 # The memory a target may take, AddressSanitizer's share included, before libFuzzer reports it out of memory: libFuzzer's default, which CORE-005 and CORE-006 used too. For the default-limits targets it was checked against the bound that bayan-opc documents (about 256 MiB to open a package and read its core properties): under AddressSanitizer, opening the worst packages of that bound's derivation takes 2.5 to 4.5 times the memory it takes natively, and package_default_limits, which opens a package and then its written copy, peaked at 1,082 MiB on the worst of them. 2,048 MiB leaves room for that, libFuzzer's corpus and AddressSanitizer's quarantine of freed memory, while an input that needs about three times the bound to be opened once, or one and a half times for each of the target's two openings, exceeds it. README.md gives the measurements.
@@ -66,6 +69,8 @@ class Target:
     seeds: Optional[str]
     # Whether libFuzzer may make inputs as long as max_len straight away (-len_control=0), instead of lengthening them slowly from the longest input of the corpus.
     long_inputs: bool = False
+    # Why the automatic runs leave the target out, if they do: `run --all` and `minimize --all` skip a parked target and list it as parked, never as passed, while CI still builds it and runs the tests of its harness, and `run` fuzzes it when it is named. Only a target that a known problem makes fail every run is parked (README.md, "Parked targets"; test_ci.py checks which).
+    parked: Optional[str] = None
 
 
 # Every fuzz target of Cargo.toml, with how CI runs it; `run --all` fails if the two lists differ, so that no target is left out. The default-limits targets get inputs of up to 1 MiB straight away and twice the time of the others, since each of their inputs takes longer; their timeout is longer too, because an input that fills bayan-opc's default metadata budgets takes seconds under AddressSanitizer (12 s for the worst metadata of the memory bound's derivation). The other targets keep the 10 s of CORE-005 and CORE-006, with inputs of up to 64 KiB.
@@ -82,7 +87,35 @@ TARGETS: Dict[str, Target] = {
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
     "pdf_extract": Target("pdf.dict", 64 << 10, 10, 1, "pdfs"),
     "docx_hints": Target("ooxml.dict", 64 << 10, 10, 1, "hint_documents"),
+    # The engine boundary (CORE-010). Their harness renders at most 2^22 pixels per input, replays and its own tiles included (fuzz/src/engine.rs), so that the tiles the engine's limits allow do not reach the timeout.
+    "engine_messages": Target("engine.dict", 64 << 10, 10, 1, "engine_sessions"),
+    "engine_tile": Target("engine.dict", 64 << 10, 10, 1, "tile_requests"),
+    "engine_config": Target("engine.dict", 64 << 10, 10, 1, "configurations"),
+    "engine_replay": Target("engine.dict", 64 << 10, 10, 1, "recordings"),
+    # CRDT updates (CORE-010): no seeds here, because only Loro writes its blobs; the target's custom mutator replaces an input too short to be a blob with one that real editing made, so it needs inputs of full length from the start.
+    "crdt_import": Target(
+        None,
+        64 << 10,
+        10,
+        1,
+        None,
+        long_inputs=True,
+        parked="a problem reported privately in another project's code keeps it out of the automatic runs until a release of that project fixes it; the monthly dependency session runs it on each new version of Loro and removes this reason once it passes",
+    ),
 }
+
+# How many targets `run` fuzzes at a time unless --jobs says otherwise: the four processors of GitHub's runners.
+JOBS = 4
+
+
+def rounds(shares: Sequence[int], jobs: int = JOBS) -> int:
+    """How long `run` takes, in multiples of --seconds, for targets with these shares, `jobs` at a time and the longest first, as `run` schedules them: after that, every target has had its full time."""
+    finish = [0] * max(jobs, 1)
+    for share in sorted(shares, reverse=True):
+        slot = finish.index(min(finish))
+        finish[slot] += share
+    return max(finish)
+
 
 # How libFuzzer names the inputs it keeps, by what went wrong, and the kind of failure that ci.py reports for each: the only thing it shows about a failure. It also keeps inputs that ran slowly (slow-unit-), which are not failures.
 FAILURE_PREFIXES = {"crash-": "crash", "timeout-": "timeout", "oom-": "out of memory", "leak-": "leak"}
@@ -186,6 +219,124 @@ def synthetic_hint_parts() -> List[bytes]:
     return [part(pages), part(revisions), part(fields)]
 
 
+def jsonl(*messages: object) -> bytes:
+    """One input of engine_messages: the messages as compact JSON, one per line, and texts that are not JSON as they are."""
+    return b"\n".join(message if isinstance(message, bytes) else json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode() for message in messages)
+
+
+def request(id_: int, kind: str, payload: object = None) -> Dict[str, object]:
+    """A request envelope (engine protocol §4); without a payload, the message has none."""
+    message: Dict[str, object] = {"v": 0, "id": id_, "type": kind}
+    if payload is not None:
+        message["payload"] = payload
+    return message
+
+
+# The whole of a page of the mock document, in BLU (US Letter at 1,905 BLU a point, as bayan-engine's tests ask for it).
+PAGE = {"x": 0, "y": 0, "width": 15_544_800, "height": 20_116_800}
+
+
+def engine_sessions() -> List[bytes]:
+    """Inputs of engine_messages, each a session of messages, one per line: every message a shell sends, a recording and its replay, the refusals of the envelope and of the handshake, and the limits of the engine and of the mock document. Blob 1 is empty and blob 3 is a recording (fuzz/src/engine.rs); document 1 is the first that doc.open opens."""
+    tile = {"doc_id": 1, "page": 0, "rect": PAGE, "width": 64, "height": 83, "zoom": 1.5, "device_scale": 2, "mode": "interactive"}
+    document = jsonl(
+        request(2, "doc.open", {"blob": 1}),
+        request(3, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": -20.5, "width": 1024, "height": 768}, "zoom": 1.25, "device_scale": 2, "mode": "print"}),
+        request(4, "render.tile", tile),
+        request(5, "input.text", {"doc_id": 1, "text": "Grüße, שלום 😀"}),
+        request(6, "input.composition", {"doc_id": 1, "phase": "start"}),
+        request(7, "input.composition", {"doc_id": 1, "phase": "update", "text": "かな", "selection": {"start": 0, "end": 1}}),
+        request(8, "input.composition", {"doc_id": 1, "phase": "end"}),
+        request(9, "input.key", {"doc_id": 1, "key": "ArrowLeft", "modifiers": {"shift": True}}),
+        request(10, "input.pointer", {"doc_id": 1, "kind": "down", "x": 150.25, "y": 222, "button": 0, "clicks": 2}),
+        request(11, "query.a11y", {"doc_id": 1}),
+        request(12, "query.a11y", {"doc_id": 1, "node": 5}),
+        request(13, "ui.manifest", {"locale": "ar"}),
+        {"v": 0, "type": "input.key", "payload": {"doc_id": 1, "key": "Backspace"}},
+        request(14, "doc.close", {"doc_id": 1}),
+    )
+    recording = jsonl(
+        request(2, "doc.open", {"blob": 1}),
+        request(3, "diag.record.start"),
+        request(4, "render.tile", {"doc_id": 1, "page": 2, "rect": {"x": -100, "y": 50, "width": 4000, "height": 3000}, "width": 16, "height": 12}),
+        request(5, "input.text", {"doc_id": 1, "text": "recorded"}),
+        request(6, "diag.replay", {"blob": 3}),
+        request(7, "diag.record.stop"),
+        request(8, "diag.replay", {"blob": 3}),
+        request(9, "diag.replay", {"blob": 1}),
+        request(10, "diag.record.stop"),
+    )
+    refusals = jsonl(
+        b"not json",
+        b"[]",
+        b"{\"v\":0,\"id\":2,\"type\":\"ui.manifest\",\"type\":\"ui.manifest\"}",
+        {"v": 1, "id": 3, "type": "ui.manifest"},
+        {"v": 0, "id": 0, "type": "ui.manifest"},
+        {"v": 0, "id": 9007199254740992, "type": "ui.manifest"},
+        {"v": 0, "type": "no.such.message"},
+        request(4, "hello", {"protocol_versions": [1, 2]}),
+        request(5, "diag.panic"),
+        request(6, "render.tile", tile),
+        request(7, "doc.open", {"blob": 99}),
+        request(8, "doc.open", {"blob": 0}),
+        request(9, "doc.open"),
+        request(10, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 1, "height": 1}, "zoom": 0, "device_scale": 1}),
+        request(11, "hello", {"protocol_versions": [0], "shell": {"name": "x", "version": "1", "platform": "p"}}),
+        request(12, "query.a11y", {"doc_id": 1}),
+    )
+    limits = jsonl(
+        *[request(2 + number, "doc.open", {"blob": 1}) for number in range(17)],
+        request(20, "input.text", {"doc_id": 1, "text": "x" * 1025}),
+        request(21, "input.composition", {"doc_id": 1, "phase": "update", "text": "y" * 257, "selection": {"start": 0, "end": 0}}),
+        request(22, "render.tile", dict(tile, width=4097)),
+        request(23, "render.tile", dict(tile, rect={"x": 1 << 40, "y": 0, "width": 1, "height": 1}, width=4096, height=1)),
+        request(24, "render.tile", dict(tile, page=3)),
+        request(25, "input.pointer", {"doc_id": 1, "kind": "move", "x": 1e9, "y": -1e9, "button": 0}),
+    )
+    return [document, recording, refusals, limits]
+
+
+def tile_requests() -> List[bytes]:
+    """Inputs of engine_tile: a flags byte (bit 0 records the call), the tile's width and height as little-endian 16-bit numbers, and a request of bayan_render_tile, for document 1, which is open (fuzz/src/engine.rs)."""
+    def tile(flags: int, width: int, height: int, request_: object) -> bytes:
+        text = request_ if isinstance(request_, bytes) else json.dumps(request_, separators=(",", ":")).encode()
+        return bytes([flags]) + width.to_bytes(2, "little") + height.to_bytes(2, "little") + text
+
+    whole = {"doc_id": 1, "page": 0, "rect": PAGE}
+    return [
+        tile(0, 32, 41, whole),
+        tile(1, 32, 41, whole),
+        tile(0, 64, 48, {"doc_id": 1, "page": 1, "rect": {"x": 5_000_000, "y": -1_000, "width": 3_000_000, "height": 2_000_000}, "width": 64, "height": 48, "zoom": 2, "device_scale": 1.5, "mode": "reference"}),
+        tile(1, 7, 3, {"doc_id": 1, "page": 2, "rect": {"x": -(1 << 40), "y": (1 << 40) - 1, "width": 1 << 40, "height": 1}}),
+        tile(0, 4096, 1, dict(whole, mode="draft")),
+        tile(0, 4097, 1, whole),
+        tile(0, 0, 0, whole),
+        tile(1, 8, 8, dict(whole, page=3)),
+        tile(0, 8, 8, dict(whole, doc_id=2)),
+        tile(0, 8, 9, dict(whole, width=8, height=8)),
+        tile(1, 8, 8, b"{\"doc_id\":1,\"page\":0,\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"zoom\":\"\xff\"}"),
+    ]
+
+
+def configurations() -> List[bytes]:
+    """Inputs of engine_config: the configurations that engine protocol §3.3 accepts and those it refuses."""
+    return [
+        b"",
+        b"{}",
+        b'{"test":null}',
+        b'{"test":{}}',
+        b'{"test":{"allow_panic":false}}',
+        b'{"test":{"allow_panic":true}}',
+        b'{"later":{"anything":[1,2.5,null]},"test":{"allow_panic":false}}',
+        b'{"test":{"allow_panics":true}}',
+        b'{"test":{"allow_panic":"yes"}}',
+        b'{"test":true}',
+        b"[]",
+        b"null",
+        b"{",
+    ]
+
+
 def seeds(output: Path) -> Dict[str, int]:
     """Writes the seeds of every target into output/<target>/, each named by the SHA-1 of its content, as libFuzzer names its inputs, and returns how many each target has."""
     kinds: Dict[str, List[bytes]] = {"documents": [], "content_types": [], "relationships": [], "core_properties": [], "xml_parts": []}
@@ -215,6 +366,10 @@ def seeds(output: Path) -> Dict[str, int]:
             if len(part) <= TARGETS["docx_hints"].max_len:
                 main_parts.append(part)
     kinds["hint_documents"] = kinds["documents"] + main_parts + synthetic_hint_parts()
+    kinds["engine_sessions"] = engine_sessions()
+    kinds["tile_requests"] = tile_requests()
+    kinds["configurations"] = configurations()
+    kinds["recordings"] = [recording.read_bytes() for recording in sorted(RECORDINGS.glob("*.json"))]
     counts = {}
     for name, target in TARGETS.items():
         folder = output / name
@@ -336,7 +491,7 @@ def in_github_actions() -> bool:
 def show(result: Result, line: str) -> None:
     """Prints a target's result, which for a failure is the kind of failure and nothing else; in GitHub Actions a failure also becomes an annotation of the run, and elsewhere ci.py says where its log and inputs are. It never prints a log, because the job log of GitHub Actions is public: libFuzzer writes the input that failed into the log (in hex, as text and in Base64, if it has at most 256 bytes), and an input that ran slowly too (in Base64)."""
     print(line, flush=True)
-    if result.status in ("passed", "empty"):
+    if result.status in ("passed", "empty", "parked"):
         return
     if in_github_actions():
         # Nothing in it comes from the target's output, so it needs no protection from workflow commands.
@@ -438,8 +593,8 @@ def run_table(results: Sequence[Result]) -> str:
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
-        if result.status == "failed":
-            # Of a failure, only the target and the kind (README.md, "When a run fails").
+        if result.status in ("failed", "parked"):
+            # Of a failure, only the target and the kind (README.md, "When a run fails"); a parked target did not run.
             rows.append(f"| `{result.target}` | {status_of(result)} |" + " |" * 7)
             continue
         stats = result.stats
@@ -454,7 +609,7 @@ def minimize_table(results: Sequence[Result]) -> str:
     # libFuzzer never copies the seeds into the corpus, and every run reads them again, so a minimized corpus can reach less than the run that fuzzed with the seeds.
     rows = ["| Target | Result | Inputs before | Inputs after | Coverage without the seeds (edges / features) |", "|---|---|---|---|---|"]
     for result in results:
-        if result.status == "failed":
+        if result.status in ("failed", "parked"):
             rows.append(f"| `{result.target}` | {status_of(result)} |" + " |" * 3)
             continue
         stats = result.stats
@@ -482,6 +637,22 @@ def summarize(title: str, table: str, failed: bool) -> None:
             file.write(text + "\n")
 
 
+def parked_results(names: Sequence[str]) -> List[Result]:
+    """The results of parked targets, which an automatic run leaves out: each listed as parked, and shown as such."""
+    results = []
+    for name in names:
+        result = Result(name, status="parked")
+        show(result, f"{name}: parked, not fuzzed by the automatic runs (fuzz/ci.py, TARGETS)")
+        results.append(result)
+    return results
+
+
+def in_order(results: Sequence[Result]) -> List[Result]:
+    """Results in the order of TARGETS."""
+    by_name = {result.target: result for result in results}
+    return [by_name[name] for name in TARGETS if name in by_name]
+
+
 def selected(arguments: argparse.Namespace) -> List[str]:
     """The targets that the command line names, in the order of TARGETS; with --all, every target, after checking that TARGETS matches Cargo.toml."""
     if arguments.all:
@@ -505,7 +676,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         command.add_argument("targets", nargs="*")
         command.add_argument("--all", action="store_true", help="every target")
         command.add_argument("--work", type=Path, default=FUZZ, help="the folder of corpus/, artifacts/ and logs/ (default: this folder, as cargo-fuzz uses it)")
-        command.add_argument("--jobs", type=int, default=4, help="how many targets run at the same time (default 4)")
+        command.add_argument("--jobs", type=int, default=JOBS, help=f"how many targets run at the same time (default {JOBS})")
         command.add_argument("--binaries", type=Path, default=BINARIES, help="where cargo-fuzz built the targets")
         if name == "run":
             command.add_argument("--seconds", type=int, required=True, help="how long a target with a share of 1 runs")
@@ -516,17 +687,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"{name}: {count} seeds")
         return 0
     names = selected(arguments)
+    # Only --all leaves parked targets out; a target named on the command line runs, parked or not.
+    parked = [name for name in names if arguments.all and TARGETS[name].parked]
+    names = [name for name in names if name not in parked]
     if arguments.jobs < 1:
         raise SystemExit("ci.py: --jobs must be at least 1")
     if arguments.command == "run":
         if arguments.seconds < 1:
             raise SystemExit("ci.py: --seconds must be at least 1")
-        results = run(names, arguments.seconds, arguments.jobs, arguments.seeds, arguments.work, arguments.binaries)
+        results = in_order(run(names, arguments.seconds, arguments.jobs, arguments.seeds, arguments.work, arguments.binaries) + parked_results(parked))
         table = run_table(results)
     else:
-        results = minimize(names, arguments.jobs, arguments.work, arguments.binaries)
+        results = in_order(minimize(names, arguments.jobs, arguments.work, arguments.binaries) + parked_results(parked))
         table = minimize_table(results)
-    passed = all(result.status in ("passed", "empty") for result in results)
+    passed = all(result.status in ("passed", "empty", "parked") for result in results)
     summarize("Fuzzing" if arguments.command == "run" else "Corpora, minimized", table, not passed)
     return 0 if passed else 1
 

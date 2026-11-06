@@ -1,6 +1,6 @@
 //! A JSON Schema validator for exactly the part of draft 2020-12 that the protocol's schema uses.
 //!
-//! bayan-lab-layout's tests validate the layout JSON with a copy of this file (`lab/bayan-lab-layout/tests/layout/support/schema_validator.rs`), without `validate_definition`; a test there fails when the two differ in anything else, so change them together.
+//! bayan-lab-layout's tests validate the layout JSON with a copy of this file (`lab/bayan-lab-layout/tests/layout/support/schema_validator.rs`), without `validate_definition`; a test there fails when the two differ in anything else, so change them together. The engine's fuzz targets compile this file itself, by its path (`fuzz/src/lib.rs`), and check every answer of the engine with it, as `hostile_input.rs` does.
 //!
 //! It refuses every keyword it does not know instead of ignoring it, so a constraint can never be skipped silently; extending the schema with a new kind of constraint therefore means extending this validator first. Annotations (`description`, `default`, `title`, `$schema`, `$id` and `x-…`) are ignored, as the standard says. Integers must be written as JSON integers, which is stricter than JSON Schema (it also accepts `1.0`) and matches what the engine accepts.
 
