@@ -141,6 +141,7 @@ dependencies = [
 name = "bayan-lab"
 version = "0.0.0"
 dependencies = [
+ "bayan-lab-compare",
  "bayan-lab-layout",
  "miniz_oxide",
  "proptest",
@@ -148,6 +149,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "bayan-lab-compare"
+version = "0.0.0"
+dependencies = [
+ "bayan-lab-layout",
+ "bayan-opc",
+ "bayan-xml",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
