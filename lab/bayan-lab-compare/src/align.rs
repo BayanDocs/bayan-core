@@ -126,7 +126,7 @@ impl Image {
         self.low <= position && position <= self.high
     }
 
-    fn include(&mut self, position: usize) {
+    fn cover(&mut self, position: usize) {
         if self.is_empty() {
             self.low = position;
             self.high = position;
@@ -200,7 +200,7 @@ impl Alignment {
                     }
                 }
                 if self.hunks.is_empty() && position == 0 {
-                    image.include(0);
+                    image.cover(0);
                 }
             }
             if image.is_empty() {
@@ -308,22 +308,22 @@ fn image_in_hunk(hunk: &Hunk, position: usize, image: &mut Image) {
     let reference = &hunk.reference;
     let candidate = &hunk.candidate;
     if hunk.equal {
-        image.include(hunk.equal_partner(position));
+        image.cover(hunk.equal_partner(position));
     } else if position == reference.start && position == reference.end {
         // Text that only the candidate has: the break may lie before it, after it, or inside it.
-        image.include(candidate.start);
-        image.include(candidate.end);
+        image.cover(candidate.start);
+        image.cover(candidate.end);
     } else if position == reference.start {
-        image.include(candidate.start);
+        image.cover(candidate.start);
     } else if position == reference.end {
-        image.include(candidate.end);
+        image.cover(candidate.end);
     } else if reference.len() <= TOLERATED_DIFFERENCE
         && candidate.len() <= TOLERATED_DIFFERENCE
         && candidate.len() >= 2
     {
         // Inside a short difference of both texts: anywhere strictly inside the candidate's side.
-        image.include(candidate.start + 1);
-        image.include(candidate.end - 1);
+        image.cover(candidate.start + 1);
+        image.cover(candidate.end - 1);
     }
 }
 
@@ -918,10 +918,21 @@ mod tests {
     #[test]
     fn a_gap_whose_sides_differ_too_much_in_length_is_one_difference_at_once() {
         // A million characters against a few: no anchor, and at least a million edits.
-        let a: Vec<char> = (0..1_000_000_u32).map(|i| char::from(b'a' + u8::try_from(i % 7).unwrap())).collect();
+        let a: Vec<char> = (0..1_000_000_u32)
+            .map(|i| char::from(b'a' + u8::try_from(i % 7).unwrap()))
+            .collect();
         let b = chars("xyz");
-        let alignment = align(&a, &b, &Limits { max_work: 5_000_000 });
-        assert!(alignment.complete(), "decided without spending the work limit");
+        let alignment = align(
+            &a,
+            &b,
+            &Limits {
+                max_work: 5_000_000,
+            },
+        );
+        assert!(
+            alignment.complete(),
+            "decided without spending the work limit"
+        );
         assert_eq!(alignment.hunks(), [differ(0..1_000_000, 0..3)]);
     }
 
