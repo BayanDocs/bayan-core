@@ -26,12 +26,16 @@ pub const EMPTY_BLOB: BlobId = 1;
 pub const RECORDING_BLOB: BlobId = 3;
 
 /// The recording of [`RECORDING_BLOB`]: a session recorded by the engine's tests (`crates/bayan-engine/tests/engine/record_replay.rs`), committed and kept current by them.
-pub const SESSION_RECORDING: &[u8] = include_bytes!("../../crates/bayan-engine/tests/fixtures/recordings/session.json");
+pub const SESSION_RECORDING: &[u8] =
+    include_bytes!("../../crates/bayan-engine/tests/fixtures/recordings/session.json");
 
 /// The configuration of every engine target: the defaults, whose test switches are off, so that `diag.panic` is refused.
 pub fn config() -> Config {
     let config = Config::default();
-    assert!(!config.allow_panic, "the engine targets run with the test switches off");
+    assert!(
+        !config.allow_panic,
+        "the engine targets run with the test switches off"
+    );
     config
 }
 
@@ -39,19 +43,31 @@ pub fn config() -> Config {
 fn validator() -> &'static Validator<'static> {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     static VALIDATOR: OnceLock<Validator<'static>> = OnceLock::new();
-    VALIDATOR.get_or_init(|| Validator::new(SCHEMA.get_or_init(|| schema::json_schema().expect("the protocol's schema"))))
+    VALIDATOR.get_or_init(|| {
+        Validator::new(SCHEMA.get_or_init(|| schema::json_schema().expect("the protocol's schema")))
+    })
 }
 
 /// Checks one message the engine sent: at most the message limit, JSON, a valid protocol message by the schema, and no report of a panic; returns it parsed. Panics, which fails the run, otherwise.
 pub fn check_answer(answer: &str) -> Value {
-    assert!(answer.len() <= MAX_MESSAGE_BYTES, "an answer of {} bytes", answer.len());
+    assert!(
+        answer.len() <= MAX_MESSAGE_BYTES,
+        "an answer of {} bytes",
+        answer.len()
+    );
     let value: Value = serde_json::from_str(answer).expect("every answer is JSON");
     if let Err(error) = validator().validate(&value) {
         panic!("an answer that is not a valid protocol message: {error}");
     }
-    let code = value.pointer("/error/code").or_else(|| value.pointer("/payload/code"));
+    let code = value
+        .pointer("/error/code")
+        .or_else(|| value.pointer("/payload/code"));
     assert_ne!(code, Some(&json!("panic")), "the engine caught a panic");
-    assert_ne!(value.pointer("/payload/recoverable"), Some(&json!(false)), "the engine discarded its session");
+    assert_ne!(
+        value.pointer("/payload/recoverable"),
+        Some(&json!(false)),
+        "the engine discarded its session"
+    );
     value
 }
 
@@ -63,7 +79,12 @@ fn lenient_json(bytes: &[u8]) -> Option<Value> {
 /// The pixels of a tile of `width` × `height` that the engine would render: none for a size it refuses.
 fn tile_pixels(width: Option<u64>, height: Option<u64>) -> u64 {
     match (width, height) {
-        (Some(width), Some(height)) if (1..=u64::from(MAX_TILE_SIDE)).contains(&width) && (1..=u64::from(MAX_TILE_SIDE)).contains(&height) => width * height,
+        (Some(width), Some(height))
+            if (1..=u64::from(MAX_TILE_SIDE)).contains(&width)
+                && (1..=u64::from(MAX_TILE_SIDE)).contains(&height) =>
+        {
+            width * height
+        }
         _ => 0,
     }
 }
@@ -74,7 +95,10 @@ fn message_pixels(message: &[u8]) -> u64 {
         return 0;
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("render.tile") => tile_pixels(value.pointer("/payload/width").and_then(Value::as_u64), value.pointer("/payload/height").and_then(Value::as_u64)),
+        Some("render.tile") => tile_pixels(
+            value.pointer("/payload/width").and_then(Value::as_u64),
+            value.pointer("/payload/height").and_then(Value::as_u64),
+        ),
         Some("diag.replay") => recording_pixels(SESSION_RECORDING),
         _ => 0,
     }
@@ -114,21 +138,32 @@ pub fn recording_pixels(recording: &[u8]) -> u64 {
     };
     let mut pixels = 0_u64;
     for entry in entries {
-        let bytes = match (entry.get("text").and_then(Value::as_str), entry.get("base64").and_then(Value::as_str)) {
+        let bytes = match (
+            entry.get("text").and_then(Value::as_str),
+            entry.get("base64").and_then(Value::as_str),
+        ) {
             (Some(text), _) => Some(text.as_bytes().to_vec()),
             (None, Some(encoded)) => lenient_base64(encoded),
             (None, None) => None,
         };
         let entry_pixels = match entry.get("kind").and_then(Value::as_str) {
-            Some("tile") => tile_pixels(entry.get("width").and_then(Value::as_u64), entry.get("height").and_then(Value::as_u64)),
+            Some("tile") => tile_pixels(
+                entry.get("width").and_then(Value::as_u64),
+                entry.get("height").and_then(Value::as_u64),
+            ),
             // A replaying engine refuses diag.replay itself, so only tiles count.
-            Some("message") => bytes.and_then(|bytes| lenient_json(&bytes)).map_or(0, |message| {
-                if message.get("type").and_then(Value::as_str) == Some("render.tile") {
-                    tile_pixels(message.pointer("/payload/width").and_then(Value::as_u64), message.pointer("/payload/height").and_then(Value::as_u64))
-                } else {
-                    0
-                }
-            }),
+            Some("message") => bytes
+                .and_then(|bytes| lenient_json(&bytes))
+                .map_or(0, |message| {
+                    if message.get("type").and_then(Value::as_str) == Some("render.tile") {
+                        tile_pixels(
+                            message.pointer("/payload/width").and_then(Value::as_u64),
+                            message.pointer("/payload/height").and_then(Value::as_u64),
+                        )
+                    } else {
+                        0
+                    }
+                }),
             _ => 0,
         };
         pixels = pixels.saturating_add(entry_pixels);
@@ -142,14 +177,21 @@ fn engine_after_hello(config: Config) -> Engine {
     assert_eq!(blobs.put_shell(b""), Ok(EMPTY_BLOB));
     assert_eq!(blobs.put_shell(SESSION_RECORDING), Ok(RECORDING_BLOB));
     let mut engine = Engine::new(config, blobs);
-    let welcome = send(&mut engine, br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#);
+    let welcome = send(
+        &mut engine,
+        br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+    );
     assert_eq!(welcome[0]["type"], json!("welcome"));
     engine
 }
 
 /// Hands one message that arrived at `received_ms` to the engine, checks every answer, releases the blobs the engine created for it, as a shell would, and returns the answers.
 fn send_at(engine: &mut Engine, message: &[u8], received_ms: u64) -> Vec<Value> {
-    let answers: Vec<Value> = engine.handle(message, received_ms).iter().map(|answer| check_answer(answer)).collect();
+    let answers: Vec<Value> = engine
+        .handle(message, received_ms)
+        .iter()
+        .map(|answer| check_answer(answer))
+        .collect();
     for answer in &answers {
         // Engine blobs have even identifiers; only those are released.
         if let Some(blob) = answer.pointer("/payload/blob").and_then(Value::as_u64)
@@ -174,7 +216,11 @@ pub fn messages(data: &[u8]) {
 pub fn messages_with(config: Config, data: &[u8]) {
     let mut engine = engine_after_hello(config);
     let mut pixels = 0_u64;
-    for (index, message) in data.split(|&byte| byte == b'\n').take(MAX_MESSAGES).enumerate() {
+    for (index, message) in data
+        .split(|&byte| byte == b'\n')
+        .take(MAX_MESSAGES)
+        .enumerate()
+    {
         let cost = message_pixels(message);
         if pixels.saturating_add(cost) > PIXEL_BUDGET {
             continue;
@@ -184,22 +230,46 @@ pub fn messages_with(config: Config, data: &[u8]) {
     }
     // The engine still works.
     let id = bayan_engine::limits::MAX_ID;
-    let welcome = send(&mut engine, format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#).as_bytes());
-    assert_eq!((welcome.len(), &welcome[0]["re"], &welcome[0]["type"]), (1, &json!(id), &json!("welcome")), "a new handshake after the input");
-    let opened = send(&mut engine, format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#).as_bytes());
-    let doc_id = opened[0].pointer("/payload/doc_id").and_then(Value::as_u64).expect("the mock document opens after the input");
+    let welcome = send(
+        &mut engine,
+        format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#)
+            .as_bytes(),
+    );
+    assert_eq!(
+        (welcome.len(), &welcome[0]["re"], &welcome[0]["type"]),
+        (1, &json!(id), &json!("welcome")),
+        "a new handshake after the input"
+    );
+    let opened = send(
+        &mut engine,
+        format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+            .as_bytes(),
+    );
+    let doc_id = opened[0]
+        .pointer("/payload/doc_id")
+        .and_then(Value::as_u64)
+        .expect("the mock document opens after the input");
     let tile = send(&mut engine, format!(r#"{{"v":0,"id":3,"type":"render.tile","payload":{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":10}}}}"#).as_bytes());
-    assert_eq!(tile[0].pointer("/payload/stride"), Some(&json!(32)), "a tile after the input");
+    assert_eq!(
+        tile[0].pointer("/payload/stride"),
+        Some(&json!(32)),
+        "a tile after the input"
+    );
 }
 
 /// The request of the reference tile that `engine_tile` renders after each input, and its size.
-const REFERENCE_TILE: &[u8] = br#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":15544800,"height":20116800}}"#;
+const REFERENCE_TILE: &[u8] =
+    br#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":15544800,"height":20116800}}"#;
 const REFERENCE_SIZE: (u32, u32) = (32, 41);
 
 /// An engine after the handshake with the mock document open as document 1, as `engine_tile` starts.
 fn engine_with_document(config: Config) -> Engine {
     let mut engine = engine_after_hello(config);
-    let opened = send(&mut engine, format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#).as_bytes());
+    let opened = send(
+        &mut engine,
+        format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+            .as_bytes(),
+    );
     assert_eq!(opened[0].pointer("/payload/doc_id"), Some(&json!(1)));
     engine
 }
@@ -209,7 +279,10 @@ fn reference_digest() -> &'static str {
     static DIGEST: OnceLock<String> = OnceLock::new();
     DIGEST.get_or_init(|| {
         let mut engine = engine_with_document(config());
-        let pixels = engine.render_tile(REFERENCE_TILE, REFERENCE_SIZE.0, REFERENCE_SIZE.1, 0).pixels.expect("the reference tile");
+        let pixels = engine
+            .render_tile(REFERENCE_TILE, REFERENCE_SIZE.0, REFERENCE_SIZE.1, 0)
+            .pixels
+            .expect("the reference tile");
         digest::of_bytes(&pixels)
     })
 }
@@ -219,7 +292,10 @@ pub fn tile(data: &[u8]) {
     let Some((&[flags, w0, w1, h0, h1], request)) = data.split_first_chunk::<5>() else {
         return;
     };
-    let (width, height) = (u32::from(u16::from_le_bytes([w0, w1])), u32::from(u16::from_le_bytes([h0, h1])));
+    let (width, height) = (
+        u32::from(u16::from_le_bytes([w0, w1])),
+        u32::from(u16::from_le_bytes([h0, h1])),
+    );
     if tile_pixels(Some(u64::from(width)), Some(u64::from(height))) > PIXEL_BUDGET {
         return;
     }
@@ -229,10 +305,17 @@ pub fn tile(data: &[u8]) {
         send(&mut engine, br#"{"v":0,"id":3,"type":"diag.record.start"}"#);
     }
     let outcome = engine.render_tile(request, width, height, 7);
-    assert!(outcome.messages.is_empty(), "rendering a tile sent {} messages", outcome.messages.len());
+    assert!(
+        outcome.messages.is_empty(),
+        "rendering a tile sent {} messages",
+        outcome.messages.len()
+    );
     match &outcome.pixels {
         Ok(pixels) => {
-            assert_eq!(pixels.len(), usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap_or(usize::MAX));
+            assert_eq!(
+                pixels.len(),
+                usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap_or(usize::MAX)
+            );
             assert_eq!(outcome.digest, record.then(|| digest::of_bytes(pixels)));
         }
         Err(TileError::InvalidArgument | TileError::NotFound) => assert_eq!(outcome.digest, None),
@@ -242,28 +325,55 @@ pub fn tile(data: &[u8]) {
         // Not through `send`, which would release the recording's blob.
         let answers = engine.handle(br#"{"v":0,"id":4,"type":"diag.record.stop"}"#, 9);
         let stopped = check_answer(&answers[0]);
-        let blob = stopped.pointer("/payload/blob").and_then(Value::as_u64).expect("the recording's blob");
+        let blob = stopped
+            .pointer("/payload/blob")
+            .and_then(Value::as_u64)
+            .expect("the recording's blob");
         let recording = engine.blobs().take(blob).expect("the recording");
         let report = recording::replay(config(), &recording).expect("the recording replays");
-        assert!(report.identical && report.entries == 1, "the recorded call replays identically: {report:?}");
+        assert!(
+            report.identical && report.entries == 1,
+            "the recorded call replays identically: {report:?}"
+        );
     }
-    let reference = engine.render_tile(REFERENCE_TILE, REFERENCE_SIZE.0, REFERENCE_SIZE.1, 0).pixels.expect("the reference tile after the input");
-    assert_eq!(digest::of_bytes(&reference), reference_digest(), "the reference tile changed after the input");
+    let reference = engine
+        .render_tile(REFERENCE_TILE, REFERENCE_SIZE.0, REFERENCE_SIZE.1, 0)
+        .pixels
+        .expect("the reference tile after the input");
+    assert_eq!(
+        digest::of_bytes(&reference),
+        reference_digest(),
+        "the reference tile changed after the input"
+    );
 }
 
 /// `engine_config`: [`Config::from_json`]. Properties: no panic; the same input gives the same configuration; only an empty input or a JSON object is accepted; and an accepted configuration starts an engine that completes a handshake, and, with the test switch off, refuses `diag.panic`.
 pub fn config_json(data: &[u8]) {
     let parsed = Config::from_json(data);
-    assert_eq!(Config::from_json(data), parsed, "the same configuration twice");
+    assert_eq!(
+        Config::from_json(data),
+        parsed,
+        "the same configuration twice"
+    );
     let Ok(config) = parsed else {
-        assert!(!data.is_empty(), "an empty configuration means the defaults");
+        assert!(
+            !data.is_empty(),
+            "an empty configuration means the defaults"
+        );
         return;
     };
-    assert!(data.is_empty() || serde_json::from_slice::<Value>(data).is_ok_and(|value| value.is_object()), "only an object is a configuration");
+    assert!(
+        data.is_empty()
+            || serde_json::from_slice::<Value>(data).is_ok_and(|value| value.is_object()),
+        "only an object is a configuration"
+    );
     let mut engine = engine_after_hello(config);
     if !config.allow_panic {
         let refused = send(&mut engine, br#"{"v":0,"id":2,"type":"diag.panic"}"#);
-        assert_eq!(refused[0].pointer("/error/code"), Some(&json!("not_allowed")));
+        assert_eq!(
+            refused[0].pointer("/error/code"),
+            Some(&json!("not_allowed"))
+        );
     }
 }
 
@@ -278,7 +388,11 @@ pub fn replay_with(config: Config, data: &[u8]) {
         return;
     }
     let result = recording::replay(config, data);
-    assert_eq!(recording::replay(config, data), result, "replaying the same recording twice");
+    assert_eq!(
+        recording::replay(config, data),
+        result,
+        "replaying the same recording twice"
+    );
     match &result {
         Ok(report) => check_report(report),
         Err(error) => check_refusal(error),
@@ -291,13 +405,28 @@ fn check_report(report: &ReplayReport) {
         panic!("a replay report that the schema refuses: {error}");
     }
     assert_eq!(report.identical, report.first_difference.is_none());
-    assert!(report.first_difference.is_none_or(|entry| entry < report.entries));
+    assert!(
+        report
+            .first_difference
+            .is_none_or(|entry| entry < report.entries)
+    );
     let mut previous = 0;
     for tile in &report.tiles {
-        assert!(tile.entry < report.entries && tile.entry >= previous, "{tile:?}");
+        assert!(
+            tile.entry < report.entries && tile.entry >= previous,
+            "{tile:?}"
+        );
         previous = tile.entry;
-        assert!((1..=MAX_TILE_SIDE).contains(&tile.width) && (1..=MAX_TILE_SIDE).contains(&tile.height), "{tile:?}");
-        assert!(tile.hash.strip_prefix("fnv1a64:").is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())), "{tile:?}");
+        assert!(
+            (1..=MAX_TILE_SIDE).contains(&tile.width) && (1..=MAX_TILE_SIDE).contains(&tile.height),
+            "{tile:?}"
+        );
+        assert!(
+            tile.hash.strip_prefix("fnv1a64:").is_some_and(
+                |hex| hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            ),
+            "{tile:?}"
+        );
     }
 }
 
@@ -313,8 +442,17 @@ fn check_refusal(error: &ErrorInfo) {
     };
     match error.code {
         ErrorCode::InvalidRecording => assert!(error.args.is_empty(), "{error:?}"),
-        ErrorCode::RecordingMismatch => assert!(matches!(text("field"), Some("engine_version" | "protocol_version" | "layout_epoch")) && error.args.len() == 1, "{error:?}"),
-        ErrorCode::LimitExceeded => assert!(text("limit") == Some("replay_pixels") && error.args.len() == 1, "{error:?}"),
+        ErrorCode::RecordingMismatch => assert!(
+            matches!(
+                text("field"),
+                Some("engine_version" | "protocol_version" | "layout_epoch")
+            ) && error.args.len() == 1,
+            "{error:?}"
+        ),
+        ErrorCode::LimitExceeded => assert!(
+            text("limit") == Some("replay_pixels") && error.args.len() == 1,
+            "{error:?}"
+        ),
         _ => panic!("a replay refused with an undocumented error: {error:?}"),
     }
 }
@@ -329,11 +467,23 @@ mod tests {
         // Invalid UTF-8 in a field the engine skips hides nothing.
         assert_eq!(message_pixels(b"{\"v\":0,\"x\":\"\xff\",\"type\":\"render.tile\",\"payload\":{\"width\":4096,\"height\":4096}}"), 1 << 24);
         // Escapes in the type are read as the engine reads them.
-        assert_eq!(message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":2,"height":2}}"#), 4);
+        assert_eq!(
+            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":2,"height":2}}"#),
+            4
+        );
         // Sizes the engine refuses cost nothing.
-        assert_eq!(message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":4097,"height":2}}"#), 0);
-        assert_eq!(message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":0,"height":2}}"#), 0);
-        assert_eq!(message_pixels(br#"{"v":0,"type":"diag.replay","payload":{"blob":3}}"#), recording_pixels(SESSION_RECORDING));
+        assert_eq!(
+            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":4097,"height":2}}"#),
+            0
+        );
+        assert_eq!(
+            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":0,"height":2}}"#),
+            0
+        );
+        assert_eq!(
+            message_pixels(br#"{"v":0,"type":"diag.replay","payload":{"blob":3}}"#),
+            recording_pixels(SESSION_RECORDING)
+        );
         assert!(recording_pixels(SESSION_RECORDING) > 0);
         assert_eq!(message_pixels(b"not json"), 0);
     }

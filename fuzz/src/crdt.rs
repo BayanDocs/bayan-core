@@ -13,18 +13,30 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bayan_crdt::{
-    CrdtError, Doc, DocStats, Expand, IdList, ImportError, ImportLimits, MarkFamily, PeerId, PropertyMap, Registry, Stories, Story, UndoManager,
-    Value, Version, VersionVector,
+    CrdtError, Doc, DocStats, Expand, IdList, ImportError, ImportLimits, MarkFamily, PeerId,
+    PropertyMap, Registry, Stories, Story, UndoManager, Value, Version, VersionVector,
 };
 
 use crate::loro_panics::{self, Lockfile, Owner};
 
 /// The mark families of the document model (`crates/bayan-model/src/marks.rs`): run properties continue at the end of a run, links, comments and revisions never expand.
 pub const FAMILIES: [MarkFamily; 4] = [
-    MarkFamily { name: "r", expand: Expand::After },
-    MarkFamily { name: "link", expand: Expand::None },
-    MarkFamily { name: "cmt", expand: Expand::None },
-    MarkFamily { name: "rev", expand: Expand::None },
+    MarkFamily {
+        name: "r",
+        expand: Expand::After,
+    },
+    MarkFamily {
+        name: "link",
+        expand: Expand::None,
+    },
+    MarkFamily {
+        name: "cmt",
+        expand: Expand::None,
+    },
+    MarkFamily {
+        name: "rev",
+        expand: Expand::None,
+    },
 ];
 
 /// The replica that imports: none of the replicas that wrote the seeds.
@@ -37,9 +49,12 @@ const LORO_SEED: u32 = u32::from_le_bytes(*b"LORO");
 const BODY: usize = 22;
 
 /// The base document and update of CORE-004's crafted blob, which the adapter's test `import_panic` replays: a document made by random editing, and the update with which Loro 1.16.2 panics (and its valid original), seeds of this target too.
-const PANIC_BASE: &[u8] = include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-base.bin");
-const PANIC_UPDATE: &[u8] = include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-update.bin");
-const PANIC_CRAFTED: &[u8] = include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin");
+const PANIC_BASE: &[u8] =
+    include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-base.bin");
+const PANIC_UPDATE: &[u8] =
+    include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-update.bin");
+const PANIC_CRAFTED: &[u8] =
+    include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin");
 
 /// The index in [`Corpus::bases`] of CORE-004's base document.
 pub const PANIC_BASE_INDEX: u8 = 1;
@@ -66,13 +81,16 @@ pub fn install_panic_hook() -> Result<(), String> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
-        let owner = loro_panics::frames(&format!("{backtrace:?}")).map(|frames| loro_panics::owner(&frames, &lockfile, &loro));
+        let owner = loro_panics::frames(&format!("{backtrace:?}"))
+            .map(|frames| loro_panics::owner(&frames, &lockfile, &loro));
         match owner {
             Ok(Owner::Loro(_)) => {
                 LORO_PANICS.fetch_add(1, Ordering::SeqCst);
             }
             Ok(Owner::NotLoro(reason)) | Err(reason) => {
-                eprintln!("crdt_import: a panic that is not Loro's fails the run ({reason}). The backtrace at the panic:\n{backtrace:#}");
+                eprintln!(
+                    "crdt_import: a panic that is not Loro's fails the run ({reason}). The backtrace at the panic:\n{backtrace:#}"
+                );
                 previous(info);
                 // libfuzzer-sys's hook aborts by itself; this is in case another hook was installed before.
                 std::process::abort();
@@ -123,30 +141,52 @@ pub fn xxh32(input: &[u8], seed: u32) -> u32 {
     const PRIME_3: u32 = 0xC2B2_AE3D;
     const PRIME_4: u32 = 0x27D4_EB2F;
     const PRIME_5: u32 = 0x1656_67B1;
-    let read = |at: usize| u32::from_le_bytes([input[at], input[at + 1], input[at + 2], input[at + 3]]);
-    let round = |accumulator: u32, lane: u32| accumulator.wrapping_add(lane.wrapping_mul(PRIME_2)).rotate_left(13).wrapping_mul(PRIME_1);
+    let read =
+        |at: usize| u32::from_le_bytes([input[at], input[at + 1], input[at + 2], input[at + 3]]);
+    let round = |accumulator: u32, lane: u32| {
+        accumulator
+            .wrapping_add(lane.wrapping_mul(PRIME_2))
+            .rotate_left(13)
+            .wrapping_mul(PRIME_1)
+    };
     let len = input.len();
     let mut at = 0;
     let mut hash = if len >= 16 {
-        let mut lanes = [seed.wrapping_add(PRIME_1).wrapping_add(PRIME_2), seed.wrapping_add(PRIME_2), seed, seed.wrapping_sub(PRIME_1)];
+        let mut lanes = [
+            seed.wrapping_add(PRIME_1).wrapping_add(PRIME_2),
+            seed.wrapping_add(PRIME_2),
+            seed,
+            seed.wrapping_sub(PRIME_1),
+        ];
         while at + 16 <= len {
             for (index, lane) in lanes.iter_mut().enumerate() {
                 *lane = round(*lane, read(at + 4 * index));
             }
             at += 16;
         }
-        lanes[0].rotate_left(1).wrapping_add(lanes[1].rotate_left(7)).wrapping_add(lanes[2].rotate_left(12)).wrapping_add(lanes[3].rotate_left(18))
+        lanes[0]
+            .rotate_left(1)
+            .wrapping_add(lanes[1].rotate_left(7))
+            .wrapping_add(lanes[2].rotate_left(12))
+            .wrapping_add(lanes[3].rotate_left(18))
     } else {
         seed.wrapping_add(PRIME_5)
     };
     // The total length modulo 2^32.
-    hash = hash.wrapping_add(u32::try_from(u64::try_from(len).unwrap_or(0) & 0xFFFF_FFFF).unwrap_or(0));
+    hash = hash
+        .wrapping_add(u32::try_from(u64::try_from(len).unwrap_or(0) & 0xFFFF_FFFF).unwrap_or(0));
     while at + 4 <= len {
-        hash = hash.wrapping_add(read(at).wrapping_mul(PRIME_3)).rotate_left(17).wrapping_mul(PRIME_4);
+        hash = hash
+            .wrapping_add(read(at).wrapping_mul(PRIME_3))
+            .rotate_left(17)
+            .wrapping_mul(PRIME_4);
         at += 4;
     }
     while at < len {
-        hash = hash.wrapping_add(u32::from(input[at]).wrapping_mul(PRIME_5)).rotate_left(11).wrapping_mul(PRIME_1);
+        hash = hash
+            .wrapping_add(u32::from(input[at]).wrapping_mul(PRIME_5))
+            .rotate_left(11)
+            .wrapping_mul(PRIME_1);
         at += 1;
     }
     hash ^= hash >> 15;
@@ -201,7 +241,8 @@ impl Corpus {
                 edit(&a, &mut undo_a, &mut rng);
             }
             let base = a.export_snapshot().expect("the base's snapshot");
-            let b = Doc::load(&base, PeerId(2), &FAMILIES, &ImportLimits::LOCAL_SNAPSHOT).expect("replica 2");
+            let b = Doc::load(&base, PeerId(2), &FAMILIES, &ImportLimits::LOCAL_SNAPSHOT)
+                .expect("replica 2");
             let mut undo_b = UndoManager::new(&b);
             let checkpoint = a.version_vector();
             let index = u8::try_from(bases.len()).expect("fewer than 128 bases");
@@ -213,10 +254,33 @@ impl Corpus {
             let from_b = b.export_updates(&checkpoint).expect("replica 2's updates");
             seeds.push([&[selector(index, false)], from_a.as_slice()].concat());
             seeds.push([&[selector(index, false)], from_b.as_slice()].concat());
-            seeds.push([&[selector(0, false)], a.export_updates(&VersionVector::new()).expect("the whole history").as_slice()].concat());
-            a.import(&from_b, &ImportLimits::UPDATE).expect("replica 2's updates merge");
-            seeds.push([&[selector(index, true)], a.export_snapshot().expect("the merged snapshot").as_slice()].concat());
-            seeds.push([&[selector(0, true)], a.export_shallow_snapshot(&a.version()).expect("a shallow snapshot").as_slice()].concat());
+            seeds.push(
+                [
+                    &[selector(0, false)],
+                    a.export_updates(&VersionVector::new())
+                        .expect("the whole history")
+                        .as_slice(),
+                ]
+                .concat(),
+            );
+            a.import(&from_b, &ImportLimits::UPDATE)
+                .expect("replica 2's updates merge");
+            seeds.push(
+                [
+                    &[selector(index, true)],
+                    a.export_snapshot().expect("the merged snapshot").as_slice(),
+                ]
+                .concat(),
+            );
+            seeds.push(
+                [
+                    &[selector(0, true)],
+                    a.export_shallow_snapshot(&a.version())
+                        .expect("a shallow snapshot")
+                        .as_slice(),
+                ]
+                .concat(),
+            );
             // An update offered with the snapshot limits, and a snapshot with the update limits, which refuse it.
             seeds.push([&[selector(index, true)], from_b.as_slice()].concat());
             seeds.push([&[selector(index, false)], base.as_slice()].concat());
@@ -233,71 +297,140 @@ impl Default for Corpus {
 }
 
 /// Text in several scripts and with characters that need care: combining marks, right-to-left text, CJK, an emoji outside the Basic Multilingual Plane, a soft hyphen and a no-break space.
-const TEXTS: [&str; 10] = ["Hello", " world", "Grüße", "שלום", "مرحبا", "日本語", "😀", "e\u{301}", "\u{AD}\u{A0}", "\u{200F}x"];
+const TEXTS: [&str; 10] = [
+    "Hello",
+    " world",
+    "Grüße",
+    "שלום",
+    "مرحبا",
+    "日本語",
+    "😀",
+    "e\u{301}",
+    "\u{AD}\u{A0}",
+    "\u{200F}x",
+];
 
 /// One random edit of the kinds a document model makes, then, now and then, a commit (an undo step or not), an undo or a redo.
 fn edit(doc: &Doc, undo: &mut UndoManager, rng: &mut Rng) {
     let story = if rng.chance(1, 4) {
         let id = format!("s{}", rng.below(3));
-        doc.stories().get(&id).map_or_else(|| doc.stories().create(&id).expect("a story"), |story| story)
+        doc.stories().get(&id).map_or_else(
+            || doc.stories().create(&id).expect("a story"),
+            |story| story,
+        )
     } else {
         doc.main_story()
     };
     let len = story.len();
     match rng.below(9) {
-        0 | 1 => story.insert(rng.below(len + 1), TEXTS[rng.below(TEXTS.len())]).expect("insert"),
+        0 | 1 => story
+            .insert(rng.below(len + 1), TEXTS[rng.below(TEXTS.len())])
+            .expect("insert"),
         2 if len > 0 => {
             let start = rng.below(len);
-            story.delete(start..start + 1 + rng.below((len - start).min(8))).expect("delete");
+            story
+                .delete(start..start + 1 + rng.below((len - start).min(8)))
+                .expect("delete");
         }
         3 if len > 0 => {
             let start = rng.below(len);
             let end = start + 1 + rng.below(len - start);
             let (key, value) = match rng.below(6) {
                 0 => ("r:b".to_owned(), Value::Bool(true)),
-                1 => ("r:sz".to_owned(), Value::Int(i64::try_from(rng.below(96)).unwrap_or(0) + 8)),
+                1 => (
+                    "r:sz".to_owned(),
+                    Value::Int(i64::try_from(rng.below(96)).unwrap_or(0) + 8),
+                ),
                 2 => ("r:color".to_owned(), Value::Str("2F5496".to_owned())),
-                3 => ("link".to_owned(), Value::Str("https://example.com/".to_owned())),
+                3 => (
+                    "link".to_owned(),
+                    Value::Str("https://example.com/".to_owned()),
+                ),
                 4 => (format!("cmt:{}", rng.below(4)), Value::Str("c".to_owned())),
-                _ => ("rev:ins".to_owned(), Value::Map([("author".to_owned(), Value::Str("A".to_owned())), ("id".to_owned(), Value::Int(7))].into())),
+                _ => (
+                    "rev:ins".to_owned(),
+                    Value::Map(
+                        [
+                            ("author".to_owned(), Value::Str("A".to_owned())),
+                            ("id".to_owned(), Value::Int(7)),
+                        ]
+                        .into(),
+                    ),
+                ),
             };
             story.mark(start..end, &key, &value).expect("mark");
         }
         4 if len > 0 => {
             let start = rng.below(len);
-            story.unmark(start..start + 1 + rng.below(len - start), ["r:b", "link", "rev:ins"][rng.below(3)]).expect("unmark");
+            story
+                .unmark(
+                    start..start + 1 + rng.below(len - start),
+                    ["r:b", "link", "rev:ins"][rng.below(3)],
+                )
+                .expect("unmark");
         }
         5 => story
-            .insert_atom(rng.below(len + 1), ['\u{0D}', '\u{FFFC}', '\u{0C}'][rng.below(3)], &format!("p:{}", rng.below(16)))
+            .insert_atom(
+                rng.below(len + 1),
+                ['\u{0D}', '\u{FFFC}', '\u{0C}'][rng.below(3)],
+                &format!("p:{}", rng.below(16)),
+            )
             .expect("an atom"),
         6 => {
             let registry = doc.registry("paragraphs").expect("the registry");
             let id = format!("p{}", rng.below(8));
-            let entry = registry.get(&id).map_or_else(|| registry.create(&id).expect("an entry"), |entry| entry);
+            let entry = registry
+                .get(&id)
+                .map_or_else(|| registry.create(&id).expect("an entry"), |entry| entry);
             let value = match rng.below(5) {
                 0 => Value::Str(["Heading1", "Normal", "ListParagraph"][rng.below(3)].to_owned()),
                 1 => Value::Int(i64::try_from(rng.below(14_400)).unwrap_or(0) - 720),
-                2 => Value::List(vec![Value::Int(720), Value::Int(1440), Value::Str("dot".to_owned())]),
-                3 => Value::Map([("val".to_owned(), Value::Bool(rng.chance(1, 2))), ("w".to_owned(), Value::Bytes(vec![0, 1, 254]))].into()),
+                2 => Value::List(vec![
+                    Value::Int(720),
+                    Value::Int(1440),
+                    Value::Str("dot".to_owned()),
+                ]),
+                3 => Value::Map(
+                    [
+                        ("val".to_owned(), Value::Bool(rng.chance(1, 2))),
+                        ("w".to_owned(), Value::Bytes(vec![0, 1, 254])),
+                    ]
+                    .into(),
+                ),
                 _ => Value::Null,
             };
-            entry.set(["style", "ind.left", "tabs", "rPr", "keepNext"][rng.below(5)], &value).expect("a property");
+            entry
+                .set(
+                    ["style", "ind.left", "tabs", "rPr", "keepNext"][rng.below(5)],
+                    &value,
+                )
+                .expect("a property");
         }
         7 => {
             let registry = doc.registry("tables").expect("the registry");
-            let table = registry.get("t0").map_or_else(|| registry.create("t0").expect("a table"), |table| table);
+            let table = registry
+                .get("t0")
+                .map_or_else(|| registry.create("t0").expect("a table"), |table| table);
             let rows = table.id_list("rows").expect("the rows");
             let count = rows.len();
             match rng.below(3) {
-                0 => rows.insert(rng.below(count + 1), &format!("r{}", rng.below(32))).expect("a row"),
+                0 => rows
+                    .insert(rng.below(count + 1), &format!("r{}", rng.below(32)))
+                    .expect("a row"),
                 1 if count > 0 => rows.delete(rng.below(count)).expect("delete a row"),
-                _ if count > 1 => rows.move_item(rng.below(count), rng.below(count)).expect("move a row"),
+                _ if count > 1 => rows
+                    .move_item(rng.below(count), rng.below(count))
+                    .expect("move a row"),
                 _ => {}
             }
         }
         _ => {
             let body = doc.root_map("body").expect("the body");
-            body.set(["pgSz.w", "pgSz.h", "cols"][rng.below(3)], &Value::Int(i64::try_from(rng.below(20_000)).unwrap_or(0))).expect("a body property");
+            body.set(
+                ["pgSz.w", "pgSz.h", "cols"][rng.below(3)],
+                &Value::Int(i64::try_from(rng.below(20_000)).unwrap_or(0)),
+            )
+            .expect("a body property");
         }
     }
     match rng.below(8) {
@@ -325,7 +458,11 @@ pub fn mutate_blob(rng: &mut Rng, blob: &mut Vec<u8>, splice: &[Vec<u8>]) {
             continue;
         }
         // Mostly the body; the header (magic, checksum, mode) now and then.
-        let at = if rng.chance(1, 16) { rng.below(BODY) } else { BODY + rng.below(len - BODY) };
+        let at = if rng.chance(1, 16) {
+            rng.below(BODY)
+        } else {
+            BODY + rng.below(len - BODY)
+        };
         match rng.below(10) {
             0 => blob[at] ^= 1 << rng.below(8),
             1 => blob[at] = INTERESTING[rng.below(INTERESTING.len())],
@@ -346,7 +483,9 @@ pub fn mutate_blob(rng: &mut Rng, blob: &mut Vec<u8>, splice: &[Vec<u8>]) {
             5 => {
                 if !splice.is_empty() {
                     let other = &splice[rng.below(splice.len())];
-                    let from = other.len().min(BODY + rng.below(other.len().saturating_sub(BODY).max(1)));
+                    let from = other
+                        .len()
+                        .min(BODY + rng.below(other.len().saturating_sub(BODY).max(1)));
                     blob.truncate(at);
                     blob.extend_from_slice(&other[from..]);
                 }
@@ -369,7 +508,13 @@ pub fn mutate_blob(rng: &mut Rng, blob: &mut Vec<u8>, splice: &[Vec<u8>]) {
 }
 
 /// libFuzzer's custom mutator for `crdt_import` (see the module's documentation): mutates `data[..size]` in place into at most `max_size` bytes and returns the new size. `libfuzzer` is libFuzzer's own mutator (`libfuzzer_sys::fuzzer_mutate`), passed in so that this crate's tests need no fuzzing engine.
-pub fn mutate(data: &mut [u8], size: usize, max_size: usize, seed: u32, libfuzzer: &mut dyn FnMut(&mut [u8], usize, usize) -> usize) -> usize {
+pub fn mutate(
+    data: &mut [u8],
+    size: usize,
+    max_size: usize,
+    seed: u32,
+    libfuzzer: &mut dyn FnMut(&mut [u8], usize, usize) -> usize,
+) -> usize {
     let corpus = corpus();
     let mut rng = Rng::new(u64::from(seed));
     let max_size = max_size.min(data.len());
@@ -378,7 +523,9 @@ pub fn mutate(data: &mut [u8], size: usize, max_size: usize, seed: u32, libfuzze
         // Too short to be a blob: start from real editing again.
         input.clone_from(&corpus.seeds[rng.below(corpus.seeds.len())]);
     }
-    let (selector_byte, blob) = input.split_first().map_or((0, Vec::new()), |(&first, rest)| (first, rest.to_vec()));
+    let (selector_byte, blob) = input
+        .split_first()
+        .map_or((0, Vec::new()), |(&first, rest)| (first, rest.to_vec()));
     let mut selector_byte = selector_byte;
     let mut blob = blob;
     if rng.chance(1, 16) {
@@ -449,7 +596,11 @@ pub fn import_case(data: &[u8]) {
         return;
     };
     let corpus = corpus();
-    let limits = if selector_byte & 1 == 0 { ImportLimits::UPDATE } else { ImportLimits::LOCAL_SNAPSHOT };
+    let limits = if selector_byte & 1 == 0 {
+        ImportLimits::UPDATE
+    } else {
+        ImportLimits::LOCAL_SNAPSHOT
+    };
     let base = &corpus.bases[usize::from(selector_byte >> 1) % corpus.bases.len()];
     let doc = match base {
         None => Doc::new(PEER, &FAMILIES),
@@ -468,19 +619,41 @@ pub fn import_case(data: &[u8]) {
 }
 
 /// The properties of an import's result: consistent with the limits and with the panics the hook let through, and the document poisoned exactly after a contained panic or a value nested too deep.
-fn check_result(doc: &Doc, blob: &[u8], limits: &ImportLimits, result: &Result<bayan_crdt::ImportReport, ImportError>, contained: u64) {
-    let poisoning = matches!(result, Err(ImportError::Panicked | ImportError::ValueTooDeep));
+fn check_result(
+    doc: &Doc,
+    blob: &[u8],
+    limits: &ImportLimits,
+    result: &Result<bayan_crdt::ImportReport, ImportError>,
+    contained: u64,
+) {
+    let poisoning = matches!(
+        result,
+        Err(ImportError::Panicked | ImportError::ValueTooDeep)
+    );
     assert_eq!(doc.is_poisoned(), poisoning, "poisoned after {result:?}");
-    assert_eq!(contained > 0, matches!(result, Err(ImportError::Panicked)), "{contained} contained panics of Loro's, but the import gave {result:?}");
+    assert_eq!(
+        contained > 0,
+        matches!(result, Err(ImportError::Panicked)),
+        "{contained} contained panics of Loro's, but the import gave {result:?}"
+    );
     match result {
         Ok(report) => {
             assert!(blob.len() <= limits.max_bytes);
-            assert!(report.changes <= limits.max_changes && report.ops <= limits.max_ops, "{report:?}");
+            assert!(
+                report.changes <= limits.max_changes && report.ops <= limits.max_ops,
+                "{report:?}"
+            );
         }
-        Err(ImportError::TooLarge { bytes, limit }) => assert!(*bytes == blob.len() && *limit == limits.max_bytes && bytes > limit),
+        Err(ImportError::TooLarge { bytes, limit }) => {
+            assert!(*bytes == blob.len() && *limit == limits.max_bytes && bytes > limit)
+        }
         Err(ImportError::SnapshotNotAccepted) => assert!(!limits.accept_snapshots),
-        Err(ImportError::TooManyChanges { changes, limit }) => assert!(*limit == limits.max_changes && changes > limit),
-        Err(ImportError::TooManyOps { ops, limit }) => assert!(*limit == limits.max_ops && ops > limit),
+        Err(ImportError::TooManyChanges { changes, limit }) => {
+            assert!(*limit == limits.max_changes && changes > limit)
+        }
+        Err(ImportError::TooManyOps { ops, limit }) => {
+            assert!(*limit == limits.max_ops && ops > limit)
+        }
         Err(ImportError::ValueTooDeep) => assert!(limits.inspect_values),
         Err(ImportError::Malformed(_) | ImportError::Rejected(_) | ImportError::Panicked) => {}
         Err(ImportError::Poisoned) => panic!("a fresh document was already poisoned"),
@@ -490,15 +663,32 @@ fn check_result(doc: &Doc, blob: &[u8], limits: &ImportLimits, result: &Result<b
 /// A poisoned document and every handle to it refuse, or answer as for an empty document, without calling Loro, whose locks a panic left poisoned (`doc.rs`); a call that reached Loro would panic outside the containment and fail the run. Returns the undo manager it made, which is kept with the document.
 fn check_poisoned(doc: &Doc, handles: &Handles) -> UndoManager {
     static EMPTY: OnceLock<Vec<u8>> = OnceLock::new();
-    let empty = EMPTY.get_or_init(|| Doc::new(PeerId(10), &FAMILIES).expect("an empty document").version().encode());
-    assert_eq!(doc.import(b"", &ImportLimits::UPDATE), Err(ImportError::Poisoned));
+    let empty = EMPTY.get_or_init(|| {
+        Doc::new(PeerId(10), &FAMILIES)
+            .expect("an empty document")
+            .version()
+            .encode()
+    });
+    assert_eq!(
+        doc.import(b"", &ImportLimits::UPDATE),
+        Err(ImportError::Poisoned)
+    );
     assert_eq!(doc.export_snapshot(), Err(CrdtError::Poisoned));
-    assert_eq!(doc.export_updates(&VersionVector::new()), Err(CrdtError::Poisoned));
-    assert_eq!(doc.export_shallow_snapshot(&doc.version()), Err(CrdtError::Poisoned));
+    assert_eq!(
+        doc.export_updates(&VersionVector::new()),
+        Err(CrdtError::Poisoned)
+    );
+    assert_eq!(
+        doc.export_shallow_snapshot(&doc.version()),
+        Err(CrdtError::Poisoned)
+    );
     assert_eq!(&doc.version().encode(), empty);
     assert_eq!(doc.version_vector(), VersionVector::new());
     assert_eq!(doc.stats(), DocStats { ops: 0, changes: 0 });
-    assert!(doc.checkout(&Version::decode(empty).expect("the empty version")).is_err());
+    assert!(
+        doc.checkout(&Version::decode(empty).expect("the empty version"))
+            .is_err()
+    );
     doc.checkout_latest();
     doc.commit();
     doc.commit_without_undo();
@@ -506,24 +696,46 @@ fn check_poisoned(doc: &Doc, handles: &Handles) -> UndoManager {
     assert_eq!(doc.registry("tables").err(), Some(CrdtError::Poisoned));
     assert_eq!(doc.root_map("body").err(), Some(CrdtError::Poisoned));
     for story in [&handles.story, &doc.main_story()] {
-        assert!(story.is_empty() && story.text().is_empty() && story.runs().is_empty() && story.char_at(0).is_none());
+        assert!(
+            story.is_empty()
+                && story.text().is_empty()
+                && story.runs().is_empty()
+                && story.char_at(0).is_none()
+        );
         assert_eq!(story.insert(0, "x"), Err(CrdtError::Poisoned));
-        assert_eq!(story.insert_atom(0, '\u{0D}', "p:0"), Err(CrdtError::Poisoned));
-        assert_eq!(story.mark(0..0, "r:b", &Value::Bool(true)), Err(CrdtError::Poisoned));
+        assert_eq!(
+            story.insert_atom(0, '\u{0D}', "p:0"),
+            Err(CrdtError::Poisoned)
+        );
+        assert_eq!(
+            story.mark(0..0, "r:b", &Value::Bool(true)),
+            Err(CrdtError::Poisoned)
+        );
         assert_eq!(story.unmark(0..0, "r:b"), Err(CrdtError::Poisoned));
         assert_eq!(story.delete(0..0), Err(CrdtError::Poisoned));
         assert_eq!(story.runs_in(0..0), Err(CrdtError::Poisoned));
     }
     for stories in [&handles.stories, &doc.stories()] {
-        assert!(stories.ids().is_empty() && stories.entries().is_empty() && stories.get("s0").is_none());
+        assert!(
+            stories.ids().is_empty() && stories.entries().is_empty() && stories.get("s0").is_none()
+        );
         assert!(stories.create("s9").is_err());
     }
     if let Some(registry) = &handles.registry {
-        assert!(registry.ids().is_empty() && registry.entries().is_empty() && registry.is_empty() && registry.get("t0").is_none());
+        assert!(
+            registry.ids().is_empty()
+                && registry.entries().is_empty()
+                && registry.is_empty()
+                && registry.get("t0").is_none()
+        );
         assert!(registry.create("t9").is_err());
     }
     for map in [&handles.entry, &handles.body].into_iter().flatten() {
-        assert!(map.get("rows").is_none() && map.entries().is_empty() && map.get_id_list("rows").is_none());
+        assert!(
+            map.get("rows").is_none()
+                && map.entries().is_empty()
+                && map.get_id_list("rows").is_none()
+        );
         assert_eq!(map.set("k", &Value::Int(1)), Err(CrdtError::Poisoned));
         assert_eq!(map.remove("k"), Err(CrdtError::Poisoned));
         assert!(map.id_list("rows").is_err());
@@ -576,7 +788,11 @@ mod tests {
             if let Some(base) = base {
                 doc.import(base, &ImportLimits::LOCAL_SNAPSHOT).unwrap();
             }
-            let limits = if seed[0] & 1 == 0 { ImportLimits::UPDATE } else { ImportLimits::LOCAL_SNAPSHOT };
+            let limits = if seed[0] & 1 == 0 {
+                ImportLimits::UPDATE
+            } else {
+                ImportLimits::LOCAL_SNAPSHOT
+            };
             match doc.import(&seed[1..], &limits) {
                 Ok(_) | Err(ImportError::SnapshotNotAccepted) => {}
                 Err(ImportError::Panicked) if seed[1..] == *PANIC_CRAFTED => std::mem::forget(doc),

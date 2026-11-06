@@ -37,13 +37,19 @@ fn recording_with_a_panic() -> Vec<u8> {
 fn run_case(case: &str) {
     libfuzzer_hook();
     match case {
-        "engine_messages, a panic the engine catches" => engine::messages_with(Config { allow_panic: true }, DIAG_PANIC),
+        "engine_messages, a panic the engine catches" => {
+            engine::messages_with(Config { allow_panic: true }, DIAG_PANIC)
+        }
         "engine_messages, diag.panic refused" => engine::messages(DIAG_PANIC),
-        "engine_replay, a panic the replaying engine catches" => engine::replay_with(Config { allow_panic: true }, &recording_with_a_panic()),
+        "engine_replay, a panic the replaying engine catches" => {
+            engine::replay_with(Config { allow_panic: true }, &recording_with_a_panic())
+        }
         "engine_replay, diag.panic refused" => engine::replay(&recording_with_a_panic()),
         "crdt_import, a panic of Loro's that import contains" => {
             crdt::install_panic_hook().unwrap();
-            crdt::import_case(&[&[crdt::selector(crdt::PANIC_BASE_INDEX, false)], CRAFTED].concat());
+            crdt::import_case(
+                &[&[crdt::selector(crdt::PANIC_BASE_INDEX, false)], CRAFTED].concat(),
+            );
             assert_eq!((crdt::loro_panics(), crdt::poisoned_documents()), (1, 1));
         }
         "crdt_import, a panic in BayanDocs code" => {
@@ -57,17 +63,31 @@ fn run_case(case: &str) {
 }
 
 /// CORE-004's crafted update, with which Loro 1.16.2 panics while importing it into its base document.
-const CRAFTED: &[u8] = include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin");
+const CRAFTED: &[u8] =
+    include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin");
 
 /// Runs a case in a child process and returns how it ended: `Ok(())` for a normal end, `Err(signal)` for an abort, and the child's output for the messages of failing assertions.
 fn in_child(case: &str) -> (Result<(), Option<i32>>, String) {
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "tests::child_process", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "tests::child_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("BAYAN_FUZZ_CHILD", case)
         .output()
         .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    let ended = if output.status.success() { Ok(()) } else { Err(output.status.signal()) };
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ended = if output.status.success() {
+        Ok(())
+    } else {
+        Err(output.status.signal())
+    };
     (ended, text)
 }
 
@@ -84,7 +104,10 @@ fn a_panic_the_engine_catches_fails_engine_messages() {
     let (ended, output) = in_child("engine_messages, a panic the engine catches");
     assert_eq!(ended, Err(Some(SIGABRT)), "{output}");
     // The engine's own message, printed by the default hook before the abort: the engine had not caught it yet.
-    assert!(output.contains("diag.panic: a panic that a test asked for"), "{output}");
+    assert!(
+        output.contains("diag.panic: a panic that a test asked for"),
+        "{output}"
+    );
     let (ended, output) = in_child("engine_messages, diag.panic refused");
     assert_eq!(ended, Ok(()), "{output}");
 }
@@ -100,9 +123,15 @@ fn a_panic_the_replaying_engine_catches_fails_engine_replay() {
 #[test]
 fn without_the_hook_the_harness_still_fails_on_a_panic_the_engine_caught() {
     // Without libfuzzer-sys's hook the engine catches the panic and answers with the error `panic`, which the harness's own check refuses.
-    let caught = catch_unwind(AssertUnwindSafe(|| engine::messages_with(Config { allow_panic: true }, DIAG_PANIC)));
+    let caught = catch_unwind(AssertUnwindSafe(|| {
+        engine::messages_with(Config { allow_panic: true }, DIAG_PANIC)
+    }));
     let message = caught.unwrap_err();
-    let message = message.downcast_ref::<String>().map(String::as_str).or_else(|| message.downcast_ref::<&str>().copied()).unwrap_or_default();
+    let message = message
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| message.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
     assert!(message.contains("the engine caught a panic"), "{message}");
 }
 
@@ -118,5 +147,10 @@ fn a_panic_of_loro_s_that_import_contains_does_not_fail_crdt_import() {
 fn a_panic_in_bayandocs_code_fails_crdt_import() {
     let (ended, output) = in_child("crdt_import, a panic in BayanDocs code");
     assert_eq!(ended, Err(Some(SIGABRT)), "{output}");
-    assert!(output.contains("crdt_import: a panic that is not Loro's fails the run (raised in ./src/tests.rs)"), "{output}");
+    assert!(
+        output.contains(
+            "crdt_import: a panic that is not Loro's fails the run (raised in ./src/tests.rs)"
+        ),
+        "{output}"
+    );
 }

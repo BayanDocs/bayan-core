@@ -445,7 +445,10 @@ fn recording_of_both_encodings() -> Vec<u8> {
     not_utf8.insert(1, 0xff);
     assert!(engine.render_tile(&not_utf8, 24, 31, 20).pixels.is_err());
     assert!(engine.render_tile(&tile, 25, 31, 30).pixels.is_err());
-    let answers = engine.handle(b"{\"v\":0,\"id\":5,\"type\":\"ui.manifest\",\"\xff\":1}", 40);
+    let answers = engine.handle(
+        b"{\"v\":0,\"id\":5,\"type\":\"ui.manifest\",\"\xff\":1}",
+        40,
+    );
     assert_eq!(answers.len(), 1);
     send(
         &mut engine,

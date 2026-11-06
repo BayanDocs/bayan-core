@@ -53,7 +53,11 @@ impl Lockfile {
                     .strip_prefix(" \"")
                     .and_then(|rest| rest.strip_suffix("\","))
                     .ok_or_else(unexpected)?;
-                entries.last_mut().ok_or_else(unexpected)?.dependencies.push(dependency.to_owned());
+                entries
+                    .last_mut()
+                    .ok_or_else(unexpected)?
+                    .dependencies
+                    .push(dependency.to_owned());
                 continue;
             }
             if line.is_empty() || line.starts_with("# ") {
@@ -88,8 +92,13 @@ impl Lockfile {
         if !version_seen || in_dependencies {
             return Err("fuzz/Cargo.lock is not a lockfile of format version 4 that ends where Cargo ends one".to_owned());
         }
-        if let Some(entry) = entries.iter().find(|entry| entry.package.name.is_empty() || entry.package.version.is_empty()) {
-            return Err(format!("fuzz/Cargo.lock has a package without a name or a version ({entry:?})"));
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.package.name.is_empty() || entry.package.version.is_empty())
+        {
+            return Err(format!(
+                "fuzz/Cargo.lock has a package without a name or a version ({entry:?})"
+            ));
         }
         Ok(Self { entries })
     }
@@ -112,7 +121,10 @@ impl Lockfile {
             .collect();
         match candidates.as_slice() {
             [index] => Ok(*index),
-            _ => Err(format!("fuzz/Cargo.lock lists the dependency `{dependency}`, which names {} of its packages, not one", candidates.len())),
+            _ => Err(format!(
+                "fuzz/Cargo.lock lists the dependency `{dependency}`, which names {} of its packages, not one",
+                candidates.len()
+            )),
         }
     }
 
@@ -139,7 +151,9 @@ impl Lockfile {
 
 /// The value of `key = "value"`.
 fn quoted<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    line.strip_prefix(key)?.strip_prefix(" = \"")?.strip_suffix('"')
+    line.strip_prefix(key)?
+        .strip_prefix(" = \"")?
+        .strip_suffix('"')
 }
 
 /// Loro's packages in `lockfile`, whose root package is `root`: `loro` and every package that `loro` reaches and `root` does not reach without passing through `loro`.
@@ -170,7 +184,12 @@ pub fn frames(debug: &str) -> Result<Vec<Frame>, String> {
     let list = debug
         .strip_prefix("Backtrace [")
         .and_then(|rest| rest.strip_suffix(']'))
-        .ok_or_else(|| format!("std captured no backtrace that can be read: {}", debug.chars().take(40).collect::<String>()))?;
+        .ok_or_else(|| {
+            format!(
+                "std captured no backtrace that can be read: {}",
+                debug.chars().take(40).collect::<String>()
+            )
+        })?;
     if list.is_empty() {
         return Ok(Vec::new());
     }
@@ -199,7 +218,10 @@ fn frame(text: &str) -> Result<Frame, String> {
     };
     let mut file = None;
     if let Some(after) = rest.strip_prefix(", file: \"") {
-        let end = after.find("\", line: ").or_else(|| after.strip_suffix('"').map(str::len)).ok_or_else(unreadable)?;
+        let end = after
+            .find("\", line: ")
+            .or_else(|| after.strip_suffix('"').map(str::len))
+            .ok_or_else(unreadable)?;
         file = Some(after[..end].to_owned());
         rest = &after[end + 1..];
     }
@@ -211,7 +233,11 @@ fn frame(text: &str) -> Result<Frame, String> {
     if !rest.is_empty() {
         return Err(unreadable());
     }
-    Ok(Frame { function, file, line })
+    Ok(Frame {
+        function,
+        file,
+        line,
+    })
 }
 
 /// Whose code a file is, by the folder that holds it.
@@ -237,7 +263,9 @@ pub fn source(file: &str, lockfile: &Lockfile) -> Source {
     }
     for window in parts.windows(4) {
         if let ["registry", "src", _index, folder] = window
-            && let Some(package) = lockfile.packages().find(|package| *folder == format!("{}-{}", package.name, package.version))
+            && let Some(package) = lockfile
+                .packages()
+                .find(|package| *folder == format!("{}-{}", package.name, package.version))
         {
             return Source::Package(package.clone());
         }
@@ -257,24 +285,32 @@ pub enum Owner {
 /// Whose a panic is, from the frames of a backtrace captured in the panic hook (see the module's documentation).
 pub fn owner(frames: &[Frame], lockfile: &Lockfile, loro: &BTreeSet<Package>) -> Owner {
     let is_panicking = |frame: &Frame| {
-        frame
-            .function
-            .as_deref()
-            .is_some_and(|name| name.starts_with("std::panicking::") || name.starts_with("core::panicking::"))
+        frame.function.as_deref().is_some_and(|name| {
+            name.starts_with("std::panicking::") || name.starts_with("core::panicking::")
+        })
     };
     // The first such frame from the hook's end of the backtrace: further out, std::panicking appears again wherever a caller catches panics (std::panicking::catch_unwind, in `Doc::import`, in libfuzzer-sys and in the test harness).
     let Some(first) = frames.iter().position(is_panicking) else {
-        return Owner::NotLoro("the backtrace has no frame of std::panicking or core::panicking".to_owned());
+        return Owner::NotLoro(
+            "the backtrace has no frame of std::panicking or core::panicking".to_owned(),
+        );
     };
     // The rest of the panicking machinery, the frame that raised the panic if std raised it for its caller (such as `Option::unwrap`), and std's frames around it are all in the standard library's files.
     for frame in &frames[first + 1..] {
         let Some(file) = &frame.file else {
-            return Owner::NotLoro(format!("the frame {:?} has no file", frame.function.as_deref().unwrap_or("<unknown>")));
+            return Owner::NotLoro(format!(
+                "the frame {:?} has no file",
+                frame.function.as_deref().unwrap_or("<unknown>")
+            ));
         };
         match source(file, lockfile) {
             Source::Std => {}
             Source::Package(package) if loro.contains(&package) => return Owner::Loro(package),
-            Source::Package(package) => return Owner::NotLoro(format!("raised in {package}, which is not one of Loro's packages")),
+            Source::Package(package) => {
+                return Owner::NotLoro(format!(
+                    "raised in {package}, which is not one of Loro's packages"
+                ));
+            }
             Source::Other(file) => return Owner::NotLoro(format!("raised in {file}")),
         }
     }
@@ -310,18 +346,43 @@ mod tests {
     fn panicking() -> Vec<Frame> {
         vec![
             at("bayan_fuzz::loro_panics::hook", "./src/loro_panics.rs"),
-            at("<alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call", &format!("{STD}/alloc/src/boxed.rs")),
-            at("std::panicking::panic_with_hook", &format!("{STD}/std/src/panicking.rs")),
-            at("std::panicking::panic_handler::{{closure}}", &format!("{STD}/std/src/panicking.rs")),
-            at("std::sys::backtrace::__rust_end_short_backtrace", &format!("{STD}/std/src/sys/backtrace.rs")),
-            at("__rustc::rust_begin_unwind", &format!("{STD}/std/src/panicking.rs")),
-            at("core::panicking::panic_fmt", &format!("{STD}/core/src/panicking.rs")),
-            at("core::panicking::panic", &format!("{STD}/core/src/panicking.rs")),
+            at(
+                "<alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call",
+                &format!("{STD}/alloc/src/boxed.rs"),
+            ),
+            at(
+                "std::panicking::panic_with_hook",
+                &format!("{STD}/std/src/panicking.rs"),
+            ),
+            at(
+                "std::panicking::panic_handler::{{closure}}",
+                &format!("{STD}/std/src/panicking.rs"),
+            ),
+            at(
+                "std::sys::backtrace::__rust_end_short_backtrace",
+                &format!("{STD}/std/src/sys/backtrace.rs"),
+            ),
+            at(
+                "__rustc::rust_begin_unwind",
+                &format!("{STD}/std/src/panicking.rs"),
+            ),
+            at(
+                "core::panicking::panic_fmt",
+                &format!("{STD}/core/src/panicking.rs"),
+            ),
+            at(
+                "core::panicking::panic",
+                &format!("{STD}/core/src/panicking.rs"),
+            ),
         ]
     }
 
     fn panic_from(frames: &[Frame]) -> Owner {
-        owner(&[panicking(), frames.to_vec()].concat(), &lockfile(), &loro())
+        owner(
+            &[panicking(), frames.to_vec()].concat(),
+            &lockfile(),
+            &loro(),
+        )
     }
 
     #[test]
@@ -335,11 +396,25 @@ mod tests {
         let lockfile = Lockfile::parse(crate::LOCKFILE).unwrap();
         let loro = loro_packages(&lockfile, "bayan-fuzz").unwrap();
         let names: BTreeSet<&str> = loro.iter().map(|package| package.name.as_str()).collect();
-        for name in ["loro", "loro-internal", "loro-common", "loro-delta", "generic-btree"] {
+        for name in [
+            "loro",
+            "loro-internal",
+            "loro-common",
+            "loro-delta",
+            "generic-btree",
+        ] {
             assert!(names.contains(name), "{name}");
         }
         // Used by BayanDocs' own crates too, so not Loro's.
-        for name in ["serde_json", "serde", "memchr", "libc", "bayan-crdt", "bayan-fuzz", "libfuzzer-sys"] {
+        for name in [
+            "serde_json",
+            "serde",
+            "memchr",
+            "libc",
+            "bayan-crdt",
+            "bayan-fuzz",
+            "libfuzzer-sys",
+        ] {
             assert!(!names.contains(name), "{name}");
         }
     }
@@ -350,12 +425,24 @@ mod tests {
         assert!(Lockfile::parse(&LOCKFILE.replace("checksum = \"00\"", "checksum = 00")).is_err());
         assert!(Lockfile::parse(&LOCKFILE.replace(" \"loro\",\n]", " \"loro\",\n")).is_err());
         assert!(Lockfile::parse(&format!("{LOCKFILE}\n[metadata]\n")).is_err());
-        assert!(loro_packages(&Lockfile::parse(&LOCKFILE.replace("\"serde_json\",\n]\n\n[[package]]\nname = \"generic", "\"serde_json 9\",\n]\n\n[[package]]\nname = \"generic")).unwrap(), "bayan-fuzz").is_err());
+        assert!(
+            loro_packages(
+                &Lockfile::parse(&LOCKFILE.replace(
+                    "\"serde_json\",\n]\n\n[[package]]\nname = \"generic",
+                    "\"serde_json 9\",\n]\n\n[[package]]\nname = \"generic"
+                ))
+                .unwrap(),
+                "bayan-fuzz"
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn reads_the_frames_std_writes() {
-        let text = format!("Backtrace [{{ fn: \"loro_internal::oplog::OpLog::import\", file: \"{REGISTRY}/loro-internal-1.16.2/src/oplog.rs\", line: 412 }}, {{ fn: <unknown> }}, {{ fn: \"main\" }}, {{ fn: \"<T as core::convert::Into<U>>::into\", file: \"./src/lib.rs\", line: 3 }}]");
+        let text = format!(
+            "Backtrace [{{ fn: \"loro_internal::oplog::OpLog::import\", file: \"{REGISTRY}/loro-internal-1.16.2/src/oplog.rs\", line: 412 }}, {{ fn: <unknown> }}, {{ fn: \"main\" }}, {{ fn: \"<T as core::convert::Into<U>>::into\", file: \"./src/lib.rs\", line: 3 }}]"
+        );
         assert_eq!(
             frames(&text).unwrap(),
             [
@@ -364,13 +451,31 @@ mod tests {
                     file: Some(format!("{REGISTRY}/loro-internal-1.16.2/src/oplog.rs")),
                     line: Some(412),
                 },
-                Frame { function: None, file: None, line: None },
-                Frame { function: Some("main".to_owned()), file: None, line: None },
-                Frame { function: Some("<T as core::convert::Into<U>>::into".to_owned()), file: Some("./src/lib.rs".to_owned()), line: Some(3) },
+                Frame {
+                    function: None,
+                    file: None,
+                    line: None
+                },
+                Frame {
+                    function: Some("main".to_owned()),
+                    file: None,
+                    line: None
+                },
+                Frame {
+                    function: Some("<T as core::convert::Into<U>>::into".to_owned()),
+                    file: Some("./src/lib.rs".to_owned()),
+                    line: Some(3)
+                },
             ]
         );
         assert_eq!(frames("Backtrace []").unwrap(), []);
-        for unreadable in ["<disabled>", "<unsupported>", "Backtrace [{ fn: x }]", "Backtrace [{ fn: \"x\", line: y }]", "Backtrace [{ fn: \"x\" }"] {
+        for unreadable in [
+            "<disabled>",
+            "<unsupported>",
+            "Backtrace [{ fn: x }]",
+            "Backtrace [{ fn: \"x\", line: y }]",
+            "Backtrace [{ fn: \"x\" }",
+        ] {
             assert!(frames(unreadable).is_err(), "{unreadable}");
         }
     }
@@ -378,10 +483,19 @@ mod tests {
     #[test]
     fn a_file_belongs_to_the_package_whose_folder_holds_it() {
         let lockfile = lockfile();
-        assert_eq!(source(&format!("{STD}/core/src/option.rs"), &lockfile), Source::Std);
         assert_eq!(
-            source(&format!("{REGISTRY}/generic-btree-0.10.7/src/lib.rs"), &lockfile),
-            Source::Package(Package { name: "generic-btree".to_owned(), version: "0.10.7".to_owned() })
+            source(&format!("{STD}/core/src/option.rs"), &lockfile),
+            Source::Std
+        );
+        assert_eq!(
+            source(
+                &format!("{REGISTRY}/generic-btree-0.10.7/src/lib.rs"),
+                &lockfile
+            ),
+            Source::Package(Package {
+                name: "generic-btree".to_owned(),
+                version: "0.10.7".to_owned()
+            })
         );
         // A version that the lockfile does not have, a crate's own folder and a toolchain path that is not std's are someone else's.
         for other in [
@@ -391,46 +505,108 @@ mod tests {
             "/rustc/0123/library/core/src/option.rs".to_owned(),
             "rustc/0123456789abcdef0123456789abcdef01234567/library/core/src/option.rs".to_owned(),
         ] {
-            assert_eq!(source(&other, &lockfile), Source::Other(other.clone()), "{other}");
+            assert_eq!(
+                source(&other, &lockfile),
+                Source::Other(other.clone()),
+                "{other}"
+            );
         }
     }
 
     #[test]
     fn a_panic_raised_in_loro_is_loro_s() {
-        let loro_frame = at("loro::LoroDoc::import", &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"));
-        assert!(matches!(panic_from(&[loro_frame.clone()]), Owner::Loro(package) if package.name == "loro"));
+        let loro_frame = at(
+            "loro::LoroDoc::import",
+            &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"),
+        );
+        assert!(
+            matches!(panic_from(&[loro_frame.clone()]), Owner::Loro(package) if package.name == "loro")
+        );
         // Raised by std for Loro, such as an `unwrap` or an index out of bounds: the first frame outside std decides.
-        let unwrap = at("core::option::unwrap_failed", &format!("{STD}/core/src/option.rs"));
-        assert!(matches!(panic_from(&[unwrap.clone(), loro_frame.clone()]), Owner::Loro(_)));
+        let unwrap = at(
+            "core::option::unwrap_failed",
+            &format!("{STD}/core/src/option.rs"),
+        );
+        assert!(matches!(
+            panic_from(&[unwrap.clone(), loro_frame.clone()]),
+            Owner::Loro(_)
+        ));
         // Raised in one of Loro's own dependencies.
-        let btree = at("generic_btree::BTree<B>::insert", &format!("{REGISTRY}/generic-btree-0.10.7/src/lib.rs"));
-        assert!(matches!(panic_from(&[btree, loro_frame.clone()]), Owner::Loro(package) if package.name == "generic-btree"));
+        let btree = at(
+            "generic_btree::BTree<B>::insert",
+            &format!("{REGISTRY}/generic-btree-0.10.7/src/lib.rs"),
+        );
+        assert!(
+            matches!(panic_from(&[btree, loro_frame.clone()]), Owner::Loro(package) if package.name == "generic-btree")
+        );
         // The adapter that called Loro is further out, and does not count, nor does std::panicking further out, where the adapter and libfuzzer-sys catch panics.
-        let adapter = at("bayan_crdt::doc::Doc::import_unguarded", "/home/user/bayan-core/crates/bayan-crdt/src/doc.rs");
-        let catching = at("std::panicking::catch_unwind::do_call", &format!("{STD}/std/src/panicking.rs"));
-        let harness = at("libfuzzer_sys::test_input_wrap", &format!("{REGISTRY}/libfuzzer-sys-0.4.13/src/lib.rs"));
-        assert!(matches!(panic_from(&[unwrap, loro_frame, adapter, catching, harness]), Owner::Loro(_)));
+        let adapter = at(
+            "bayan_crdt::doc::Doc::import_unguarded",
+            "/home/user/bayan-core/crates/bayan-crdt/src/doc.rs",
+        );
+        let catching = at(
+            "std::panicking::catch_unwind::do_call",
+            &format!("{STD}/std/src/panicking.rs"),
+        );
+        let harness = at(
+            "libfuzzer_sys::test_input_wrap",
+            &format!("{REGISTRY}/libfuzzer-sys-0.4.13/src/lib.rs"),
+        );
+        assert!(matches!(
+            panic_from(&[unwrap, loro_frame, adapter, catching, harness]),
+            Owner::Loro(_)
+        ));
     }
 
     #[test]
     fn a_panic_raised_anywhere_else_is_not_loro_s() {
-        let loro_frame = at("loro::LoroDoc::import", &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"));
+        let loro_frame = at(
+            "loro::LoroDoc::import",
+            &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"),
+        );
         // BayanDocs code, also when Loro called it: the first frame outside std is not Loro's.
-        let adapter = at("bayan_crdt::import::check_header", "/home/user/bayan-core/crates/bayan-crdt/src/import.rs");
-        assert!(matches!(panic_from(&[adapter.clone(), loro_frame.clone()]), Owner::NotLoro(_)));
+        let adapter = at(
+            "bayan_crdt::import::check_header",
+            "/home/user/bayan-core/crates/bayan-crdt/src/import.rs",
+        );
+        assert!(matches!(
+            panic_from(&[adapter.clone(), loro_frame.clone()]),
+            Owner::NotLoro(_)
+        ));
         // A package that BayanDocs uses too, even when Loro called it.
-        let shared = at("serde_json::de::from_slice", &format!("{REGISTRY}/serde_json-1.0.151/src/de.rs"));
-        assert!(matches!(panic_from(&[shared, loro_frame.clone()]), Owner::NotLoro(reason) if reason.contains("serde_json 1.0.151")));
+        let shared = at(
+            "serde_json::de::from_slice",
+            &format!("{REGISTRY}/serde_json-1.0.151/src/de.rs"),
+        );
+        assert!(
+            matches!(panic_from(&[shared, loro_frame.clone()]), Owner::NotLoro(reason) if reason.contains("serde_json 1.0.151"))
+        );
         // A frame without a file where the decision falls, or none outside std.
-        let no_file = Frame { function: Some("loro::LoroDoc::import".to_owned()), file: None, line: None };
-        assert!(matches!(panic_from(&[no_file, loro_frame.clone()]), Owner::NotLoro(_)));
+        let no_file = Frame {
+            function: Some("loro::LoroDoc::import".to_owned()),
+            file: None,
+            line: None,
+        };
+        assert!(matches!(
+            panic_from(&[no_file, loro_frame.clone()]),
+            Owner::NotLoro(_)
+        ));
         assert!(matches!(panic_from(&[]), Owner::NotLoro(_)));
         // A backtrace without the panicking frames: Loro's frame alone does not make it Loro's.
-        assert!(matches!(owner(&[loro_frame], &lockfile(), &loro()), Owner::NotLoro(_)));
+        assert!(matches!(
+            owner(&[loro_frame], &lockfile(), &loro()),
+            Owner::NotLoro(_)
+        ));
         // The hook's own frames, before the panicking ones, never count, whoever they are.
         let mut hook_in_loro = panicking();
-        hook_in_loro[0] = at("loro::something", &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"));
+        hook_in_loro[0] = at(
+            "loro::something",
+            &format!("{REGISTRY}/loro-1.16.2/src/lib.rs"),
+        );
         hook_in_loro.push(adapter);
-        assert!(matches!(owner(&hook_in_loro, &lockfile(), &loro()), Owner::NotLoro(_)));
+        assert!(matches!(
+            owner(&hook_in_loro, &lockfile(), &loro()),
+            Owner::NotLoro(_)
+        ));
     }
 }
