@@ -213,8 +213,9 @@ impl Alignment {
 
     /// Moves each deletion (text that only the reference has) between two equal hunks, as far as the text allows, so that as few of `breaks` (positions of the reference's stream, ascending) as possible fall strictly inside it, and preferably one falls at its end.
     ///
-    /// A deletion can often lie in several places: deleting `two` from `onetwothree` leaves `onethree`, and so does deleting `wot`. `diff` takes the first characters it can match, which pushes deletions to the right, so that where a whole line is missing, the start of the next line would fall inside the deletion and have no image. Moved to where a line starts, the deletion covers exactly the missing text. A deletion moves by one character when the character it would move past equals the one it would leave at its other end, and never empties its neighbours.
+    /// A deletion can often lie in several places: deleting `two` from `onetwothree` leaves `onethree`, and so does deleting `wot`. `diff` takes the first characters it can match, which pushes deletions to the right, so that where a whole line is missing, the start of the next line would fall inside the deletion and have no image. Moved to where a line starts, the deletion covers exactly the missing text. A deletion moves by one character when the character it would move past equals the one it would leave at its other end. It never empties the equal hunk after it, nor the one before it unless that hunk starts both streams: then the deletion may move to the very start, as where the first line is missing and the next one begins like it (`Section one`, `Section two`), and the emptied hunk is removed.
     pub fn slide_deletions(&mut self, reference: &[char], breaks: &[usize]) {
+        let mut first_emptied = false;
         for index in 1..self.hunks.len().saturating_sub(1) {
             let (previous, hunk, next) = (
                 &self.hunks[index - 1],
@@ -225,10 +226,14 @@ impl Alignment {
                 continue;
             }
             let (start, end) = (hunk.reference.start, hunk.reference.end);
+            // How far left the deletion may move: to the start of the streams past the first hunk, otherwise not past the previous hunk's first character.
+            let reach = if index == 1 {
+                previous.reference.len()
+            } else {
+                previous.reference.len().saturating_sub(1)
+            };
             let mut left = 0;
-            while left + 1 < previous.reference.len()
-                && reference[start - left - 1] == reference[end - left - 1]
-            {
+            while left < reach && reference[start - left - 1] == reference[end - left - 1] {
                 left += 1;
             }
             let mut right = 0;
@@ -282,7 +287,12 @@ impl Alignment {
                 self.hunks[index].candidate = candidate_at..candidate_at;
                 self.hunks[index + 1].reference.start = best + length;
                 self.hunks[index + 1].candidate.start = candidate_at;
+                // Only the first hunk can be emptied, and the deletion after it then starts both streams.
+                first_emptied |= self.hunks[index - 1].reference.is_empty();
             }
+        }
+        if first_emptied {
+            self.hunks.remove(0);
         }
     }
 
@@ -874,6 +884,34 @@ mod tests {
         let images = alignment.images(&[1]);
         assert_eq!(images, [Image::weak(1, 1)]);
         assert_eq!(match_breaks(&images, &[1]), [Some(0)]);
+    }
+
+    #[test]
+    fn a_missing_first_line_moves_to_the_start_of_the_streams() {
+        // The first line is missing and the next one begins like it: `diff` keeps `Section` at the start and deletes `oneSection`, so the second line would start inside the deletion.
+        let reference = chars("SectiononeSectiontwo");
+        let mut alignment = aligned("SectiononeSectiontwo", "Sectiontwo");
+        assert_eq!(
+            alignment.hunks(),
+            [equal(0..7, 0..7), differ(7..17, 7..7), equal(17..20, 7..10)]
+        );
+        alignment.slide_deletions(&reference, &[0, 10]);
+        assert_eq!(
+            alignment.hunks(),
+            [differ(0..10, 0..0), equal(10..20, 0..10)],
+            "the first hunk is emptied and removed"
+        );
+        let images = alignment.images(&[0, 10]);
+        assert_eq!(images, [Image::weak(0, 0), Image::strong(0, 0)]);
+        assert_eq!(
+            match_breaks(&images, &[0]),
+            [None, Some(0)],
+            "the line both texts have agrees, not the missing one"
+        );
+        // With no break to gain, the deletion stays, and so does the first hunk.
+        let mut alignment = aligned("SectiononeSectiontwo", "Sectiontwo");
+        alignment.slide_deletions(&reference, &[]);
+        assert_eq!(alignment.hunks()[0], equal(0..7, 0..7));
     }
 
     #[test]

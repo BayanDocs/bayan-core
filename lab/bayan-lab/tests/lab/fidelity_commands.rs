@@ -406,7 +406,7 @@ fn report_compares_a_corpus_and_detects_regressions() {
     assert_eq!(ran.outcome, Outcome::Success, "{}", ran.err);
     assert_eq!(
         ran.out,
-        "report: 2 documents; 1 compared with Word's layout (1 without it, 0 without BayanDocs' layout), 1 with hints; 0 failed\n"
+        "report: 2 documents; 1 compared with Word's layout (1 without it, 1 without BayanDocs' layout), 1 with hints; 0 failed\n"
     );
     assert_eq!(ran.err, "");
     let summary = run.summary();
@@ -483,6 +483,52 @@ fn report_compares_a_corpus_and_detects_regressions() {
 }
 
 #[test]
+fn report_fails_when_only_the_page_count_is_lost() {
+    let run = Run::new("report-page-count");
+    let pages: &[&[(&str, i64)]] = &[&[("First page", 100)], &[("Second page", 100)]];
+    Run::put(&run.references, run.hinted, &layout(Source::Pdf, pages));
+    Run::put(&run.candidates, run.hinted, &layout(Source::Engine, pages));
+    let ran = run.report(&[]);
+    assert_eq!(ran.outcome, Outcome::Success, "{}", ran.err);
+    let baseline = run.folder.join("baseline.json");
+    fs::copy(run.folder.join("summary.json"), &baseline).unwrap();
+    // BayanDocs now adds a page without text after the last: every break and the hint still agree, only the page count differs.
+    Run::put(
+        &run.candidates,
+        run.hinted,
+        &layout(
+            Source::Engine,
+            &[&[("First page", 100)], &[("Second page", 100)], &[]],
+        ),
+    );
+    let ran = run.report(&["--baseline", text(&baseline)]);
+    assert_eq!(ran.outcome, Outcome::Failed);
+    assert_eq!(
+        ran.err,
+        format!(
+            "bayan-lab: document {} lost agreement: 0 page breaks, 0 line breaks, 0 hints, and its page count no longer matches\n",
+            run.hinted
+        )
+    );
+    let summary = run.summary();
+    let regressions = &summary.baseline.as_ref().unwrap().regressions;
+    assert_eq!(regressions.len(), 1);
+    assert!(regressions[0].page_count_lost);
+    let entry = summary
+        .documents
+        .iter()
+        .find(|entry| entry.document.sha256 == run.hinted.to_string())
+        .unwrap();
+    let comparison = entry.comparison.as_ref().unwrap();
+    assert_eq!((comparison.m1.reference, comparison.m1.candidate), (2, 3));
+    assert_eq!(
+        (comparison.m2.agreed, comparison.m3.agreed),
+        (comparison.m2.total, comparison.m3.total)
+    );
+    assert_eq!(entry.hints.as_ref().unwrap().hints.agreed, 1);
+}
+
+#[test]
 fn report_needs_an_output_and_takes_no_operands() {
     let run = Run::new("report-arguments");
     let manifest = text(&run.manifest);
@@ -534,6 +580,6 @@ fn report_needs_an_output_and_takes_no_operands() {
     assert_eq!(ran.outcome, Outcome::Success, "{}", ran.err);
     assert_eq!(
         ran.out,
-        "report: 2 documents; 0 compared with Word's layout (2 without it, 0 without BayanDocs' layout), 0 with hints; 0 failed\n"
+        "report: 2 documents; 0 compared with Word's layout (2 without it, 2 without BayanDocs' layout), 0 with hints; 0 failed\n"
     );
 }

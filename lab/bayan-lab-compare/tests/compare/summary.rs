@@ -147,7 +147,8 @@ fn documents_are_aggregated_by_tier_mode_script_and_feature() {
     assert_eq!(all.documents, 5);
     assert_eq!(all.compared, 3);
     assert_eq!(all.without_reference, 2);
-    assert_eq!(all.without_candidate, 1);
+    // c, compared as empty output, and d and e, which have hints only.
+    assert_eq!(all.without_candidate, 3);
     assert_eq!(all.failed, 0);
     // Lines: 3 of 3 (a), 2 of 3 (b), 0 of 3 (c).
     assert_eq!((all.m3.total, all.m3.agreed), (9, 5));
@@ -507,4 +508,117 @@ fn a_document_that_loses_one_break_and_gains_another_still_regresses() {
     let change = &now.baseline.as_ref().unwrap().regressions[0];
     assert_eq!(change.line_breaks, Delta { lost: 1, gained: 1 });
     assert!(now.regressed());
+}
+
+/// LAB-004 AC-4, M1 alone: BayanDocs gains a page without text after the last, so every page and line break still agrees and only the page count no longer matches. That is a regression too.
+#[test]
+fn a_document_that_only_loses_its_page_count_regresses() {
+    let with_a_blank_page = engine_layout(vec![
+        lines(&[
+            at("The quick brown fox", 100),
+            at("jumps over the lazy dog", 114),
+            at("Next paragraph", 128),
+        ]),
+        Vec::new(),
+    ]);
+    let before = Summary::new(
+        "Before",
+        &[compared(
+            document('a', Tier::T1, &[], &[], None),
+            &word(),
+            Some(&alike()),
+            'A',
+        )],
+        None,
+    )
+    .unwrap();
+    let outcome = compared(
+        document('a', Tier::T1, &[], &[], None),
+        &word(),
+        Some(&with_a_blank_page),
+        'A',
+    );
+    let comparison = &outcome.measured.as_ref().unwrap().comparison;
+    let old = before.documents[0].comparison.as_ref().unwrap();
+    assert_eq!(
+        comparison.m1,
+        PageCount {
+            reference: 1,
+            candidate: 2
+        }
+    );
+    assert!(old.m1.matches());
+    assert_eq!((&comparison.m2, &comparison.m3), (&old.m2, &old.m3));
+    assert_eq!(comparison.m3.agreed, 3);
+    let now = Summary::new("Now", &[outcome], Some(&before)).unwrap();
+    assert!(now.regressed());
+    let unchanged = Delta::default();
+    assert_eq!(
+        now.baseline.as_ref().unwrap().regressions,
+        [Change {
+            document: named('a', Tier::T1),
+            page_count_lost: true,
+            page_count_gained: false,
+            page_breaks: unchanged,
+            line_breaks: unchanged,
+            hints: unchanged,
+        }]
+    );
+}
+
+/// A damaged or edited baseline is refused rather than compared: every document's agreed breaks must be as the tool writes them.
+#[test]
+fn a_damaged_baseline_is_refused() {
+    let text = Summary::new("Baseline", &run(), None)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    // Document a: its three line breaks all agree. Document d: two of its four hints agree.
+    let a_lines = &value["documents"][0]["comparison"]["m3"];
+    assert_eq!(a_lines["total"], 3);
+    assert_eq!(a_lines["agreed_breaks"], serde_json::json!([[0, 3]]));
+    let d_hints = &value["documents"][3]["hints"]["hints"];
+    assert_eq!(d_hints["total"], 4);
+    assert_eq!(
+        d_hints["agreed_breaks"],
+        serde_json::json!([[0, 1], [2, 3]])
+    );
+    let edited = |document: usize, path: [&str; 2], agreed: u64, ranges: serde_json::Value| {
+        let mut value = value.clone();
+        let breaks = &mut value["documents"][document][path[0]][path[1]];
+        breaks["agreed"] = agreed.into();
+        breaks["agreed_breaks"] = ranges;
+        Summary::from_json(&value.to_string())
+    };
+    // Unchanged, it is read.
+    assert!(edited(0, ["comparison", "m3"], 3, serde_json::json!([[0, 3]])).is_ok());
+    for (agreed, ranges) in [
+        (3, serde_json::json!([[0, 2], [1, 3]])),
+        (3, serde_json::json!([[0, 1], [1, 3]])),
+        (3, serde_json::json!([[2, 3], [0, 2]])),
+        (0, serde_json::json!([[1, 1]])),
+        (4, serde_json::json!([[0, 4]])),
+        (2, serde_json::json!([[0, 3]])),
+    ] {
+        let refused = edited(0, ["comparison", "m3"], agreed, ranges.clone());
+        assert_eq!(
+            refused.unwrap_err(),
+            format!(
+                "the agreed line breaks (M3) of document {} are not as this tool writes them: ranges that are not empty, ascend without touching, lie within the 3 breaks and hold the {agreed} that agree",
+                sha('a')
+            ),
+            "{ranges}"
+        );
+    }
+    let refused = edited(
+        3,
+        ["hints", "hints"],
+        1,
+        serde_json::json!([[0, 1], [2, 3]]),
+    );
+    assert!(refused.unwrap_err().starts_with(&format!(
+        "the agreed hints (M7) of document {} are not",
+        sha('d')
+    )));
 }

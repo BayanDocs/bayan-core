@@ -226,6 +226,50 @@ fn missing_text() {
 }
 
 #[test]
+fn missing_first_line() {
+    // BayanDocs lacks the first line, "Section one". The next line begins like it, so `diff` alone would keep "Section" at the start and put the deletion across the start of "Section two".
+    let reference = pdf_layout(vec![lines(&[
+        at("Section one", 100),
+        at("Section two", 114),
+        at("Section three", 128),
+    ])]);
+    let candidate = engine_layout(vec![lines(&[
+        at("Section two", 100),
+        at("Section three", 114),
+    ])]);
+    let comparison = compared(&reference, &candidate);
+    assert_eq!(
+        comparison.text,
+        TextAgreement {
+            reference: 32,
+            candidate: 22,
+            matched: 22,
+            complete: true,
+        }
+    );
+    assert_eq!(comparison.m2, breaks(1, &[[0, 1]], None));
+    // The missing first line does not agree; the two lines after it, which both have, do.
+    assert_eq!(comparison.m3, breaks(3, &[[1, 3]], Some(place(1, Some(1)))));
+    // Both sit one line higher in BayanDocs: the 10 glyphs of "Section two" and the 12 of "Section three" are 14 pt off vertically.
+    let expected = GlyphError {
+        lines: 2,
+        glyphs: 22,
+        x: zero(),
+        y: spread(14_000, 14_000, 14_000),
+    };
+    assert_eq!(comparison.m4, expected);
+    // A first line that begins otherwise gives the same result.
+    let reference = pdf_layout(vec![lines(&[
+        at("Alpha one", 100),
+        at("Section two", 114),
+        at("Section three", 128),
+    ])]);
+    let comparison = compared(&reference, &candidate);
+    assert_eq!(comparison.m3, breaks(3, &[[1, 3]], Some(place(1, Some(1)))));
+    assert_eq!(comparison.m4, expected);
+}
+
+#[test]
 fn without_bayandocs_layout_nothing_agrees() {
     let reference = pdf_layout(vec![
         lines(&[at("Alpha", 100), at("Beta", 114)]),

@@ -99,7 +99,7 @@ pub struct Breaks {
     pub total: u64,
     /// How many of them agree.
     pub agreed: u64,
-    /// The breaks that agree, by their index in the reference's order, as ranges `[first, end)`: what a baseline keeps, so that a later run can tell which breaks it lost.
+    /// The breaks that agree, by their index in the reference's order, as ranges `[first, end)` in ascending order, none empty and no two touching: what a baseline keeps, so that a later run can tell which breaks it lost.
     pub agreed_breaks: Vec<[u64; 2]>,
     /// Where the first break that does not agree is, if one does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

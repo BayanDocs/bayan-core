@@ -214,7 +214,7 @@ pub struct Aggregate {
     pub compared: u64,
     /// Documents without Word's layout (no ground truth yet).
     pub without_reference: u64,
-    /// Documents compared without BayanDocs' layout, as empty output.
+    /// Documents without BayanDocs' layout, which are compared as empty output: with Word's layout where it exists (M1 to M4), and with the hints (M7).
     pub without_candidate: u64,
     /// Documents that could not be compared: a layout that is not valid, or a comparison beyond the limits.
     pub failed: u64,
@@ -247,15 +247,15 @@ impl Accumulator {
         if outcome.reference == Availability::Missing {
             aggregate.without_reference += 1;
         }
+        if outcome.candidate == Availability::Missing {
+            aggregate.without_candidate += 1;
+        }
         if outcome.problem.is_some() {
             aggregate.failed += 1;
         }
         if let Some(measured) = &outcome.measured {
             let comparison = &measured.comparison;
             aggregate.compared += 1;
-            if outcome.candidate == Availability::Missing {
-                aggregate.without_candidate += 1;
-            }
             aggregate.text.reference += comparison.text.reference;
             aggregate.text.matched += comparison.text.matched;
             if !comparison.text.complete {
@@ -593,7 +593,7 @@ impl Summary {
     ///
     /// # Errors
     ///
-    /// A message if the text is not a summary of this layout, or its metrics are of another version.
+    /// A message if the text is not a summary of this layout, its metrics are of another version, or a document's agreed breaks are not as this tool writes them (see [`Breaks::agreed_breaks`]): a damaged or edited baseline is refused rather than compared.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let summary: Self = serde_json::from_str(text).map_err(|error| {
             format!(
@@ -612,6 +612,26 @@ impl Summary {
                 "the summary was made with metrics of version {}, and this tool's are version {METRICS_VERSION}: run the baseline again with this tool",
                 summary.metrics
             ));
+        }
+        for entry in &summary.documents {
+            let all = entry
+                .comparison
+                .iter()
+                .flat_map(|comparison| {
+                    [
+                        ("page breaks (M2)", &comparison.m2),
+                        ("line breaks (M3)", &comparison.m3),
+                    ]
+                })
+                .chain(entry.hints.iter().map(|hints| ("hints (M7)", &hints.hints)));
+            for (what, breaks) in all {
+                if !well_formed(breaks) {
+                    return Err(format!(
+                        "the agreed {what} of document {} are not as this tool writes them: ranges that are not empty, ascend without touching, lie within the {} breaks and hold the {} that agree",
+                        entry.document.sha256, breaks.total, breaks.agreed
+                    ));
+                }
+            }
         }
         Ok(summary)
     }
@@ -807,6 +827,21 @@ fn correlations(
     });
     found.truncate(CORRELATIONS_LISTED);
     found
+}
+
+/// Whether the agreed breaks of `breaks` are as this tool writes them: ranges that are not empty, ascend and do not touch (two that touch would be one), lie within the total, and hold exactly as many breaks as agree.
+fn well_formed(breaks: &Breaks) -> bool {
+    let mut previous_end = None;
+    let mut count: u64 = 0;
+    for &[first, end] in &breaks.agreed_breaks {
+        if first >= end || end > breaks.total || previous_end.is_some_and(|last| first <= last) {
+            return false;
+        }
+        // At most the total: the ranges are apart and within it.
+        count += end - first;
+        previous_end = Some(end);
+    }
+    count == breaks.agreed
 }
 
 /// The breaks lost and gained between the baseline's `before` and `now`.
