@@ -1,4 +1,4 @@
-//! The core properties parser (bayan-opc's `CoreProperties`) on arbitrary bytes. For every part it accepts, the properties can be written (the parser accepts no character that XML cannot hold), and writing them and reading them back gives the same properties.
+//! The core properties parser (bayan-opc's `CoreProperties`) and bayan-xml's reader under it, which bayan-opc reads its metadata with (CORE-011), on arbitrary bytes. For every part it accepts, the properties can be written (the parser accepts no character that XML cannot hold), and writing them and reading them back gives the same properties.
 
 #![no_main]
 

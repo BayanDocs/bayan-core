@@ -1,7 +1,10 @@
 //! The core properties part: title, author, dates and the other package metadata of ECMA-376 Part 2 §8, read and written minimally, as text.
 
+use bayan_xml::Event;
+
 use crate::content_types::DECLARATION;
-use crate::xml::{self, Element, Node};
+// The XML of the metadata parts, read with bayan-xml (`crate::metadata_xml`).
+use crate::metadata_xml as xml;
 use crate::{CorePropertiesError, Error, Limits, PackageError};
 
 /// The relationship type of the package relationship to the core properties part.
@@ -133,36 +136,68 @@ impl CoreProperties {
     }
 
     /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
+    ///
+    /// The part is read event by event: the text of each property is collected while its element is read, and everything else is dropped as soon as it is read. Its rules are checked in the order of the document, the root element first; the first rule broken is the error, unless the part is not acceptable XML at all, which comes first.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
         nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let document = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::CoreProperties(error));
-        if !document.root.is(NAMESPACE, "coreProperties") {
-            return Err(invalid(CorePropertiesError::UnexpectedRoot));
-        }
         let mut properties = CoreProperties::default();
-        for node in &document.root.children {
-            let Node::Element(element) = node else {
-                continue;
-            };
-            let known = PROPERTIES
-                .iter()
-                .position(|&(namespace, local)| element.is(namespace, local));
-            let Some(index) = known else {
-                continue;
-            };
-            let mut fields = properties.fields_mut();
-            let Some(field) = fields.get_mut(index) else {
-                continue;
-            };
-            if field.is_some() {
-                return Err(invalid(CorePropertiesError::DuplicateProperty));
+        // The property being read: its index in `PROPERTIES`, and its text so far.
+        let mut reading: Option<(usize, String)> = None;
+        let mut root = false;
+        xml::read(bytes, limits, entry, nodes, |event, depth| {
+            match (event, depth) {
+                (Event::Start(tag), 1) => {
+                    if !xml::is(&tag.name(), NAMESPACE, "coreProperties") {
+                        return Err(invalid(CorePropertiesError::UnexpectedRoot));
+                    }
+                    root = true;
+                }
+                (Event::Start(tag), 2) => {
+                    let name = tag.name();
+                    let known = PROPERTIES
+                        .iter()
+                        .position(|&(namespace, local)| xml::is(&name, namespace, local));
+                    if let Some(index) = known {
+                        if properties
+                            .fields()
+                            .get(index)
+                            .is_some_and(|field| field.is_some())
+                        {
+                            return Err(invalid(CorePropertiesError::DuplicateProperty));
+                        }
+                        reading = Some((index, String::new()));
+                    }
+                }
+                // The text of a property and of everything inside it, in document order.
+                (Event::Text(text), 2..) => {
+                    if let Some((_, value)) = &mut reading {
+                        value.push_str(text.value());
+                    }
+                }
+                (Event::CData(cdata), 2..) => {
+                    if let Some((_, value)) = &mut reading {
+                        value.push_str(cdata.value());
+                    }
+                }
+                (Event::End(_), 2) => {
+                    if let Some((index, value)) = reading.take()
+                        && let Some(field) = properties.fields_mut().into_iter().nth(index)
+                    {
+                        *field = Some(value);
+                    }
+                }
+                _ => {}
             }
-            **field = Some(text_content(element));
+            Ok(())
+        })?;
+        // The root element is the first event of every document that bayan-xml reads without an error.
+        if !root {
+            return Err(invalid(CorePropertiesError::UnexpectedRoot));
         }
         Ok(properties)
     }
@@ -224,20 +259,6 @@ impl CoreProperties {
     }
 }
 
-/// The text of `element` and of everything inside it, in document order.
-fn text_content(element: &Element) -> String {
-    let mut text = String::new();
-    let mut pending: Vec<&Node> = element.children.iter().rev().collect();
-    while let Some(node) = pending.pop() {
-        match node {
-            Node::Text { value, .. } | Node::CData { value, .. } => text.push_str(value),
-            Node::Element(child) => pending.extend(child.children.iter().rev()),
-            Node::Markup { .. } => {}
-        }
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +305,27 @@ mod tests {
             CoreProperties::parse(b"<coreProperties/>", &Limits::default()),
             Err(Error::Package(PackageError::CoreProperties(
                 CorePropertiesError::UnexpectedRoot
+            )))
+        );
+    }
+
+    #[test]
+    fn reads_a_propertys_text_with_everything_inside_it() {
+        // The text of a property element and of every element inside it, CDATA sections included, in document order; text of other elements, and outside the properties, is not.
+        let text = format!(
+            "<cp:coreProperties xmlns:cp=\"{NAMESPACE}\" xmlns:dc=\"{DC}\">x<dc:title>a<b>b<![CDATA[<c>]]></b>&amp;d</dc:title><other>e</other><dc:subject/></cp:coreProperties>"
+        );
+        let properties = CoreProperties::parse(text.as_bytes(), &Limits::default()).unwrap();
+        assert_eq!(properties.title.as_deref(), Some("ab<c>&d"));
+        assert_eq!(properties.subject.as_deref(), Some(""));
+        // The duplicate is refused at the second element, before anything later in the part.
+        let duplicate = format!(
+            "<cp:coreProperties xmlns:cp=\"{NAMESPACE}\" xmlns:dc=\"{DC}\"><dc:title>a</dc:title><dc:title>b</dc:title><x/></cp:coreProperties>"
+        );
+        assert_eq!(
+            CoreProperties::parse(duplicate.as_bytes(), &Limits::default()),
+            Err(Error::Package(PackageError::CoreProperties(
+                CorePropertiesError::DuplicateProperty
             )))
         );
     }

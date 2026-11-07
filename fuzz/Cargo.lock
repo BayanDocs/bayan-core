@@ -130,6 +130,7 @@ dependencies = [
 name = "bayan-opc"
 version = "0.0.0"
 dependencies = [
+ "bayan-xml",
  "cfb",
  "miniz_oxide",
 ]
