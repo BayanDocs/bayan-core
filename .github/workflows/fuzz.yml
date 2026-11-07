@@ -15,6 +15,7 @@ on:
       - crates/bayan-xml/**
       - crates/bayan-engine/**
       - crates/bayan-crdt/**
+      - lab/bayan-lab/**
       - lab/bayan-lab-layout/**
       - lab/bayan-lab-compare/**
       - fuzz/**
@@ -46,7 +47,7 @@ env:
   # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
   CARGO_FUZZ_VERSION: 0.13.2
   CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
-  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 5 × FUZZ_SECONDS: 12.5 minutes on a pull request, 75 minutes at night. The seventeen targets have 19 shares (two of 2, fifteen of 1) of the 20 that five rounds of four hold (CORE-010 added the five targets of the engine and of CRDT updates, and with them the fifth round): one more target of share 1 still fits, a second needs a sixth round. fuzz/test_ci.py checks that the job's timeout below leaves every target its full time, so a new target that needs another round fails it until the timeouts, this comment and fuzz/README.md change with it.
+  # How long a target runs, in seconds; the default-limits targets run twice as long (their share in fuzz/ci.py). With four targets at a time, the longest first, every target has run after 5 × FUZZ_SECONDS: 12.5 minutes on a pull request, 75 minutes at night. The eighteen targets have 20 shares (two of 2, sixteen of 1), all of the 20 that five rounds of four hold (CORE-010 added the five targets of the engine and of CRDT updates, and with them the fifth round; CORE-011 added lab_scan, which takes the last share): the next target needs a sixth round. fuzz/test_ci.py checks that the job's timeout below leaves every target its full time, so a new target that needs another round fails it until the timeouts, this comment and fuzz/README.md change with it.
   FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && 150 || 900 }}
 
 jobs:
