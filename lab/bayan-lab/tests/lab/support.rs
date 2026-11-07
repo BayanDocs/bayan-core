@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use bayan_lab::scan::crc32::crc32;
+use bayan_opc::zip::crc32;
 
 /// The namespace declarations of the root element of every main document part the tests build.
 pub const NAMESPACES: &str = concat!(

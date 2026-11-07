@@ -1,28 +1,23 @@
 //! Feature tagging: reads a `.docx` package, safely and within limits, and reports the coverage-matrix features, fonts, languages, scripts and compatibility settings it uses.
 //!
-//! [`scan`] reads the ZIP archive ([`zip`]), the content types and relationships ([`opc`]), and then the XML of the main document part and of the parts it relies on ([`xml`]): styles, numbering, settings, the font table, the theme, headers, footers, footnotes, endnotes, comments and charts, plus the application properties. The glossary document (building blocks) is noted but not read, because its content is not part of the document. Nothing a package refers to outside itself is ever fetched, and nothing in it is run.
+//! [`scan`] opens the package with bayan-opc, the engine's package layer, which checks the ZIP container, the part names, the content types stream and every relationships part, and then reads the XML of the main document part and of the parts it relies on with bayan-xml, the engine's XML reader ([`events`]): styles, numbering, settings, the font table, the theme, headers, footers, footnotes, endnotes, comments and charts, plus the application properties. The glossary document (building blocks) is noted but not read, because its content is not part of the document. Nothing a package refers to outside itself is ever fetched, and nothing in it is run.
 //!
-//! [`Limits::DEFAULT`] bounds every resource the scan uses: the package size, the number and sizes of its entries, the number of parts read, nesting depth, attributes, names and namespace declarations. A package that exceeds a limit is refused with an error that says which; the tests in `tests/lab/hostile_packages.rs` check each one with crafted files.
+//! The scanner reads documents exactly as strictly as BayanDocs does: a package that bayan-opc refuses, or a part that bayan-xml refuses, is refused, never read with a weaker reader, because a document that BayanDocs would refuse is a finding in itself. [`Limits::DEFAULT`] bounds every resource the scan uses: the package size, bayan-opc's limits for opening it (the number and sizes of its entries and the budgets of its metadata), the number of parts read, and bayan-xml's limits for each part (nesting depth, attributes, names and namespaces). A package that exceeds a limit is refused with an error that says which; the tests in `tests/lab/hostile_packages.rs` check each one with crafted files.
 
-pub mod crc32;
+pub mod events;
 pub mod features;
-pub mod opc;
 pub mod scripts;
 pub mod tagger;
 pub mod vocabulary;
-pub mod xml;
-pub mod zip;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use bayan_opc::{PackageError, PartName, Relationship, RelationshipSource, Target};
 use features::Feature;
-use opc::{ContentTypes, OpcError, Relationship, Target};
 use scripts::Script;
 use tagger::{Collected, PartKind, PartTagger};
 use vocabulary::Rel;
-use xml::{XmlError, XmlLimits};
-use zip::{Archive, ZipError, ZipLimits};
 
 /// The version of the tagging rules. Raise it whenever a rule changes what a document is tagged with; `corpus verify` then reports the documents tagged by an older version, and `corpus tag` tags them again.
 pub const TAGGER_VERSION: u32 = 3;
@@ -39,30 +34,24 @@ const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 pub struct Limits {
     /// The largest package accepted, in bytes.
     pub max_package_size: usize,
-    /// Limits of the ZIP reader.
-    pub zip: ZipLimits,
-    /// Limits of the XML scanner, for each part.
-    pub xml: XmlLimits,
-    /// The most parts read from one package.
+    /// The limits bayan-opc opens the package with: its ZIP container, part names, content types stream and relationships parts, and the data of every part the tagger reads.
+    pub package: bayan_opc::Limits,
+    /// The limits bayan-xml reads each part the tagger reads with.
+    pub xml: bayan_xml::Limits,
+    /// The most parts the tagger reads from one package, besides the content types stream and the relationships parts that bayan-opc reads when it opens the package.
     pub max_parts: usize,
 }
 
 impl Limits {
-    /// The limits the corpus tools use. Real documents stay far below them: in the 17,458 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 29 elements, and no name is longer than 37 bytes.
+    /// The limits the corpus tools use: the engine's own defaults, bayan-opc's and bayan-xml's, except that entries may uncompress to at most 256 MiB each and 1 GiB together (bayan-opc allows 512 MiB and 2 GiB), as the scanner always allowed. None is looser than the engine's: a document that BayanDocs would refuse is recorded as refused. Real documents stay far below them: in the 17,458 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 29 elements, and no name is longer than 37 bytes.
     pub const DEFAULT: Self = Self {
         max_package_size: 512 * 1024 * 1024,
-        zip: ZipLimits {
-            max_entries: 10_000,
-            max_name_len: 1_024,
+        package: bayan_opc::Limits {
             max_entry_size: 256 * 1024 * 1024,
             max_total_size: 1024 * 1024 * 1024,
+            ..bayan_opc::Limits::DEFAULT
         },
-        xml: XmlLimits {
-            max_depth: 1_024,
-            max_attributes: 256,
-            max_name_len: 256,
-            max_namespaces: 256,
-        },
+        xml: bayan_xml::Limits::DEFAULT,
         max_parts: 2_000,
     };
 }
@@ -74,18 +63,18 @@ pub enum ScanError {
     TooLarge,
     /// An OLE compound file: an encrypted package or a binary Word document, not a `.docx`.
     OleCompoundFile,
-    /// The ZIP archive cannot be read.
-    Zip(ZipError),
+    /// bayan-opc refuses the package: its ZIP container, a part name, its content types stream or a relationships part, or the data of a part the tagger reads. BayanDocs would refuse it too.
+    Package(bayan_opc::Error),
     /// A part every package needs is missing; the text names it.
     MissingPart(&'static str),
     /// The main part is not a WordprocessingML document; the text says what it is.
     NotADocument(&'static str),
-    /// A part cannot be read as XML.
+    /// bayan-xml refuses a part the tagger reads.
     Part {
         /// The part's name (part names of packages are not document content).
         part: String,
         /// What is wrong with it.
-        error: OpcError,
+        error: bayan_xml::Error,
     },
     /// More parts to read than [`Limits::max_parts`].
     TooManyParts,
@@ -96,7 +85,7 @@ impl fmt::Display for ScanError {
         match self {
             Self::TooLarge => formatter.write_str("the file is larger than the limit"),
             Self::OleCompoundFile => formatter.write_str("an OLE compound file (an encrypted document or a binary .doc), not a .docx package"),
-            Self::Zip(error) => error.fmt(formatter),
+            Self::Package(error) => error.fmt(formatter),
             Self::MissingPart(part) => write!(formatter, "the package has no {part}"),
             Self::NotADocument(what) => write!(formatter, "the main part is {what}, not a .docx document"),
             Self::Part { part, error } => write!(formatter, "part {}: {error}", printable(part, 100)),
@@ -107,9 +96,15 @@ impl fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
-impl From<ZipError> for ScanError {
-    fn from(error: ZipError) -> Self {
-        Self::Zip(error)
+impl From<bayan_opc::Error> for ScanError {
+    fn from(error: bayan_opc::Error) -> Self {
+        match error {
+            // Kept apart, as a part every package needs.
+            bayan_opc::Error::Package(PackageError::MissingContentTypes) => {
+                Self::MissingPart("[Content_Types].xml")
+            }
+            other => Self::Package(other),
+        }
     }
 }
 
@@ -199,36 +194,39 @@ pub fn scan(bytes: &[u8], limits: &Limits) -> Result<Findings, ScanError> {
     if bytes.starts_with(&OLE_SIGNATURE) {
         return Err(ScanError::OleCompoundFile);
     }
-    let archive = Archive::open(bytes, &limits.zip)?;
-    let mut package = Package::new(&archive, limits)?;
-    let types_bytes = package
-        .read("/[Content_Types].xml")?
-        .ok_or(ScanError::MissingPart("[Content_Types].xml"))?;
-    let types =
-        ContentTypes::parse(&types_bytes, &limits.xml).map_err(|error| ScanError::Part {
-            part: "/[Content_Types].xml".to_owned(),
-            error,
-        })?;
-    let package_relationships = package.relationships("/")?.ok_or(ScanError::MissingPart(
-        "package relationships (/_rels/.rels)",
-    ))?;
+    let package = bayan_opc::Package::open(bytes, &limits.package)?;
+    let mut reader = Parts {
+        package: &package,
+        limits,
+        scanned: BTreeSet::new(),
+        reads: 0,
+    };
+    let package_relationships =
+        package
+            .relationships(&RelationshipSource::Package)
+            .ok_or(ScanError::MissingPart(
+                "package relationships (/_rels/.rels)",
+            ))?;
     let mut collected = Collected::default();
     collected.features.insert(Feature::OpcPackage);
     let mut main = None;
-    for relationship in &package_relationships {
-        match (kind_of(relationship), &relationship.target) {
-            (Rel::OfficeDocument, Target::Internal(part)) if main.is_none() => {
-                main = Some(part.clone())
-            }
-            (Rel::ExtendedProperties, Target::Internal(part)) => {
+    for relationship in package_relationships.iter() {
+        match (
+            kind_of(relationship),
+            target_of(relationship, &RelationshipSource::Package),
+        ) {
+            (Rel::OfficeDocument, Some(part)) if main.is_none() => main = Some(part),
+            (Rel::ExtendedProperties, Some(part)) => {
                 collected.features.insert(Feature::DocumentProperties);
-                package.scan_part(part, PartKind::ApplicationProperties, &mut collected)?;
+                reader.scan_part(&part, PartKind::ApplicationProperties, &mut collected)?;
             }
             (kind, _) => tag_relationship(kind, &mut collected),
         }
     }
     let main = main.ok_or(ScanError::MissingPart("main document part"))?;
-    match types.of(&main) {
+    // Media types are compared without regard to case (RFC 2045), as Word compares them.
+    let content_type = package.content_type(&main).map(str::to_ascii_lowercase);
+    match content_type.as_deref() {
         Some(DOCUMENT_CONTENT_TYPE) => {}
         Some(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
@@ -243,20 +241,21 @@ pub fn scan(bytes: &[u8], limits: &Limits) -> Result<Findings, ScanError> {
         }
         _ => return Err(ScanError::NotADocument("not WordprocessingML")),
     }
-    if !package.exists(&main) {
+    if !package.contains(&main) {
         return Err(ScanError::MissingPart("main document part"));
     }
-    package.scan_part(&main, PartKind::Document, &mut collected)?;
+    reader.scan_part(&main, PartKind::Document, &mut collected)?;
     // The parts the main document relies on, and the parts those rely on (images and charts of headers, for example).
     let mut pending = vec![main];
     while let Some(source) = pending.pop() {
-        let Some(relationships) = package.relationships(&source)? else {
+        let source = RelationshipSource::Part(source);
+        let Some(relationships) = package.relationships(&source) else {
             continue;
         };
-        for relationship in &relationships {
+        for relationship in relationships.iter() {
             let kind = kind_of(relationship);
             tag_relationship(kind, &mut collected);
-            let Target::Internal(part) = &relationship.target else {
+            let Some(part) = target_of(relationship, &source) else {
                 continue;
             };
             let part_kind = match kind {
@@ -274,13 +273,13 @@ pub fn scan(bytes: &[u8], limits: &Limits) -> Result<Findings, ScanError> {
                 Rel::Chart => PartKind::Chart,
                 _ => continue,
             };
-            if !package.exists(part) {
+            if !package.contains(&part) {
                 collected
                     .notes
                     .insert("a relationship points to a part that is missing");
                 continue;
             }
-            if package.scan_part(part, part_kind, &mut collected)?
+            if reader.scan_part(&part, part_kind, &mut collected)?
                 && matches!(
                     part_kind,
                     PartKind::Header
@@ -290,7 +289,7 @@ pub fn scan(bytes: &[u8], limits: &Limits) -> Result<Findings, ScanError> {
                         | PartKind::Comments
                 )
             {
-                pending.push(part.clone());
+                pending.push(part);
             }
         }
     }
@@ -308,9 +307,17 @@ pub fn scan(bytes: &[u8], limits: &Limits) -> Result<Findings, ScanError> {
     })
 }
 
+/// The part that an internal relationship from `source` points to, as bayan-opc resolves it; `None` for an external target, and for one that names no part.
+fn target_of(relationship: &Relationship, source: &RelationshipSource) -> Option<PartName> {
+    match relationship.resolve(source) {
+        Ok(Target::Part(part)) => Some(part),
+        Ok(Target::External(_)) | Err(_) => None,
+    }
+}
+
 /// The kind of a relationship, from its type.
 fn kind_of(relationship: &Relationship) -> Rel {
-    vocabulary::relationship(&relationship.rel_type)
+    vocabulary::relationship(relationship.relationship_type().trim())
 }
 
 /// Tags what a relationship alone reveals.
@@ -356,83 +363,41 @@ fn tag_relationship(kind: Rel, collected: &mut Collected) {
     collected.features.insert(feature);
 }
 
-/// The parts of an archive by normalized part name, and the parts already read.
-struct Package<'a, 'b> {
-    archive: &'b Archive<'a>,
-    limits: &'b Limits,
-    parts: BTreeMap<String, &'b zip::Entry>,
-    scanned: BTreeSet<String>,
+/// Reads the parts of a package that the tagger needs, each at most once, and at most [`Limits::max_parts`] of them.
+struct Parts<'p, 'a> {
+    package: &'p bayan_opc::Package<'a>,
+    limits: &'p Limits,
+    /// The parts already read (two part names are equal when they are equivalent, as bayan-opc compares them).
+    scanned: BTreeSet<PartName>,
     reads: usize,
 }
 
-impl<'a, 'b> Package<'a, 'b> {
-    /// The parts of `archive`. Two entries that name the same part once percent-encoding is decoded (`word/document.xml` and `word/%64ocument.xml`) make the package ambiguous, so it is refused, as the ZIP reader refuses names that differ only in case.
-    fn new(archive: &'b Archive<'a>, limits: &'b Limits) -> Result<Self, ScanError> {
-        let mut parts = BTreeMap::new();
-        for entry in archive.entries().filter(|entry| !entry.is_folder()) {
-            if parts.insert(opc::normalize(entry.name()), entry).is_some() {
-                return Err(ScanError::Zip(ZipError::DuplicateName));
-            }
-        }
-        Ok(Self {
-            archive,
-            limits,
-            parts,
-            scanned: BTreeSet::new(),
-            reads: 0,
-        })
-    }
-
-    fn exists(&self, part: &str) -> bool {
-        self.parts.contains_key(&opc::normalize(part))
-    }
-
-    /// The content of a part, or `None` if the package has no such part.
-    fn read(&mut self, part: &str) -> Result<Option<Vec<u8>>, ScanError> {
-        let Some(entry) = self.parts.get(&opc::normalize(part)).copied() else {
-            return Ok(None);
-        };
-        self.reads += 1;
-        if self.reads > self.limits.max_parts {
-            return Err(ScanError::TooManyParts);
-        }
-        Ok(Some(self.archive.read(entry)?))
-    }
-
-    /// The relationships of a part (`/` for the package), or `None` if it has no relationships part.
-    fn relationships(&mut self, source: &str) -> Result<Option<Vec<Relationship>>, ScanError> {
-        let name = opc::relationships_part(source);
-        let Some(bytes) = self.read(&name)? else {
-            return Ok(None);
-        };
-        opc::relationships(&bytes, source, &self.limits.xml)
-            .map(Some)
-            .map_err(|error| ScanError::Part { part: name, error })
-    }
-
+impl Parts<'_, '_> {
     /// Tags one part, unless it was already read; returns whether it was read now.
     fn scan_part(
         &mut self,
-        part: &str,
+        part: &PartName,
         kind: PartKind,
         collected: &mut Collected,
     ) -> Result<bool, ScanError> {
-        let key = opc::normalize(part);
-        if !self.scanned.insert(key) {
+        if !self.scanned.insert(part.clone()) {
             return Ok(false);
         }
-        let Some(bytes) = self.read(part)? else {
+        if !self.package.contains(part) {
             collected
                 .notes
                 .insert("a relationship points to a part that is missing");
             return Ok(false);
-        };
+        }
+        self.reads += 1;
+        if self.reads > self.limits.max_parts {
+            return Err(ScanError::TooManyParts);
+        }
+        let bytes = self.package.read_part(part)?;
         let mut tagger = PartTagger::new(collected, kind);
-        xml::scan(&bytes, &self.limits.xml, &mut tagger).map_err(|error: XmlError| {
-            ScanError::Part {
-                part: part.to_owned(),
-                error: OpcError::Xml(error),
-            }
+        events::read(&bytes, &self.limits.xml, &mut tagger).map_err(|error| ScanError::Part {
+            part: part.as_str().to_owned(),
+            error,
         })?;
         tagger.finish();
         Ok(true)
