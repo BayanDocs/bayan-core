@@ -9,7 +9,7 @@ use std::path::Path;
 use super::curl::{self, Credentials, Method, Request, Response};
 use super::{Key, MAX_OBJECT_SIZE, Store, StoreError};
 use crate::hash::Sha256;
-use crate::scan::xml::{self, Handler, Name, Start, Text, XmlLimits};
+use crate::scan::events::{self, Handler, Name, Start, Text};
 
 /// The most pages of a listing followed (a page holds up to 1,000 keys).
 const MAX_LIST_PAGES: usize = 10_000;
@@ -357,14 +357,17 @@ fn parse_listing(bytes: &[u8]) -> Result<Listing, StoreError> {
             }
         }
     }
-    let limits = XmlLimits {
+    // A listing nests three levels deep, with a namespace or none and a few short names.
+    let limits = bayan_xml::Limits {
+        max_size: usize::try_from(MAX_LIST_PAGE).unwrap_or(usize::MAX),
         max_depth: 16,
         max_attributes: 16,
-        max_name_len: 128,
+        max_name_length: 128,
         max_namespaces: 16,
+        ..bayan_xml::Limits::DEFAULT
     };
     let mut reader = Reader::default();
-    xml::scan(bytes, &limits, &mut reader)
+    events::read(bytes, &limits, &mut reader)
         .map_err(|error| StoreError(format!("the bucket listing is not valid: {error}")))?;
     if reader.too_long {
         return Err(StoreError(format!(

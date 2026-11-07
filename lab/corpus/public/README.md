@@ -1,12 +1,12 @@
 # Public corpus v1 (tier T1)
 
-The public corpus is the Fidelity Lab's set of real or realistic `.docx` documents that anyone may download and redistribute ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers)). Version 1, built by work package LAB-001, holds **1,256 documents** (23.1 MiB) from the test suites of seven open-source projects, every one tagged with the coverage-matrix features it uses.
+The public corpus is the Fidelity Lab's set of real or realistic `.docx` documents that anyone may download and redistribute ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers)). Version 1, built by work package LAB-001, holds **1,253 documents** (23.0 MiB) from the test suites of seven open-source projects, every one tagged with the coverage-matrix features it uses.
 
 | File | What it is |
 |---|---|
 | [manifest.json](manifest.json) | The corpus manifest: every document's SHA-256, size, license, provenance and tags ([manifest-schema.md](../manifest-schema.md)). Generated; never edit it by hand. |
 | [frequency-report.md](frequency-report.md) | How many documents use each feature, font, script, language and compatibility setting. Generated from the manifest. |
-| [excluded.tsv](excluded.tsv) | The 277 documents the review kept out, by SHA-256, each with its reason. |
+| [excluded.tsv](excluded.tsv) | The 280 documents the review kept out, by SHA-256, each with its reason: 249 for their content (its origin, its license or personal data), and 31 that the scanner refuses, with the reason it gives. |
 | [import.sh](import.sh) | Rebuilds the corpus from its sources: the manifest, the report, and a store of the documents. |
 | [inspect-content.py](inspect-content.py) | The automated part of the content review: reports what a curator must judge in every document of a store (see below). |
 

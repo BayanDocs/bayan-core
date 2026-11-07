@@ -23,6 +23,8 @@ bayan-opc = { path = "../crates/bayan-opc" }
 bayan-xml = { path = "../crates/bayan-xml" }
 bayan-lab-layout = { path = "../lab/bayan-lab-layout" }
 bayan-lab-compare = { path = "../lab/bayan-lab-compare" }
+# The Fidelity Lab's scanner, for `lab_scan` (CORE-011): bayan-lab reads the documents of the corpus with bayan-opc and bayan-xml, and its tagger's rules. It brings sha2, which bayan-lab hashes documents with, at the main lockfile's versions.
+bayan-lab = { path = "../lab/bayan-lab" }
 bayan-engine = { path = "../crates/bayan-engine" }
 bayan-crdt = { path = "../crates/bayan-crdt" }
 # The engine's answers, read as JSON to check them against the protocol's schema; and the messages and recordings that the engine's harness reads before the engine, to count the pixels they ask for, with serde's derived readers and serde_json's `RawValue`, as the engine reads them (src/engine.rs). The versions and features of the main workspace, which bayan-engine uses too (serde published 2026-07-18, serde_json 2026-07-20; both MIT OR Apache-2.0).
@@ -110,6 +112,14 @@ bench = false
 [[bin]]
 name = "docx_hints"
 path = "fuzz_targets/docx_hints.rs"
+test = false
+doc = false
+bench = false
+
+# The Fidelity Lab's scanner (CORE-011).
+[[bin]]
+name = "lab_scan"
+path = "fuzz_targets/lab_scan.rs"
 test = false
 doc = false
 bench = false

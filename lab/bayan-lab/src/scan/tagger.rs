@@ -7,11 +7,11 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::events::{Handler, Name, Start, Text, Value};
 use super::features::Feature;
 use super::is_hidden_character;
 use super::scripts::{Script, script_of};
 use super::vocabulary::{Ns, namespace};
-use super::xml::{Handler, Name, Start, Text, Value};
 
 /// The most font names recorded for one document.
 pub const MAX_FONTS: usize = 200;

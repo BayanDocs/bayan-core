@@ -11,7 +11,7 @@ mod write;
 pub use read::{RawEntry, ZipArchive, ZipEntry};
 pub use write::ZipWriter;
 
-pub(crate) use crc32::crc32;
+pub use crc32::crc32;
 
 use crate::percent;
 

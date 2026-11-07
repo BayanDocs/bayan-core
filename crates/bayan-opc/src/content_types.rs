@@ -3,9 +3,12 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use bayan_xml::{Event, StartTag};
+
+// The XML of the metadata parts, read with bayan-xml (`crate::metadata_xml`).
+use crate::metadata_xml::{self as xml, Encoding};
 use crate::part_name::PartName;
 use crate::percent;
-use crate::xml::{self, Element, Encoding, Node};
 use crate::{ContentTypesError, Error, Limits, PackageError};
 
 /// The namespace of the content types stream.
@@ -127,54 +130,48 @@ impl ContentTypes {
     }
 
     /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
+    ///
+    /// The stream is read event by event, and only the entries and the text between them are kept. The rules are checked in the order of the document: the root element first, then each entry and the text between the entries, and within an entry its content before its attributes; the first rule broken is the error, unless the stream is not acceptable XML at all, which comes first.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
         nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let xml::Document {
-            text,
-            encoding,
-            mut root,
-        } = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::ContentTypes(error));
-        if !root.is(NAMESPACE, "Types") {
-            return Err(invalid(ContentTypesError::UnexpectedRoot));
-        }
-        if !root.attributes.is_empty() {
-            return Err(invalid(ContentTypesError::UnexpectedAttribute));
-        }
-        let mut content_types = ContentTypes {
-            original: None,
-            items: Vec::with_capacity(root.children.len()),
-            defaults: BTreeMap::new(),
-            overrides: BTreeMap::new(),
-            modified: false,
+        let mut reading = Reading {
+            content_types: ContentTypes {
+                original: None,
+                items: Vec::new(),
+                defaults: BTreeMap::new(),
+                overrides: BTreeMap::new(),
+                modified: false,
+            },
+            root: None,
+            open: None,
         };
-        // Each child is dropped as soon as it has been read, so the tree's memory goes down while the model's goes up.
-        for node in std::mem::take(&mut root.children) {
-            match node {
-                Node::Element(element) => {
-                    let entry = read_entry(&element, limits.max_name_length).map_err(invalid)?;
-                    content_types.push_read(entry).map_err(invalid)?;
-                }
-                Node::Text { span, value } if value.chars().all(xml::is_space) => {
-                    content_types.items.push(Item::Trivia(span.clone()));
-                }
-                Node::Markup { span } => content_types.items.push(Item::Trivia(span.clone())),
-                Node::Text { .. } | Node::CData { .. } => {
-                    return Err(invalid(ContentTypesError::UnexpectedText));
-                }
-            }
-        }
+        let document = xml::read(bytes, limits, entry, nodes, |event, depth| {
+            reading
+                .event(event, depth, limits.max_name_length)
+                .map_err(invalid)
+        })?;
+        let Reading {
+            mut content_types,
+            root,
+            ..
+        } = reading;
+        // The root element is the first event of every document that bayan-xml reads without an error.
+        let Some(root) = root else {
+            return Err(invalid(ContentTypesError::UnexpectedRoot));
+        };
+        content_types.items.shrink_to_fit();
         content_types.original = Some(Original {
-            root_start: root.start_tag.clone(),
-            root_end: root.end_tag.clone(),
-            root_span_end: root.span.end,
-            root_name: root.qualified_name,
-            encoding,
-            text,
+            root_start: root.start_tag,
+            root_end: root.end_tag,
+            root_span_end: root.span_end,
+            root_name: root.name,
+            encoding: document.encoding,
+            text: document.text,
         });
         Ok(content_types)
     }
@@ -519,43 +516,144 @@ impl ContentTypes {
     }
 }
 
-/// Reads one `Default` or `Override` element.
-/// Reads a `Default` or `Override` element. Names longer than any ZIP entry name may be (`max_name_length` bytes) are refused: they could never apply to a part, and each is kept several times.
-fn read_entry(element: &Element, max_name_length: usize) -> Result<Entry, ContentTypesError> {
-    let is_default = element.is(NAMESPACE, "Default");
-    if !is_default && !element.is(NAMESPACE, "Override") {
-        return Err(ContentTypesError::UnexpectedElement);
-    }
-    for node in &element.children {
-        match node {
-            Node::Element(_) => return Err(ContentTypesError::UnexpectedElement),
-            Node::Text { value, .. } if !value.chars().all(xml::is_space) => {
-                return Err(ContentTypesError::UnexpectedText);
+/// What reading a content types stream has found so far.
+struct Reading {
+    content_types: ContentTypes,
+    root: Option<Root>,
+    /// The `Default` or `Override` element being read.
+    open: Option<OpenEntry>,
+}
+
+/// Where the root element is, and its name as written.
+struct Root {
+    start_tag: Range<usize>,
+    /// `None` while it is open, and for an empty-element tag.
+    end_tag: Option<Range<usize>>,
+    /// Where the root element ends, and what follows it begins.
+    span_end: usize,
+    name: String,
+}
+
+/// A `Default` or `Override` element whose end has not been read yet.
+struct OpenEntry {
+    /// What its start tag gives.
+    entry: Result<Entry, ContentTypesError>,
+    /// The first rule its content breaks, which comes before what its attributes break.
+    content: Option<ContentTypesError>,
+}
+
+impl Reading {
+    /// Reads one event of the stream at `depth` (see [`xml::read`]).
+    fn event(
+        &mut self,
+        event: &Event<'_>,
+        depth: usize,
+        max_name_length: usize,
+    ) -> Result<(), ContentTypesError> {
+        match (event, depth) {
+            (Event::Start(tag), 1) => {
+                let name = tag.name();
+                if !xml::is(&name, NAMESPACE, "Types") {
+                    return Err(ContentTypesError::UnexpectedRoot);
+                }
+                if tag
+                    .attributes()
+                    .any(|attribute| !attribute.is_namespace_declaration())
+                {
+                    return Err(ContentTypesError::UnexpectedAttribute);
+                }
+                self.root = Some(Root {
+                    start_tag: tag.span(),
+                    end_tag: None,
+                    span_end: tag.span().end,
+                    name: xml::qualified_name(&name),
+                });
             }
-            Node::CData { .. } => return Err(ContentTypesError::UnexpectedText),
-            Node::Text { .. } | Node::Markup { .. } => {}
+            (Event::Start(tag), 2) => {
+                let name = tag.name();
+                if !xml::is(&name, NAMESPACE, "Default") && !xml::is(&name, NAMESPACE, "Override") {
+                    return Err(ContentTypesError::UnexpectedElement);
+                }
+                self.open = Some(OpenEntry {
+                    entry: read_entry(tag, max_name_length),
+                    content: None,
+                });
+            }
+            // An element inside an entry; what is inside it does not matter any more.
+            (Event::Start(_), 3) => self.break_content(ContentTypesError::UnexpectedElement),
+            (Event::Text(text), 2) if !text.value().chars().all(xml::is_space) => {
+                self.break_content(ContentTypesError::UnexpectedText);
+            }
+            (Event::CData(_), 2) => self.break_content(ContentTypesError::UnexpectedText),
+            (Event::End(end), 2) => {
+                if let Some(OpenEntry { entry, content }) = self.open.take() {
+                    if let Some(error) = content {
+                        return Err(error);
+                    }
+                    let mut entry = entry?;
+                    entry.raw = Some(end.element_span());
+                    self.content_types.push_read(entry)?;
+                }
+            }
+            (Event::End(end), 1) => {
+                if let Some(root) = &mut self.root {
+                    if !end.span().is_empty() {
+                        root.end_tag = Some(end.span());
+                    }
+                    root.span_end = end.span().end;
+                }
+            }
+            // White space, comments and processing instructions between the entries are kept as written; other text is not allowed there.
+            (Event::Text(text), 1) => {
+                if !text.value().chars().all(xml::is_space) {
+                    return Err(ContentTypesError::UnexpectedText);
+                }
+                self.content_types.items.push(Item::Trivia(text.span()));
+            }
+            (Event::CData(_), 1) => return Err(ContentTypesError::UnexpectedText),
+            (Event::Comment(comment), 1) => {
+                self.content_types.items.push(Item::Trivia(comment.span()));
+            }
+            (Event::ProcessingInstruction(instruction), 1) => {
+                self.content_types
+                    .items
+                    .push(Item::Trivia(instruction.span()));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Notes that the content of the entry being read breaks `rule`, unless it broke one before.
+    fn break_content(&mut self, rule: ContentTypesError) {
+        if let Some(open) = &mut self.open {
+            open.content.get_or_insert(rule);
         }
     }
+}
+
+/// Reads the attributes of a `Default` or `Override` start tag. Names longer than any ZIP entry name may be (`max_name_length` bytes) are refused: they could never apply to a part, and each is kept several times.
+fn read_entry(tag: &StartTag<'_>, max_name_length: usize) -> Result<Entry, ContentTypesError> {
+    let is_default = xml::is(&tag.name(), NAMESPACE, "Default");
     let allowed: &[&str] = if is_default {
         &["Extension", "ContentType"]
     } else {
         &["PartName", "ContentType"]
     };
-    if element.attributes.iter().any(|attribute| {
-        attribute.namespace.is_some() || !allowed.contains(&attribute.local_name.as_str())
+    if tag.attributes().any(|attribute| {
+        let name = attribute.name();
+        !attribute.is_namespace_declaration()
+            && (name.namespace().is_some() || !allowed.contains(&name.local()))
     }) {
         return Err(ContentTypesError::UnexpectedAttribute);
     }
-    let content_type = element
-        .attribute("ContentType")
-        .ok_or(ContentTypesError::MissingAttribute)?;
+    let attribute = |local| tag.attribute(None, local).map(|value| value.value());
+    let content_type = attribute("ContentType").ok_or(ContentTypesError::MissingAttribute)?;
     if !is_media_type(content_type) {
         return Err(ContentTypesError::InvalidContentType);
     }
     let kind = if is_default {
-        let extension = element
-            .attribute("Extension")
-            .ok_or(ContentTypesError::MissingAttribute)?;
+        let extension = attribute("Extension").ok_or(ContentTypesError::MissingAttribute)?;
         if extension.len() > max_name_length {
             return Err(ContentTypesError::NameTooLong);
         }
@@ -566,9 +664,7 @@ fn read_entry(element: &Element, max_name_length: usize) -> Result<Entry, Conten
             extension: extension.to_owned(),
         }
     } else {
-        let written = element
-            .attribute("PartName")
-            .ok_or(ContentTypesError::MissingAttribute)?;
+        let written = attribute("PartName").ok_or(ContentTypesError::MissingAttribute)?;
         // `PartName` is an xsd:anyURI, so non-ASCII characters may be percent-encoded, as in ZIP entry names.
         let decoded = percent::decode_ucschar(written);
         // The shortest entry name of a part is its name without the leading slash.
@@ -581,7 +677,7 @@ fn read_entry(element: &Element, max_name_length: usize) -> Result<Entry, Conten
     Ok(Entry {
         kind,
         content_type: content_type.to_owned(),
-        raw: Some(element.span.clone()),
+        raw: None,
         indent: String::new(),
     })
 }
@@ -987,6 +1083,53 @@ mod tests {
                 "<Override PartName=\"/a\" ContentType=\"a/b\"/><Override PartName=\"/A\" ContentType=\"a/b\"/>"
             )),
             ContentTypesError::DuplicateOverride
+        );
+    }
+
+    #[test]
+    fn checks_the_rules_in_the_order_of_the_stream() {
+        // The stream is read event by event, and its rules are checked in the order they always were: an entry's content before its attributes, and the entries in the order of the stream; the first rule broken is the error, unless the stream is not XML, which comes first.
+        let types = |body: &str| format!("<Types xmlns=\"{NAMESPACE}\">{body}</Types>");
+        assert_eq!(
+            error(&types(
+                "<Default Extension=\"a.b\" ContentType=\"a/b\"><x/></Default>"
+            )),
+            ContentTypesError::UnexpectedElement
+        );
+        assert_eq!(
+            error(&types(
+                "<Override ContentType=\"a/b\"> text <x/></Override>"
+            )),
+            ContentTypesError::UnexpectedText
+        );
+        assert_eq!(
+            error(&types(
+                "<Default Extension=\"a\" ContentType=\"a/b\"/><Default Extension=\"A\" ContentType=\"a/b\"/><Other/>"
+            )),
+            ContentTypesError::DuplicateDefault
+        );
+        assert_eq!(
+            error(&types(
+                "<Default Extension=\"a\"/>text<Default Extension=\"a\" ContentType=\"a/b\"/>"
+            )),
+            ContentTypesError::MissingAttribute
+        );
+        assert!(matches!(
+            parse(&format!("<Other xmlns=\"{NAMESPACE}\"><x></Other>")),
+            Err(Error::Xml {
+                error: crate::XmlError {
+                    kind: crate::XmlErrorKind::MismatchedEndTag,
+                    ..
+                },
+                ..
+            })
+        ));
+        // Namespace declarations on the root are not attributes of the stream.
+        assert!(
+            parse(&format!(
+                "<p:Types xmlns:p=\"{NAMESPACE}\" xmlns:q=\"urn:q\"/>"
+            ))
+            .is_ok()
         );
     }
 

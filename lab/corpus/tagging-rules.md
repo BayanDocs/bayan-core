@@ -16,28 +16,31 @@ Whenever a rule changes what a document is tagged with, `TAGGER_VERSION` in `sca
 
 ## Safety first
 
-The scanner treats every package as hostile ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers), threat model T2 and T19). It reads only the ZIP structure and the XML of the parts listed below; it never decodes images, fonts or embedded objects, never runs anything, and never fetches anything a document refers to outside the package. Every resource is bounded (`Limits::DEFAULT` in `scan/mod.rs`):
+The scanner treats every package as hostile ([Fidelity Lab specification §3](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md#3-corpus-tiers), threat model T2 and T19). It opens a package with bayan-opc and reads the XML of the parts listed below with bayan-xml, the engine's own package layer and XML reader, so it reads documents exactly as strictly as BayanDocs does; it never decodes images, fonts or embedded objects, never runs anything, and never fetches anything a document refers to outside the package. Every resource is bounded (`Limits::DEFAULT` in `scan/mod.rs`), with the engine's own limits except where the scanner's are lower, never looser:
 
 | Limit | Value | Why |
 |---|---|---|
 | Package size | 512 MiB | the whole file is held in memory |
 | ZIP entries | 10,000 | Word writes a few dozen |
 | Entry name | 1,024 bytes | |
-| One entry, uncompressed | 256 MiB, checked before decompressing | compression bombs |
-| All entries, uncompressed | 1 GiB, checked before decompressing | |
+| One entry, uncompressed | 256 MiB, checked before decompressing | compression bombs (bayan-opc allows 512 MiB) |
+| All entries, uncompressed | 1 GiB, checked before decompressing | bayan-opc allows 2 GiB |
+| Compression ratio of an entry, and of the archive, above 1 MiB | 100 to 1, checked before decompressing | compression bombs |
+| The content types stream and the relationships parts | 8 MiB each; 16 MiB and 250,000 XML nodes together | bayan-opc reads them all when it opens the package |
 | Parts read | 2,000 | relationship chains |
-| XML nesting depth | 1,024 elements | the scanner keeps its own stack, so no input exhausts the call stack |
+| One XML part | 256 MiB | |
+| XML nesting depth | 256 elements | bayan-xml keeps its own stack, so no input exhausts the call stack; the public corpus never exceeds 29 |
 | Attributes on one element | 256 | the public corpus never exceeds 76 |
-| Namespace declarations in scope | 256 | the public corpus never exceeds 74 |
+| Distinct namespace names in one part | 4,096 | Word declares fewer than 50; the public corpus never has more than 74 declarations in scope at once |
+| Namespace names | 2,048 bytes | |
 | XML names | 256 bytes | the public corpus never exceeds 37 |
-| Items in `[Content_Types].xml` or one relationships part | 10,000 | |
 | Fonts, languages recorded | 200, 100 | the lists say so in a note when cut |
 | East Asian and complex-script language tags held until the text's scripts are known | 100 each | a crafted package declared 23 million distinct tags |
 | Heading styles, and styles linked to numbering levels | 1,024 each | |
 | Nested fields followed | 64 | |
 | Compatibility options recorded | the 65 that ECMA-376 defines | no names of a document's own choosing |
 
-A package is refused, with an error that names the problem, when it is an OLE compound file (an encrypted document or a binary `.doc`), when its ZIP structure is ambiguous or damaged (it must have one reading only, the one other readers such as Python's `zipfile` and Info-ZIP's `unzip` find: the end-of-central-directory record must end the file and be the last end-record signature in it, and only one record may end it; the central directory must end exactly where the end records begin; a ZIP64 locator may stand before the end record only if that record needs it, with the ZIP64 record, without extensible data, directly before it; local headers must agree with the central directory; entries must not overlap; CRC-32 and sizes must match; names must be relative paths inside the archive, unique even when compared case-insensitively and after percent-decoding; no encryption, no symbolic links, no spanning several disks, only stored and DEFLATE entries), when an XML part is not well-formed or has a document type declaration (so no entity can be declared or expanded), or when a limit is exceeded. The tests in `lab/bayan-lab/tests/lab/hostile_packages.rs` build a crafted file for each case.
+A package is refused, with an error that names the problem, when it is an OLE compound file (an encrypted document or a binary `.doc`); when bayan-opc refuses it, because its ZIP structure is ambiguous or damaged (it must have one reading only, the one other readers such as Python's `zipfile` and Info-ZIP's `unzip` find: the end-of-central-directory record must end the file and be the last end-record signature in it, and only one record may end it; the central directory must end exactly where the end records begin; the fields of a ZIP64 end record, without extensible data and directly before its locator, must agree with the end record's wherever these do not defer to it; local headers must agree with the central directory; entries must not overlap; CRC-32 and sizes must match; names must be relative paths inside the archive, unique even when ASCII letters are compared without case and characters beyond ASCII are compared with their percent-encoding, and carry no second name in an Info-ZIP Unicode Path field; no encryption, no symbolic links or other special files, no spanning several disks, only stored and DEFLATE entries) or because its part names, content types stream or relationships parts break the rules of the Open Packaging Conventions (two part names derivable from one another, for example); when bayan-xml refuses an XML part the tagger reads, because it is not well-formed or has a document type declaration (so no entity can be declared or expanded); or when a limit is exceeded. bayan-opc's crate documentation lists everything it refuses. The tests in `lab/bayan-lab/tests/lab/hostile_packages.rs` build a crafted file for each case.
 
 ## What is read
 

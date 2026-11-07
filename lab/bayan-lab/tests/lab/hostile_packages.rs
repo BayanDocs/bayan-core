@@ -1,12 +1,11 @@
 //! Crafted malformed and malicious packages (LAB-001 AC-3): each must be refused with the error that names its flaw, quickly and within the scanner's limits, and nothing may make the scanner panic.
 //!
-//! The packages are built in memory by `support`, field by field, so every flaw is deliberate and visible in the test. The limits are the ones the tools use ([`Limits::DEFAULT`]) unless a test says otherwise.
+//! The packages are built in memory by `support`, field by field, so every flaw is deliberate and visible in the test. The limits are the ones the tools use ([`Limits::DEFAULT`]) unless a test says otherwise. Since CORE-011 the scanner opens packages with bayan-opc and reads their XML with bayan-xml, the engine's own readers, so each flaw is refused with the error that BayanDocs gives it.
 
 use bayan_lab::scan::features::Feature;
-use bayan_lab::scan::opc::OpcError;
-use bayan_lab::scan::xml::XmlError;
-use bayan_lab::scan::zip::ZipError;
 use bayan_lab::scan::{Limits, ScanError, scan};
+use bayan_opc::{Error, LimitError, XmlErrorKind, ZipError};
+use bayan_xml::ErrorKind;
 use proptest::prelude::*;
 
 use crate::support::{
@@ -24,9 +23,18 @@ fn refusal(bytes: &[u8]) -> ScanError {
     }
 }
 
-fn zip_refusal(bytes: &[u8]) -> ZipError {
+/// How bayan-opc refuses the package: its ZIP container, its part names, its metadata, or the data of a part.
+fn package_refusal(bytes: &[u8]) -> Error {
     match refusal(bytes) {
-        ScanError::Zip(error) => error,
+        ScanError::Package(error) => error,
+        other => panic!("refused, but not by bayan-opc: {other}"),
+    }
+}
+
+/// How bayan-opc's ZIP reader refuses the package.
+fn zip_refusal(bytes: &[u8]) -> ZipError {
+    match package_refusal(bytes) {
+        Error::Zip(error) => error,
         other => panic!("refused, but not by the ZIP reader: {other}"),
     }
 }
@@ -54,14 +62,12 @@ fn with_document(xml: &[u8]) -> Vec<u8> {
     Docx::with_main(DOCUMENT_TYPE, xml).bytes()
 }
 
-fn xml_refusal(xml: &[u8]) -> XmlError {
+/// How bayan-xml refuses the main document part.
+fn xml_refusal(xml: &[u8]) -> ErrorKind {
     match refusal(&with_document(xml)) {
-        ScanError::Part {
-            part,
-            error: OpcError::Xml(error),
-        } => {
+        ScanError::Part { part, error } => {
             assert_eq!(part, "/word/document.xml");
-            error
+            error.kind()
         }
         other => panic!("refused, but not as XML: {other}"),
     }
@@ -128,11 +134,11 @@ fn archives_spanning_several_disks() {
     ] {
         assert_eq!(
             zip_refusal(&zip_with(&valid().entries(), &layout)),
-            ZipError::MultiDisk
+            ZipError::MultipleDisks
         );
     }
     let bytes = with_entry("word/document.xml", |entry| entry.disk = 2);
-    assert_eq!(zip_refusal(&bytes), ZipError::MultiDisk);
+    assert_eq!(zip_refusal(&bytes), ZipError::MultipleDisks);
 }
 
 #[test]
@@ -145,38 +151,38 @@ fn a_central_directory_that_lies_about_itself() {
                 entries: Some(200),
                 ..ZipLayout::default()
             },
-            ZipError::Corrupt("the central directory is too small for its entry count"),
+            Error::Zip(ZipError::MalformedDirectory),
         ),
         (
             ZipLayout {
                 directory_offset: Some(u32::try_from(real.len()).unwrap()),
                 ..ZipLayout::default()
             },
-            ZipError::Corrupt("the central directory extends past its end record"),
+            Error::Zip(ZipError::MalformedDirectory),
         ),
         (
             ZipLayout {
                 directory_offset: Some(u32::MAX - 4),
                 ..ZipLayout::default()
             },
-            ZipError::Corrupt("the central directory extends past its end record"),
+            Error::Zip(ZipError::MalformedDirectory),
         ),
         (
             ZipLayout {
                 directory_size: Some(1000),
                 ..ZipLayout::default()
             },
-            ZipError::Corrupt("the central directory extends past its end record"),
+            Error::Zip(ZipError::MalformedDirectory),
         ),
         (
             ZipLayout {
                 entries: Some(10_001),
                 ..ZipLayout::default()
             },
-            ZipError::TooManyEntries,
+            Error::Limit(LimitError::TooManyEntries { limit: 10_000 }),
         ),
     ] {
-        assert_eq!(zip_refusal(&zip_with(&entries, &layout)), expected);
+        assert_eq!(package_refusal(&zip_with(&entries, &layout)), expected);
     }
 }
 
@@ -193,65 +199,93 @@ fn entry_names_that_climb_out_or_are_not_part_names() {
         "word/x\u{1}.xml",
     ] {
         let bytes = with_extra_entry(ZipEntry::stored(name, b"x"));
-        assert_eq!(zip_refusal(&bytes), ZipError::BadName, "{name:?}");
+        assert!(
+            matches!(zip_refusal(&bytes), ZipError::UnsafeName { .. }),
+            "{name:?}"
+        );
     }
     let mut invalid_utf8 = ZipEntry::stored("word/x.xml", b"x");
     invalid_utf8.name = b"word/\xFF.xml".to_vec();
     invalid_utf8.local_name = Some(invalid_utf8.name.clone());
-    assert_eq!(
+    assert!(matches!(
         zip_refusal(&with_extra_entry(invalid_utf8)),
-        ZipError::BadName
-    );
+        ZipError::UnsafeName { .. }
+    ));
     let long = with_extra_entry(ZipEntry::stored(&"a".repeat(1025), b"x"));
-    assert_eq!(zip_refusal(&long), ZipError::NameTooLong);
+    assert!(matches!(
+        package_refusal(&long),
+        Error::Limit(LimitError::NameTooLong { limit: 1_024, .. })
+    ));
 }
 
 #[test]
 fn two_names_for_one_part() {
-    // Names that differ only in case, or only in percent-encoding, name the same part: which one would Word read?
-    for twin in ["WORD/DOCUMENT.XML", "word/%64ocument.xml"] {
+    // Names that differ only in case, or only in the percent-encoding of a character beyond ASCII, name the same part: which one would Word read? bayan-opc refuses both.
+    let twins = |first: &str, second: &str| {
         let mut entries = valid().entries();
         let mut copy = entries
             .iter()
             .find(|entry| entry.name == b"word/document.xml")
             .unwrap()
             .clone();
-        copy.name = twin.as_bytes().to_vec();
-        entries.push(copy);
-        assert_eq!(
-            zip_refusal(&zip(&entries)),
-            ZipError::DuplicateName,
-            "{twin}"
-        );
-    }
+        // Names beyond ASCII are UTF-8, and say so with the flag (bit 11) that ZIP has for it.
+        copy.flags |= 0x0800;
+        for name in [first, second] {
+            copy.name = name.as_bytes().to_vec();
+            copy.local_name = None;
+            entries.push(copy.clone());
+        }
+        zip(&entries)
+    };
+    assert!(matches!(
+        zip_refusal(&twins("WORD/DOCUMENT.XML", "word/other.xml")),
+        ZipError::DuplicateName { .. }
+    ));
+    assert!(matches!(
+        zip_refusal(&twins("word/média.xml", "word/m%C3%A9dia.xml")),
+        ZipError::DuplicateName { .. }
+    ));
+    // A letter written percent-encoded, `%64` for `d`, makes a name that is no part name (ECMA-376 Part 2 §6.2.2.2 forbids encoding a character that can be written as itself): bayan-opc ignores such an entry, so `word/%64ocument.xml` is never read as the main document part, and the package is tagged from `word/document.xml` alone.
+    let mut entries = valid().entries();
+    let mut copy = entries
+        .iter()
+        .find(|entry| entry.name == b"word/document.xml")
+        .unwrap()
+        .clone();
+    copy.name = b"word/%64ocument.xml".to_vec();
+    copy.local_name = None;
+    entries.push(copy);
+    scan(&zip(&entries), &Limits::DEFAULT).unwrap();
 }
 
 #[test]
 fn encrypted_entries_links_and_unknown_compression() {
     type Change = fn(&mut ZipEntry);
+    // The main document part is the valid package's second entry.
+    let entry = 1;
     let cases: [(Change, ZipError); 5] = [
-        (|entry| entry.flags = 1, ZipError::Encrypted),
-        (|entry| entry.flags = 0x40, ZipError::Encrypted),
+        (|entry| entry.flags = 1, ZipError::Encrypted { entry }),
+        (|entry| entry.flags = 0x40, ZipError::Encrypted { entry }),
         (
             |entry| {
                 entry.method = 99;
                 entry.local_method = Some(99);
             },
-            ZipError::Encrypted,
+            ZipError::Encrypted { entry },
         ),
         (
             |entry| {
                 entry.version_made_by = 3 << 8;
                 entry.external_attributes = 0o120_777 << 16;
             },
-            ZipError::SymbolicLink,
+            ZipError::SpecialFile { entry },
         ),
         (
             |entry| {
                 entry.method = 12;
                 entry.local_method = Some(12);
             },
-            ZipError::UnsupportedCompression(12),
+            ZipError::UnsupportedCompression { entry, method: 12 },
         ),
     ];
     for (change, expected) in cases {
@@ -271,15 +305,48 @@ fn sizes_above_the_limits_are_refused_before_anything_is_decompressed() {
     let huge = with_entry("word/document.xml", |entry| {
         entry.uncompressed_size = 256 * 1024 * 1024 + 1;
     });
-    assert_eq!(zip_refusal(&huge), ZipError::EntryTooLarge);
-    // Five entries of 250 MiB each declare more than the 1 GiB total.
+    assert_eq!(
+        package_refusal(&huge),
+        Error::Limit(LimitError::EntryTooLarge {
+            entry: 1,
+            limit: 256 * 1024 * 1024
+        })
+    );
+    // Five entries of 250 MiB each declare more than the 1 GiB total; each claims to come from one byte, so the first is refused as a compression bomb even before the total is added up.
     let mut entries = valid().entries();
     for number in 0..5 {
         let mut entry = ZipEntry::deflated(&format!("word/media/big{number}.bin"), b"x");
         entry.uncompressed_size = 250 * 1024 * 1024;
         entries.push(entry);
     }
-    assert_eq!(zip_refusal(&zip(&entries)), ZipError::TotalTooLarge);
+    assert!(matches!(
+        package_refusal(&zip(&entries)),
+        Error::Limit(LimitError::CompressionRatio {
+            entry: Some(_),
+            limit: 100
+        })
+    ));
+    // Entries whose sizes are honest still may not add up to more than the total, here a total of 100 KiB.
+    let mut entries = valid().entries();
+    for number in 0..3 {
+        entries.push(ZipEntry::stored(
+            &format!("word/media/big{number}.bin"),
+            &vec![b'x'; 40 * 1024],
+        ));
+    }
+    let total = Limits {
+        package: bayan_opc::Limits {
+            max_total_size: 100 * 1024,
+            ..Limits::DEFAULT.package
+        },
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        scan(&zip(&entries), &total).unwrap_err(),
+        ScanError::Package(Error::Limit(LimitError::TotalTooLarge {
+            limit: 100 * 1024
+        }))
+    );
     let small = Limits {
         max_package_size: 100,
         ..Limits::DEFAULT
@@ -298,7 +365,7 @@ fn a_compression_bomb_stops_at_its_declared_size() {
         *entry = ZipEntry::deflated("word/document.xml", &zeros);
         entry.uncompressed_size = 1024;
     });
-    assert_eq!(zip_refusal(&bytes), ZipError::SizeMismatch);
+    assert_eq!(zip_refusal(&bytes), ZipError::SizeMismatch { entry: 1 });
 }
 
 #[test]
@@ -317,7 +384,7 @@ fn a_truncated_stream_stops_at_its_declared_size() {
         entry.compressed_size = u32::try_from(entry.data.len()).unwrap();
         entry.uncompressed_size = 100;
     });
-    assert_eq!(zip_refusal(&bytes), ZipError::SizeMismatch);
+    assert_eq!(zip_refusal(&bytes), ZipError::SizeMismatch { entry: 1 });
 }
 
 #[test]
@@ -326,7 +393,10 @@ fn entry_data_that_runs_into_the_central_directory() {
     let mut entries = valid().entries();
     let last = entries.last_mut().unwrap();
     last.compressed_size += 40;
-    assert_eq!(zip_refusal(&zip(&entries)), ZipError::Overlap);
+    assert!(matches!(
+        zip_refusal(&zip(&entries)),
+        ZipError::Overlap { .. }
+    ));
 }
 
 #[test]
@@ -369,7 +439,7 @@ fn entries_that_overlap() {
     let bytes = with_entry("word/document.xml", |entry| {
         entry.compressed_size += 40;
     });
-    assert_eq!(zip_refusal(&bytes), ZipError::Overlap);
+    assert_eq!(zip_refusal(&bytes), ZipError::Overlap { entry: 2 });
     // An entry whose local header and data lie inside another entry's data: both are consistent on their own, but they share bytes.
     let mut entries = valid().entries();
     let inner = ZipEntry::stored("word/inner.xml", b"<inner/>");
@@ -387,7 +457,10 @@ fn entries_that_overlap() {
         has_local_header: false,
         ..inner
     });
-    assert_eq!(zip_refusal(&zip(&entries)), ZipError::Overlap);
+    assert!(matches!(
+        zip_refusal(&zip(&entries)),
+        ZipError::Overlap { .. }
+    ));
 }
 
 #[test]
@@ -395,41 +468,32 @@ fn local_headers_that_contradict_the_central_directory() {
     let renamed = with_entry("word/document.xml", |entry| {
         entry.local_name = Some(b"word/other.xml".to_vec());
     });
-    assert_eq!(
-        zip_refusal(&renamed),
-        ZipError::Corrupt("local header's name differs from the central directory")
-    );
+    assert_eq!(zip_refusal(&renamed), ZipError::HeaderMismatch { entry: 1 });
     let method = with_entry("word/document.xml", |entry| entry.local_method = Some(0));
-    assert_eq!(
-        zip_refusal(&method),
-        ZipError::Corrupt("local header's compression method differs from the central directory")
-    );
+    assert_eq!(zip_refusal(&method), ZipError::HeaderMismatch { entry: 1 });
     let misplaced = with_entry("word/document.xml", |entry| entry.offset = Some(3));
     assert_eq!(
         zip_refusal(&misplaced),
-        ZipError::Corrupt("local header signature")
+        ZipError::MalformedEntry { entry: 1 }
     );
 }
 
 #[test]
 fn content_that_does_not_match_its_header() {
     let crc = with_entry("word/document.xml", |entry| entry.crc32 ^= 1);
-    assert_eq!(zip_refusal(&crc), ZipError::CrcMismatch);
+    assert_eq!(zip_refusal(&crc), ZipError::ChecksumMismatch { entry: 1 });
     let shorter = with_entry("word/document.xml", |entry| entry.uncompressed_size += 1);
-    assert_eq!(zip_refusal(&shorter), ZipError::SizeMismatch);
+    assert_eq!(zip_refusal(&shorter), ZipError::SizeMismatch { entry: 1 });
     let inflate = with_entry("word/document.xml", |entry| {
         entry.data = vec![0xFF; entry.data.len()];
     });
-    assert_eq!(zip_refusal(&inflate), ZipError::Inflate);
+    assert_eq!(zip_refusal(&inflate), ZipError::CorruptData { entry: 1 });
     let stored = with_entry("word/document.xml", |entry| {
         let content = document_xml("<w:p/>").into_bytes();
         *entry = ZipEntry::stored("word/document.xml", &content);
         entry.uncompressed_size += 1;
     });
-    assert_eq!(
-        zip_refusal(&stored),
-        ZipError::Corrupt("a stored entry's sizes differ")
-    );
+    assert_eq!(zip_refusal(&stored), ZipError::SizeMismatch { entry: 1 });
 }
 
 #[test]
@@ -445,10 +509,7 @@ fn zip64_archives_are_read_and_their_records_checked() {
     if let Some(byte) = broken.get_mut(locator) {
         *byte = 0;
     }
-    assert_eq!(
-        zip_refusal(&broken),
-        ZipError::Corrupt("ZIP64 end locator missing")
-    );
+    assert_eq!(zip_refusal(&broken), ZipError::MalformedDirectory);
 }
 
 // The package layer.
@@ -545,6 +606,7 @@ fn relationships_that_climb_out_point_outside_or_go_round_in_circles() {
 
 #[test]
 fn too_many_parts_relationships_or_content_types() {
+    // The tagger reads at most 2,000 parts; the relationships parts and the content types stream, which bayan-opc reads when it opens the package, share bayan-opc's metadata budgets instead: 250,000 XML nodes and 16 MiB for all of them together.
     let mut docx = valid();
     for number in 0..2_001 {
         docx = docx.part(
@@ -557,7 +619,8 @@ fn too_many_parts_relationships_or_content_types() {
     let mut relationships = String::from(
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
     );
-    for number in 0..10_001 {
+    // Four nodes each: the element and its three attributes.
+    for number in 0..62_500 {
         relationships.push_str(&format!(
             r#"<Relationship Id="r{number}" Type="t" Target="x{number}"/>"#
         ));
@@ -566,17 +629,21 @@ fn too_many_parts_relationships_or_content_types() {
     let bytes = with_entry("_rels/.rels", |entry| {
         *entry = ZipEntry::deflated("_rels/.rels", relationships.as_bytes());
     });
-    assert_eq!(
-        refusal(&bytes),
-        ScanError::Part {
-            part: "/_rels/.rels".to_owned(),
-            error: OpcError::TooManyItems
+    assert!(matches!(
+        package_refusal(&bytes),
+        Error::Xml {
+            entry: Some(_),
+            error: bayan_opc::XmlError {
+                kind: XmlErrorKind::TooManyNodes,
+                ..
+            }
         }
-    );
+    ));
     let mut types = String::from(
         r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
     );
-    for number in 0..10_001 {
+    // Three nodes each, the element and its two attributes, and two for the root: the last `ContentType` attribute is node 250,001.
+    for number in 0..83_333 {
         types.push_str(&format!(
             r#"<Default Extension="x{number}" ContentType="application/x"/>"#
         ));
@@ -586,10 +653,13 @@ fn too_many_parts_relationships_or_content_types() {
         *entry = ZipEntry::deflated("[Content_Types].xml", types.as_bytes());
     });
     assert_eq!(
-        refusal(&bytes),
-        ScanError::Part {
-            part: "/[Content_Types].xml".to_owned(),
-            error: OpcError::TooManyItems
+        package_refusal(&bytes),
+        Error::Xml {
+            entry: Some(0),
+            error: bayan_opc::XmlError {
+                offset: types.rfind("ContentType").unwrap(),
+                kind: XmlErrorKind::TooManyNodes,
+            }
         }
     );
 }
@@ -599,13 +669,19 @@ fn too_many_parts_relationships_or_content_types() {
 #[test]
 fn entity_expansion_and_external_entities_are_impossible() {
     let billion_laughs = br#"<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>&lol2;</w:t></w:r></w:p></w:body></w:document>"#;
-    assert_eq!(xml_refusal(billion_laughs), XmlError::Doctype);
+    assert_eq!(xml_refusal(billion_laughs), ErrorKind::DoctypeNotAllowed);
     let external = br#"<?xml version="1.0"?><!DOCTYPE d [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><d>&xxe;</d>"#;
-    assert_eq!(xml_refusal(external), XmlError::Doctype);
+    assert_eq!(xml_refusal(external), ErrorKind::DoctypeNotAllowed);
     let undeclared = document_xml("<w:p><w:r><w:t>&xxe;</w:t></w:r></w:p>");
-    assert_eq!(xml_refusal(undeclared.as_bytes()), XmlError::Entity);
+    assert_eq!(
+        xml_refusal(undeclared.as_bytes()),
+        ErrorKind::UndefinedEntity
+    );
     let bad_reference = document_xml("<w:p><w:r><w:t>&#0;</w:t></w:r></w:p>");
-    assert_eq!(xml_refusal(bad_reference.as_bytes()), XmlError::Entity);
+    assert_eq!(
+        xml_refusal(bad_reference.as_bytes()),
+        ErrorKind::InvalidCharacterReference
+    );
 }
 
 #[test]
@@ -615,14 +691,17 @@ fn nesting_attributes_names_and_namespaces_beyond_the_limits() {
         "<w:p>".repeat(1_100),
         "</w:p>".repeat(1_100)
     ));
-    assert_eq!(xml_refusal(deep.as_bytes()), XmlError::TooDeep);
+    assert_eq!(xml_refusal(deep.as_bytes()), ErrorKind::TooDeep);
     let attributes: String = (0..300)
         .map(|number| format!(r#" a{number}="1""#))
         .collect();
     let crowded = document_xml(&format!("<w:p{attributes}/>"));
-    assert_eq!(xml_refusal(crowded.as_bytes()), XmlError::TooManyAttributes);
+    assert_eq!(
+        xml_refusal(crowded.as_bytes()),
+        ErrorKind::TooManyAttributes
+    );
     let long = document_xml(&format!("<w:{}/>", "p".repeat(300)));
-    assert_eq!(xml_refusal(long.as_bytes()), XmlError::NameTooLong);
+    assert_eq!(xml_refusal(long.as_bytes()), ErrorKind::NameTooLong);
     let namespaces: String = (0..300)
         .map(|number| format!(r#" xmlns:n{number}="urn:example:{number}""#))
         .collect();
@@ -630,26 +709,24 @@ fn nesting_attributes_names_and_namespaces_beyond_the_limits() {
     // 300 declarations are also 300 attributes; whichever limit is checked first refuses them.
     assert!(matches!(
         xml_refusal(declared.as_bytes()),
-        XmlError::TooManyNamespaces | XmlError::TooManyAttributes
+        ErrorKind::TooManyNamespaces | ErrorKind::TooManyAttributes
     ));
-    // Namespace declarations pile up across nested elements too.
-    let mut nested = String::new();
-    for number in 0..300 {
-        nested.push_str(&format!(r#"<w:p xmlns:n{number}="urn:example:{number}">"#));
-    }
-    nested.push_str(&"</w:p>".repeat(300));
+    // Namespace names pile up across the part too: bayan-xml keeps each distinct name once, and refuses a part that declares more than 4,096 of them.
+    let many: String = (0..4_097)
+        .map(|number| format!(r#"<w:p xmlns:n="urn:example:{number}"/>"#))
+        .collect();
     assert_eq!(
-        xml_refusal(document_xml(&nested).as_bytes()),
-        XmlError::TooManyNamespaces
+        xml_refusal(document_xml(&many).as_bytes()),
+        ErrorKind::TooManyNamespaces
     );
 }
 
 #[test]
 fn xml_that_is_not_well_formed() {
     for (body, expected) in [
-        ("<x:p/>", XmlError::UnboundPrefix),
-        ("<w:p></w:r>", XmlError::MismatchedEnd),
-        ("<w:p>\u{1}</w:p>", XmlError::InvalidCharacter),
+        ("<x:p/>", ErrorKind::UndeclaredPrefix),
+        ("<w:p></w:r>", ErrorKind::MismatchedEndTag),
+        ("<w:p>\u{1}</w:p>", ErrorKind::InvalidCharacter),
     ] {
         assert_eq!(
             xml_refusal(document_xml(body).as_bytes()),
@@ -658,10 +735,13 @@ fn xml_that_is_not_well_formed() {
         );
     }
     let unclosed = document_xml("<w:p>").replace("</w:body></w:document>", "");
-    assert_eq!(xml_refusal(unclosed.as_bytes()), XmlError::Unclosed);
-    assert_eq!(xml_refusal(b"\xFF\xFE\x00"), XmlError::Encoding);
-    assert_eq!(xml_refusal(b"<w:document \xC3\x28/>"), XmlError::Encoding);
-    assert!(matches!(xml_refusal(b"<a b=1/>"), XmlError::Malformed(_)));
+    assert_eq!(xml_refusal(unclosed.as_bytes()), ErrorKind::UnexpectedEnd);
+    assert_eq!(xml_refusal(b"\xFF\xFE\x00"), ErrorKind::InvalidEncoding);
+    assert_eq!(
+        xml_refusal(b"<w:document \xC3\x28/>"),
+        ErrorKind::InvalidEncoding
+    );
+    assert_eq!(xml_refusal(b"<a b=1/>"), ErrorKind::MalformedTag);
     // UTF-16 with a byte order mark is allowed.
     let utf16: Vec<u8> = [0xFF, 0xFE]
         .into_iter()
@@ -765,10 +845,7 @@ fn an_end_record_hidden_in_the_comment_of_another() {
             ..ZipLayout::default()
         },
     );
-    assert_eq!(
-        zip_refusal(&disguised),
-        ZipError::Corrupt("two end-of-central-directory records end the file")
-    );
+    assert_eq!(zip_refusal(&disguised), ZipError::AmbiguousEnd);
 }
 
 #[test]
@@ -785,10 +862,7 @@ fn an_end_record_signature_in_the_comment_that_does_not_end_the_file() {
             ..ZipLayout::default()
         },
     );
-    assert_eq!(
-        zip_refusal(&disguised),
-        ZipError::Corrupt("an end-of-central-directory signature follows the end record")
-    );
+    assert_eq!(zip_refusal(&disguised), ZipError::AmbiguousEnd);
 }
 
 #[test]
@@ -801,15 +875,12 @@ fn a_gap_between_the_central_directory_and_its_end_record() {
             ..ZipLayout::default()
         },
     );
-    assert_eq!(
-        zip_refusal(&gapped),
-        ZipError::Corrupt("the central directory does not end where its end record begins")
-    );
+    assert_eq!(zip_refusal(&gapped), ZipError::MalformedDirectory);
 }
 
 #[test]
 fn a_zip64_locator_before_an_end_record_that_needs_none() {
-    // A ZIP64 archive whose classic end record states the real values: readers that always follow the locator would read the ZIP64 record instead.
+    // A ZIP64 archive whose classic end record states the real values: readers that always follow the locator read the ZIP64 record instead. bayan-opc lets the two records exist side by side only where they agree, so that every reader finds the same central directory.
     let entries = valid().entries();
     let mut bytes = zip_with(
         &entries,
@@ -827,10 +898,11 @@ fn a_zip64_locator_before_an_end_record_that_needs_none() {
         .unwrap()
         .to_vec();
     bytes.splice(end + 8..end + 20, real_fields);
-    assert_eq!(
-        zip_refusal(&bytes),
-        ZipError::Corrupt("a ZIP64 end locator precedes an end record that needs none")
-    );
+    scan(&bytes, &Limits::DEFAULT).unwrap();
+    // Where the classic record puts the central directory one byte further on than the ZIP64 record, the readers would disagree, so the archive is refused.
+    let offset = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap());
+    bytes.splice(end + 16..end + 20, (offset + 1).to_le_bytes());
+    assert_eq!(zip_refusal(&bytes), ZipError::MalformedDirectory);
 }
 
 #[test]
@@ -849,12 +921,7 @@ fn a_zip64_record_with_extensible_data() {
         [0x50, 0x4b, 0x06, 0x06]
     );
     bytes.splice(record + 4..record + 12, 52_u64.to_le_bytes());
-    assert_eq!(
-        zip_refusal(&bytes),
-        ZipError::Corrupt(
-            "the ZIP64 end record does not stand, without extensible data, just before its locator"
-        )
-    );
+    assert_eq!(zip_refusal(&bytes), ZipError::MalformedDirectory);
 }
 
 #[test]
@@ -869,12 +936,7 @@ fn a_zip64_record_away_from_its_locator() {
     );
     let record_end = bytes.len() - 22 - 20;
     bytes.splice(record_end..record_end, [0_u8; 8]);
-    assert_eq!(
-        zip_refusal(&bytes),
-        ZipError::Corrupt(
-            "the ZIP64 end record does not stand, without extensible data, just before its locator"
-        )
-    );
+    assert_eq!(zip_refusal(&bytes), ZipError::MalformedDirectory);
 }
 
 #[test]
@@ -884,7 +946,7 @@ fn entry_counts_that_disagree_claim_several_disks() {
     let end = classic.len() - 22;
     let entries = u16::from_le_bytes([classic[end + 10], classic[end + 11]]);
     classic.splice(end + 8..end + 10, (entries - 1).to_le_bytes());
-    assert_eq!(zip_refusal(&classic), ZipError::MultiDisk);
+    assert_eq!(zip_refusal(&classic), ZipError::MultipleDisks);
     let mut zip64 = zip_with(
         &valid().entries(),
         &ZipLayout {
@@ -895,7 +957,7 @@ fn entry_counts_that_disagree_claim_several_disks() {
     let record = zip64.len() - 22 - 20 - 56;
     let entries = u64::from_le_bytes(zip64[record + 32..record + 40].try_into().unwrap());
     zip64.splice(record + 24..record + 32, (entries - 1).to_le_bytes());
-    assert_eq!(zip_refusal(&zip64), ZipError::MultiDisk);
+    assert_eq!(zip_refusal(&zip64), ZipError::MultipleDisks);
 }
 
 #[test]
@@ -903,7 +965,10 @@ fn a_folder_entry_with_content() {
     // A name ending in `/` is a folder; content under it would be a file that most readers never show.
     let mut entries = valid().entries();
     entries.push(ZipEntry::stored("word/hidden/", b"content"));
-    assert_eq!(zip_refusal(&zip(&entries)), ZipError::BadName);
+    assert_eq!(
+        zip_refusal(&zip(&entries)),
+        ZipError::FolderWithData { entry: 3 }
+    );
     let mut empty = valid().entries();
     empty.push(ZipEntry::stored("word/folder/", b""));
     assert!(scan(&zip(&empty), &Limits::DEFAULT).is_ok());

@@ -1,4 +1,4 @@
-//! The content types stream parser (bayan-opc's `ContentTypes`) and the minimal XML parser under it, on arbitrary bytes. For every stream it accepts: written back unchanged it gives exactly the input; changed, it gives a stream that parses again, with the change in it; and the change undone gives the input again.
+//! The content types stream parser (bayan-opc's `ContentTypes`) and bayan-xml's reader under it, which bayan-opc reads its metadata with (CORE-011), on arbitrary bytes. For every stream it accepts: written back unchanged it gives exactly the input; changed, it gives a stream that parses again, with the change in it; and the change undone gives the input again.
 
 #![no_main]
 
