@@ -14,7 +14,7 @@ bayan-core contains everything that understands documents: the document model, `
 - Specifications: [document model](https://github.com/BayanDocs/docs/blob/HEAD/specs/document-model.md), [engine protocol](https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md), [Fidelity Lab](https://github.com/BayanDocs/docs/blob/HEAD/specs/fidelity-lab.md)
 - Work packages: [docs/workpackages](https://github.com/BayanDocs/docs/tree/HEAD/workpackages)
 
-Contributors and agents: start with [AGENTS.md](AGENTS.md).
+Contributors and agents: start with [AGENTS.md](AGENTS.md). The developer guide's page [Developing bayan-core](https://github.com/BayanDocs/docs/blob/HEAD/developer/bayan-core.md) shows how to set up a development machine and run the verification gate, and how this repository fits with the others.
 
 ## License
 
