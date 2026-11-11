@@ -45,7 +45,7 @@ exceptions = [
 unused-allowed-license = "allow"
 
 [licenses.private]
-# Our own crates (bayan-fuzz and bayan-opc) are unpublished and licensed under the repository license.
+# Our own crates (bayan-fuzz, and the members of the main workspace that it builds from their folders, as fuzz/Cargo.toml lists them) are unpublished and licensed under the repository license.
 ignore = true
 
 [bans]
