@@ -52,8 +52,8 @@ impl Crc32 {
     }
 }
 
-/// The CRC-32 checksum of `data`.
-pub(crate) fn crc32(data: &[u8]) -> u32 {
+/// The CRC-32 checksum of `data`, as ZIP headers record it. Public for tools that build ZIP archives field by field, such as the Fidelity Lab's tests of crafted packages.
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = Crc32::new();
     crc.update(data);
     crc.finish()

@@ -3,9 +3,12 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use bayan_xml::{Event, StartTag};
+
 use crate::content_types::DECLARATION;
+// The XML of the metadata parts, read with bayan-xml (`crate::metadata_xml`).
+use crate::metadata_xml::{self as xml, Encoding, XML_NAMESPACE};
 use crate::part_name::{PartName, RelationshipSource};
-use crate::xml::{self, Element, Encoding, Node, XML_NAMESPACE};
 use crate::{Error, Limits, PackageError, RelationshipsError, TargetError};
 
 /// The namespace of relationships parts.
@@ -168,68 +171,61 @@ impl Relationships {
     }
 
     /// Reads the part at ZIP entry `entry` (if known), counting its XML nodes against `nodes`, a budget that the metadata parts of one package share.
+    ///
+    /// The part is read event by event, and only the relationships, the spans of the elements from other namespaces and the text between them are kept. Its rules are checked in this order, as when the whole part was parsed before it was read: the root element; then an `xml:base` attribute anywhere in the part; then the relationships, the elements from other namespaces and the text between them, in the order of the document, and within a relationship its content before its attributes. The first rule broken is the error, unless the part is not acceptable XML at all, which comes first.
     pub(crate) fn parse_entry(
         bytes: &[u8],
         limits: &Limits,
         entry: Option<usize>,
         nodes: &mut usize,
     ) -> Result<Self, Error> {
-        let xml::Document {
-            text,
-            encoding,
-            mut root,
-        } = xml::parse_part(bytes, limits, entry, nodes)?;
         let invalid = |error| Error::Package(PackageError::Relationships { entry, error });
-        if !root.is(NAMESPACE, "Relationships") {
-            return Err(invalid(RelationshipsError::UnexpectedRoot));
+        let mut reading = Reading {
+            items: Vec::new(),
+            relationships: BTreeMap::new(),
+            highest: 0,
+            root: None,
+            root_error: None,
+            xml_base: false,
+            broken: None,
+            open: None,
+        };
+        let document = xml::read(bytes, limits, entry, nodes, |event, depth| {
+            reading.event(event, depth, limits.max_xml_name_length);
+            Ok(())
+        })?;
+        let Reading {
+            mut items,
+            relationships,
+            highest,
+            root,
+            root_error,
+            xml_base,
+            broken,
+            ..
+        } = reading;
+        if let Some(error) = root_error {
+            return Err(invalid(error));
         }
-        if uses_xml_base(&root) {
+        if xml_base {
             return Err(invalid(RelationshipsError::XmlBase));
         }
-        let mut items = Vec::with_capacity(root.children.len());
-        let mut relationships = BTreeMap::new();
-        let mut highest = 0;
-        // Each child is dropped as soon as it has been read, so the tree's memory goes down while the model's goes up.
-        for node in std::mem::take(&mut root.children) {
-            match node {
-                Node::Element(element) if element.is(NAMESPACE, "Relationship") => {
-                    let relationship =
-                        read_relationship(&element, limits.max_xml_name_length).map_err(invalid)?;
-                    if relationships.contains_key(&relationship.id) {
-                        return Err(invalid(RelationshipsError::DuplicateId));
-                    }
-                    items.push(Item::Relationship(relationship.id.clone()));
-                    highest = highest.max(id_number(&relationship.id).unwrap_or(0));
-                    relationships.insert(
-                        relationship.id.clone(),
-                        Entry {
-                            relationship,
-                            raw: Some(element.span.clone()),
-                            indent: String::new(),
-                        },
-                    );
-                }
-                Node::Element(element) if element.namespace.as_deref() == Some(NAMESPACE) => {
-                    return Err(invalid(RelationshipsError::UnexpectedElement));
-                }
-                Node::Element(element) => items.push(Item::Extension(element.span.clone())),
-                Node::Text { span, value } if value.chars().all(xml::is_space) => {
-                    items.push(Item::Trivia(span.clone()));
-                }
-                Node::Markup { span } => items.push(Item::Trivia(span.clone())),
-                Node::Text { .. } | Node::CData { .. } => {
-                    return Err(invalid(RelationshipsError::UnexpectedText));
-                }
-            }
+        if let Some(error) = broken {
+            return Err(invalid(error));
         }
+        // The root element is the first event of every document that bayan-xml reads without an error.
+        let Some(root) = root else {
+            return Err(invalid(RelationshipsError::UnexpectedRoot));
+        };
+        items.shrink_to_fit();
         let mut relationships = Relationships {
             original: Some(Original {
-                root_start: root.start_tag.clone(),
-                root_end: root.end_tag.clone(),
-                root_span_end: root.span.end,
-                root_name: root.qualified_name,
-                encoding,
-                text,
+                root_start: root.start_tag,
+                root_end: root.end_tag,
+                root_span_end: root.span_end,
+                root_name: root.name,
+                encoding: document.encoding,
+                text: document.text,
             }),
             items,
             relationships,
@@ -503,20 +499,152 @@ fn id_number(id: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Reads a `Relationship` element. Identifiers are XML names (`xsd:ID`), so one longer than `max_id_length` bytes, the limit on XML names, is refused: each is kept several times.
+/// What reading a relationships part has found so far. Its rules are checked in their order of precedence at the end ([`Relationships::parse_entry`]), so reading notes the first break of each, and stops keeping relationships after one.
+struct Reading {
+    items: Vec<Item>,
+    relationships: BTreeMap<String, Entry>,
+    highest: u64,
+    root: Option<Root>,
+    /// The root element is not `Relationships` in the relationships namespace.
+    root_error: Option<RelationshipsError>,
+    /// An element of the part has an `xml:base` attribute.
+    xml_base: bool,
+    /// The first rule that a relationship, an element from another namespace or the text between them breaks.
+    broken: Option<RelationshipsError>,
+    /// The `Relationship` element being read.
+    open: Option<OpenRelationship>,
+}
+
+/// Where the root element is, and its name as written.
+struct Root {
+    start_tag: Range<usize>,
+    /// `None` while it is open, and for an empty-element tag.
+    end_tag: Option<Range<usize>>,
+    /// Where the root element ends, and what follows it begins.
+    span_end: usize,
+    name: String,
+}
+
+/// A `Relationship` element whose end has not been read yet.
+struct OpenRelationship {
+    /// What its start tag gives.
+    relationship: Result<Relationship, RelationshipsError>,
+    /// Whether one of its children is an element in the relationships namespace, which comes before what its attributes break.
+    nested: bool,
+}
+
+impl Reading {
+    /// Reads one event of the part at `depth` (see [`xml::read`]).
+    fn event(&mut self, event: &Event<'_>, depth: usize, max_id_length: usize) {
+        if let Event::Start(tag) = event
+            && tag.attributes().any(|attribute| {
+                let name = attribute.name();
+                name.local() == "base" && xml::namespace_of(&name) == Some(XML_NAMESPACE)
+            })
+        {
+            self.xml_base = true;
+        }
+        // After the first broken rule, only `xml:base` still matters.
+        if self.root_error.is_some() || self.broken.is_some() {
+            return;
+        }
+        match (event, depth) {
+            (Event::Start(tag), 1) => {
+                let name = tag.name();
+                if !xml::is(&name, NAMESPACE, "Relationships") {
+                    self.root_error = Some(RelationshipsError::UnexpectedRoot);
+                    return;
+                }
+                self.root = Some(Root {
+                    start_tag: tag.span(),
+                    end_tag: None,
+                    span_end: tag.span().end,
+                    name: xml::qualified_name(&name),
+                });
+            }
+            (Event::Start(tag), 2) => {
+                let name = tag.name();
+                if xml::is(&name, NAMESPACE, "Relationship") {
+                    self.open = Some(OpenRelationship {
+                        relationship: read_relationship(tag, max_id_length),
+                        nested: false,
+                    });
+                } else if xml::namespace_of(&name) == Some(NAMESPACE) {
+                    self.broken = Some(RelationshipsError::UnexpectedElement);
+                }
+            }
+            // A child of a relationship: one in the relationships namespace is not allowed; any other is kept with it, as written.
+            (Event::Start(tag), 3) => {
+                if let Some(open) = &mut self.open
+                    && xml::namespace_of(&tag.name()) == Some(NAMESPACE)
+                {
+                    open.nested = true;
+                }
+            }
+            (Event::End(end), 2) => match self.open.take() {
+                Some(OpenRelationship { nested: true, .. }) => {
+                    self.broken = Some(RelationshipsError::UnexpectedElement);
+                }
+                Some(OpenRelationship {
+                    relationship: Err(error),
+                    ..
+                }) => self.broken = Some(error),
+                Some(OpenRelationship {
+                    relationship: Ok(relationship),
+                    ..
+                }) => {
+                    if self.relationships.contains_key(&relationship.id) {
+                        self.broken = Some(RelationshipsError::DuplicateId);
+                        return;
+                    }
+                    self.items.push(Item::Relationship(relationship.id.clone()));
+                    self.highest = self.highest.max(id_number(&relationship.id).unwrap_or(0));
+                    self.relationships.insert(
+                        relationship.id.clone(),
+                        Entry {
+                            relationship,
+                            raw: Some(end.element_span()),
+                            indent: String::new(),
+                        },
+                    );
+                }
+                // An element from another namespace, kept as written and not interpreted.
+                None => self.items.push(Item::Extension(end.element_span())),
+            },
+            (Event::End(end), 1) => {
+                if let Some(root) = &mut self.root {
+                    if !end.span().is_empty() {
+                        root.end_tag = Some(end.span());
+                    }
+                    root.span_end = end.span().end;
+                }
+            }
+            // White space, comments and processing instructions between relationships are kept as written; other text is not allowed there.
+            (Event::Text(text), 1) => {
+                if text.value().chars().all(xml::is_space) {
+                    self.items.push(Item::Trivia(text.span()));
+                } else {
+                    self.broken = Some(RelationshipsError::UnexpectedText);
+                }
+            }
+            (Event::CData(_), 1) => self.broken = Some(RelationshipsError::UnexpectedText),
+            (Event::Comment(comment), 1) => self.items.push(Item::Trivia(comment.span())),
+            (Event::ProcessingInstruction(instruction), 1) => {
+                self.items.push(Item::Trivia(instruction.span()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reads the attributes of a `Relationship` start tag. Attributes it does not know, and its content, stay in the original text. Identifiers are XML names (`xsd:ID`), so one longer than `max_id_length` bytes, the limit on XML names, is refused: each is kept several times.
 fn read_relationship(
-    element: &Element,
+    tag: &StartTag<'_>,
     max_id_length: usize,
 ) -> Result<Relationship, RelationshipsError> {
-    let nested = element.children.iter().any(|node| {
-        matches!(node, Node::Element(child) if child.namespace.as_deref() == Some(NAMESPACE))
-    });
-    if nested {
-        return Err(RelationshipsError::UnexpectedElement);
-    }
-    let required = |name| {
-        element
-            .attribute(name)
+    let attribute = |local| tag.attribute(None, local).map(|value| value.value());
+    let required = |local| {
+        attribute(local)
             .filter(|value| !value.is_empty())
             .ok_or(RelationshipsError::MissingAttribute)
     };
@@ -525,10 +653,8 @@ fn read_relationship(
         return Err(RelationshipsError::IdTooLong);
     }
     let relationship_type = required("Type")?;
-    let target = element
-        .attribute("Target")
-        .ok_or(RelationshipsError::MissingAttribute)?;
-    let target_mode = match element.attribute("TargetMode") {
+    let target = attribute("Target").ok_or(RelationshipsError::MissingAttribute)?;
+    let target_mode = match attribute("TargetMode") {
         None | Some("Internal") => TargetMode::Internal,
         Some("External") => TargetMode::External,
         Some(_) => return Err(RelationshipsError::InvalidTargetMode),
@@ -539,23 +665,6 @@ fn read_relationship(
         target,
         target_mode,
     ))
-}
-
-/// Whether any element of the tree under `root`, `root` included, has an `xml:base` attribute.
-fn uses_xml_base(root: &Element) -> bool {
-    let mut pending = vec![root];
-    while let Some(element) = pending.pop() {
-        if element.attributes.iter().any(|attribute| {
-            attribute.local_name == "base" && attribute.namespace.as_deref() == Some(XML_NAMESPACE)
-        }) {
-            return true;
-        }
-        pending.extend(element.children.iter().filter_map(|node| match node {
-            Node::Element(child) => Some(child),
-            _ => None,
-        }));
-    }
-    false
 }
 
 #[cfg(test)]
@@ -759,6 +868,56 @@ mod tests {
         );
         // Different case is a different identifier.
         assert!(parse(&wrap("<Relationship Id='a' Type='t' Target='x'/><Relationship Id='A' Type='t' Target='y'/>")).is_ok());
+    }
+
+    #[test]
+    fn checks_the_rules_in_their_order() {
+        // The part is read event by event, and its rules are checked in the order they always were: the root element, then `xml:base` anywhere, then the relationships and what is between them in the order of the part, a relationship's content before its attributes; the first rule broken is the error, unless the part is not XML, which comes first.
+        let wrap =
+            |body: &str| format!("<Relationships xmlns=\"{NAMESPACE}\">{body}</Relationships>");
+        assert_eq!(
+            error("<Other xml:base='http://evil/'/>"),
+            RelationshipsError::UnexpectedRoot
+        );
+        assert_eq!(
+            error(&wrap(
+                "<Relationship Type='t' Target='x'/><x:e xmlns:x='urn:x'><x:f xml:base='/'/></x:e>"
+            )),
+            RelationshipsError::XmlBase
+        );
+        assert_eq!(
+            error(&wrap(
+                "<Relationship Type='t' Target='x'><Relationship Id='b' Type='t' Target='y'/></Relationship>"
+            )),
+            RelationshipsError::UnexpectedElement
+        );
+        assert_eq!(
+            error(&wrap(
+                "<Relationship Id='a' Type='t' Target='x'/><Relationship Id='a' Type='t' Target='y'/>text"
+            )),
+            RelationshipsError::DuplicateId
+        );
+        assert_eq!(
+            error(&wrap("text<Relationship Type='t' Target='x'/>")),
+            RelationshipsError::UnexpectedText
+        );
+        // Only a relationship's own children may not be relationships; deeper, and inside elements from other namespaces, they are kept as written.
+        let kept = wrap(
+            "<Relationship Id='a' Type='t' Target='x'><x:e xmlns:x='urn:x'><Relationship/></x:e></Relationship><x:f xmlns:x='urn:x'><Relationship/></x:f>",
+        );
+        let relationships = parse(&kept).unwrap();
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships.to_xml(), kept.as_bytes());
+        assert!(matches!(
+            parse(&format!("<Other xmlns=\"{NAMESPACE}\"><x></Other>")),
+            Err(Error::Xml {
+                error: crate::XmlError {
+                    kind: crate::XmlErrorKind::MismatchedEndTag,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]

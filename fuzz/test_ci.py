@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -178,6 +179,24 @@ class Targets(Isolated):
         crdt = ci.TARGETS["crdt_import"]
         self.assertEqual((crdt.seeds, crdt.dictionary, crdt.long_inputs), (None, None, True))
 
+    def test_lab_scan_has_its_settings(self) -> None:
+        # Settings like docx_hints': whole packages and XML parts, which ooxml.dict serves better than zip.dict, at the targets' usual length, timeout and share.
+        target = ci.TARGETS["lab_scan"]
+        self.assertEqual((target.dictionary, target.max_len, target.timeout, target.share, target.seeds, target.long_inputs, target.parked), ("ooxml.dict", 64 << 10, 10, 1, "scan_inputs", False, None))
+
+    def test_lab_scan_numbers_its_parts_as_ci_py_does(self) -> None:
+        # The seeds of lab_scan choose a part by its number in SCAN_PARTS, and the target by its number in its own PARTS: the two lists must be the same, in the same order.
+        source = (ci.FUZZ / "fuzz_targets" / "lab_scan.rs").read_text()
+        block = source[source.index("const PARTS"):]
+        block = block[:block.index("];")]
+        names = re.findall(r'name: (?:DOCUMENT|"([^"]+)")', block)
+        self.assertEqual([name or "/word/document.xml" for name in names], ["/" + part for part in ci.SCAN_PARTS])
+        self.assertIn('const DOCUMENT: &str = "/word/document.xml";', source)
+        self.assertEqual(ci.scan_part("word/header3.xml"), ci.SCAN_PARTS.index("word/header1.xml"))
+        self.assertEqual(ci.scan_part("word/charts/chart12.xml"), ci.SCAN_PARTS.index("word/charts/chart1.xml"))
+        self.assertIsNone(ci.scan_part("word/stylesWithEffects.xml"))
+        self.assertIsNone(ci.scan_part("word/header.xml"))
+
     def test_only_crdt_import_may_be_parked_and_only_with_a_reason(self) -> None:
         # The orchestrator's decision for CORE-010: crdt_import, and no other target, may be left out of the automatic runs, and only with its reason written out.
         parked = {name for name, target in ci.TARGETS.items() if target.parked is not None}
@@ -218,6 +237,18 @@ class Seeds(Isolated):
             self.assertTrue(data.startswith(b"PK") or data.startswith(b"<?xml"), seed.name)
         for part in ci.synthetic_hint_parts():
             self.assertIn(b"lastRenderedPageBreak", part)
+        # The documents, every part of them that the tagger reads after its number in SCAN_PARTS, and the synthetic main document parts after 0.
+        scan_inputs = [seed.read_bytes() for seed in (self.folder / "lab_scan").iterdir()]
+        packages = [data for data in scan_inputs if data.startswith(b"PK")]
+        parts = [data for data in scan_inputs if not data.startswith(b"PK")]
+        self.assertEqual(len(packages), documents)
+        self.assertGreater(len(parts), documents)
+        for data in parts:
+            self.assertLess(data[0], len(ci.SCAN_PARTS))
+            self.assertTrue(data[1:].lstrip(b"\xef\xbb\xbf").startswith(b"<"), data[:40])
+        self.assertLessEqual({0, 1, 3, 4, 5, 6, 7, 8, 9, 13}, {data[0] for data in parts})
+        for part in ci.synthetic_hint_parts():
+            self.assertIn(bytes([0]) + part, parts)
         for name, target in ci.TARGETS.items():
             for seed in (self.folder / name).iterdir():
                 data = seed.read_bytes()
@@ -298,6 +329,25 @@ class Budget(Isolated):
                 if name.startswith("--j") and "--jobs".startswith(name):
                     values.append(value if equals else (tokens[index + 1] if index + 1 < len(tokens) else ""))
         return values
+
+    def test_the_workflow_runs_when_a_crate_that_the_targets_build_changes(self) -> None:
+        # Every crate that the targets build from a folder of this repository, directly or through another, is in fuzz.yml's path filter, so that a change to it runs the targets that read it (lab/bayan-lab came with lab_scan, CORE-011).
+        workflow = (ci.REPOSITORY / ".github" / "workflows" / "fuzz.yml").read_text()
+        filtered = set(re.findall(r"^\s+- (\S+)/\*\*$", workflow, re.MULTILINE))
+        built, pending = set(), [ci.FUZZ]
+        while pending:
+            folder = pending.pop()
+            with (folder / "Cargo.toml").open("rb") as file:
+                manifest = tomllib.load(file)
+            for dependency in manifest.get("dependencies", {}).values():
+                if isinstance(dependency, dict) and "path" in dependency:
+                    path = (folder / dependency["path"]).resolve()
+                    name = path.relative_to(ci.REPOSITORY).as_posix()
+                    if name not in built:
+                        built.add(name)
+                        pending.append(path)
+        self.assertGreaterEqual(built, {"crates/bayan-opc", "lab/bayan-lab"})
+        self.assertEqual(built - filtered, set())
 
     def test_the_workflow_runs_as_many_targets_at_a_time_as_the_budget_counts(self) -> None:
         # The rounds above are counted with ci.JOBS, which the workflow uses by passing no other --jobs.

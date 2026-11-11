@@ -11,13 +11,17 @@ publish.workspace = true
 [dependencies]
 bayan-lab-compare = { path = "../bayan-lab-compare" }
 bayan-lab-layout = { path = "../bayan-lab-layout" }
+# The scanner reads packages with the engine's package layer and their XML with the engine's XML reader (CORE-011), so that it is exactly as strict as BayanDocs.
+bayan-opc = { path = "../../crates/bayan-opc" }
+bayan-xml = { path = "../../crates/bayan-xml" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 sha2.workspace = true
-miniz_oxide.workspace = true
 
 [dev-dependencies]
+# Compresses the entries of the crafted packages that the tests build field by field.
+miniz_oxide.workspace = true
 proptest.workspace = true
 
 [lints]

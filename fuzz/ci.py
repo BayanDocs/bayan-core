@@ -40,7 +40,7 @@ PDFS = REPOSITORY / "lab" / "bayan-lab-layout" / "tests" / "fixtures"
 RECORDINGS = REPOSITORY / "crates" / "bayan-engine" / "tests" / "fixtures" / "recordings"
 BINARIES = FUZZ / "target" / "x86_64-unknown-linux-gnu" / "release"
 
-# The memory a target may take, AddressSanitizer's share included, before libFuzzer reports it out of memory: libFuzzer's default, which CORE-005 and CORE-006 used too. For the default-limits targets it was checked against the bound that bayan-opc documents (about 256 MiB to open a package and read its core properties): under AddressSanitizer, opening the worst packages of that bound's derivation takes 2.5 to 4.5 times the memory it takes natively, and package_default_limits, which opens a package and then its written copy, peaked at 1,082 MiB on the worst of them. 2,048 MiB leaves room for that, libFuzzer's corpus and AddressSanitizer's quarantine of freed memory, while an input that needs about three times the bound to be opened once, or one and a half times for each of the target's two openings, exceeds it. README.md gives the measurements.
+# The memory a target may take, AddressSanitizer's share included, before libFuzzer reports it out of memory: libFuzzer's default, which CORE-005 and CORE-006 used too. For the default-limits targets it was checked against the bound that bayan-opc documents (about 256 MiB to open a package and read its core properties): under AddressSanitizer, opening the worst packages of that bound's derivation takes 2 to 5 times the memory it takes natively, and package_default_limits, which opens a package and then its written copy, peaked at 1,211 MiB on the worst of them (measured again for CORE-011). 2,048 MiB leaves room for that, libFuzzer's corpus and AddressSanitizer's quarantine of freed memory, while an input that needs about three times the bound to be opened once, or one and a half times for each of the target's two openings, exceeds it. README.md gives the measurements.
 RSS_LIMIT_MB = 2048
 
 # Options for AddressSanitizer, as cargo-fuzz sets them when it runs a target.
@@ -51,6 +51,31 @@ MC_CONFIGURATIONS = (0x00, 0x08, 0x38, 0x48, 0x78, 0xFF)
 
 # The longest XML part that becomes a seed of the XML targets: their inputs are at most this long (max_len below), and libFuzzer would cut a longer one short.
 XML_SEED_LIMIT = 64 << 10
+
+# The parts that lab_scan puts an input into, numbered as PARTS in fuzz_targets/lab_scan.rs numbers them (test_ci.py compares the two): an input that does not start with PK is one of them, chosen by its first byte, with its XML after that byte.
+SCAN_PARTS = (
+    "word/document.xml",
+    "word/styles.xml",
+    "word/numbering.xml",
+    "word/settings.xml",
+    "word/fontTable.xml",
+    "word/theme/theme1.xml",
+    "word/header1.xml",
+    "word/footer1.xml",
+    "word/footnotes.xml",
+    "word/endnotes.xml",
+    "word/comments.xml",
+    "word/commentsExtended.xml",
+    "word/charts/chart1.xml",
+    "docProps/app.xml",
+)
+
+
+def scan_part(name: str) -> Optional[int]:
+    """The number in SCAN_PARTS of the part that a part named `name` in a document is, if lab_scan reads such a part: every header, footer and chart counts as the first of its kind."""
+    name = re.sub(r"^word/(header|footer)\d+\.xml$", r"word/\g<1>1.xml", name)
+    name = re.sub(r"^word/charts/chart\d+\.xml$", "word/charts/chart1.xml", name)
+    return SCAN_PARTS.index(name) if name in SCAN_PARTS else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +112,8 @@ TARGETS: Dict[str, Target] = {
     "markup_compatibility": Target("ooxml.dict", XML_SEED_LIMIT, 10, 1, "configured_xml_parts"),
     "pdf_extract": Target("pdf.dict", 64 << 10, 10, 1, "pdfs"),
     "docx_hints": Target("ooxml.dict", 64 << 10, 10, 1, "hint_documents"),
+    # The Fidelity Lab's scanner (CORE-011): whole packages, and parts that the target puts into a package of its own (SCAN_PARTS).
+    "lab_scan": Target("ooxml.dict", 64 << 10, 10, 1, "scan_inputs"),
     # The engine boundary (CORE-010). Their harness renders at most 2^22 pixels per input, replays and its own tiles included (fuzz/src/engine.rs), so that the tiles the engine's limits allow do not reach the timeout.
     "engine_messages": Target("engine.dict", 64 << 10, 10, 1, "engine_sessions"),
     "engine_tile": Target("engine.dict", 64 << 10, 10, 1, "tile_requests"),
@@ -366,6 +393,16 @@ def seeds(output: Path) -> Dict[str, int]:
             if len(part) <= TARGETS["docx_hints"].max_len:
                 main_parts.append(part)
     kinds["hint_documents"] = kinds["documents"] + main_parts + synthetic_hint_parts()
+    # The scanner reads a whole package or, for any other input, one part that the target puts into a package: the documents, and each part of them that the tagger reads, after its number in SCAN_PARTS, with the synthetic main document parts.
+    scan_parts = []
+    for document in sorted(DOCUMENTS.glob("*.docx")):
+        with zipfile.ZipFile(document) as archive:
+            for info in sorted(archive.infolist(), key=lambda info: info.filename):
+                number = scan_part(info.filename)
+                part = archive.read(info)
+                if number is not None and 1 + len(part) <= TARGETS["lab_scan"].max_len:
+                    scan_parts.append(bytes([number]) + part)
+    kinds["scan_inputs"] = kinds["documents"] + scan_parts + [bytes([0]) + part for part in synthetic_hint_parts()]
     kinds["engine_sessions"] = engine_sessions()
     kinds["tile_requests"] = tile_requests()
     kinds["configurations"] = configurations()

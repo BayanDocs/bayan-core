@@ -143,6 +143,8 @@ version = "0.0.0"
 dependencies = [
  "bayan-lab-compare",
  "bayan-lab-layout",
+ "bayan-opc",
+ "bayan-xml",
  "miniz_oxide",
  "proptest",
  "schemars",
@@ -187,6 +189,7 @@ dependencies = [
 name = "bayan-opc"
 version = "0.0.0"
 dependencies = [
+ "bayan-xml",
  "cfb",
  "miniz_oxide",
 ]

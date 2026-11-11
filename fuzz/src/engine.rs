@@ -23,8 +23,15 @@ pub const PIXEL_BUDGET: u64 = 1 << 22;
 /// What the harness counts for JSON whose pixels it does not read: more than any budget, so that the input that holds it is left out.
 const OVER_BUDGET: u64 = u64::MAX;
 
-/// The pixels of the tile of 8 × 10 that `engine_messages` renders after the input, to show that the engine still works.
+/// The pixels of the tile of 8 × 10 that `engine_messages` renders after the input, to show that the engine still works ([`last_tile`]); a test checks that this is what the engine renders for it.
 const LAST_TILE_PIXELS: u64 = 8 * 10;
+
+/// The request of the tile that `engine_messages` renders after the input, of the whole first page of document `doc_id`: [`LAST_TILE_PIXELS`] pixels.
+fn last_tile(doc_id: u64) -> String {
+    format!(
+        r#"{{"v":0,"id":3,"type":"render.tile","payload":{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":10}}}}"#
+    )
+}
 
 /// The most messages of one input that `engine_messages` hands to the engine; the rest is ignored. Each message's work is small or counted against [`PIXEL_BUDGET`], but the largest answer, the accessibility tree of the whole mock document (about 180 KB), takes about 30 ms under AddressSanitizer to answer and check, so 64 of them stay well within the timeout of 10 seconds.
 pub const MAX_MESSAGES: usize = 64;
@@ -305,7 +312,7 @@ pub fn messages_with(config: Config, data: &[u8]) {
         .pointer("/payload/doc_id")
         .and_then(Value::as_u64)
         .expect("the mock document opens after the input");
-    let tile = send(&mut engine, format!(r#"{{"v":0,"id":3,"type":"render.tile","payload":{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":10}}}}"#).as_bytes());
+    let tile = send(&mut engine, last_tile(doc_id).as_bytes());
     assert_eq!(
         tile[0].pointer("/payload/stride"),
         Some(&json!(32)),
@@ -548,6 +555,31 @@ mod tests {
         );
         assert!(recording_pixels(SESSION_RECORDING) > 0);
         assert_eq!(message_pixels(b"not json"), 0);
+    }
+
+    #[test]
+    fn sets_aside_what_the_engine_renders_for_the_last_tile() {
+        // The budget of `engine_messages` keeps LAST_TILE_PIXELS for the tile after the input (CORE-010's review, round 2): the harness counts exactly that for the request it sends, and the engine renders exactly that many pixels for it, so that a change to either the request or the constant fails here.
+        assert_eq!(message_pixels(last_tile(1).as_bytes()), LAST_TILE_PIXELS);
+        let mut engine = engine_after_hello(config());
+        let opened = send(
+            &mut engine,
+            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+                .as_bytes(),
+        );
+        let doc_id = opened[0]
+            .pointer("/payload/doc_id")
+            .and_then(Value::as_u64)
+            .expect("the mock document opens");
+        let tile = send(&mut engine, last_tile(doc_id).as_bytes());
+        let size = |field: &str| {
+            tile[0]
+                .pointer(&format!("/payload/{field}"))
+                .and_then(Value::as_u64)
+                .expect("a rendered tile")
+        };
+        assert_eq!(size("width") * size("height"), LAST_TILE_PIXELS);
+        assert_eq!(size("stride"), 4 * size("width"));
     }
 
     /// JSON nested 200 levels deep, deeper than a `serde_json::Value` reads.

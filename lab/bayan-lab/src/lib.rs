@@ -6,12 +6,12 @@
 //!
 //! - [`manifest`]: the corpus manifest, a JSON file committed to Git that identifies every document by its SHA-256 and records its provenance, license, tier and detected features. The documents themselves live outside Git. [`schema`] generates the manifest's JSON Schema from the same Rust types.
 //! - [`store`]: content-addressed storage for the documents (`objects/ab/cdef….docx`) and for the license texts of their sources, with a local-directory backend and an S3-compatible backend behind one interface.
-//! - [`scan`]: a hardened scanner that reads a package's parts and element names, within limits, and tags the document with the features it uses, by the names of the [coverage matrix][matrix].
+//! - [`scan`]: a hardened scanner that opens a package with bayan-opc and reads its parts with bayan-xml, the engine's own readers, within limits, and tags the document with the features it uses, by the names of the [coverage matrix][matrix].
 //! - [`exclusions`]: lists of documents a curator reviewed and kept out of a corpus, by SHA-256, each with its reason.
 //! - [`stats`]: frequencies by feature, font, script, language and compatibility mode, as text, Markdown or JSON.
 //! - [`cli`]: the `bayan-lab corpus …` commands that tie them together.
 //!
-//! **Status:** LAB-001. The scanner's ZIP, package and XML readers are minimal stand-ins, written before `bayan-opc` (CORE-005) was merged, and marked for replacement by `bayan-opc` and, once CORE-006 has built it, `bayan-xml`.
+//! **Status:** LAB-001; since CORE-011 the scanner reads packages with bayan-opc and XML with bayan-xml instead of readers of its own, and is fuzzed (`lab_scan` in `fuzz/`).
 //!
 //! ## Rules this crate keeps
 //!

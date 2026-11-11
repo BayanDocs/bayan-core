@@ -202,7 +202,7 @@ fn a_corpus_from_its_source_to_its_verification() {
         excluded.short()
     )));
     assert!(
-        added.err.contains("refused broken.docx (") && added.err.contains("not a ZIP archive"),
+        added.err.contains("refused broken.docx (") && added.err.contains("invalid ZIP container"),
         "{}",
         added.err
     );
@@ -757,7 +757,7 @@ fn messages_about_private_documents_name_no_part() {
     let added = corpus.run(&["add", "--source", "private", "--tier", "T2", text(&file)]);
     assert_eq!(added.outcome, Outcome::Failed);
     assert!(
-        added.err.contains("a part: not well-formed XML"),
+        added.err.contains("a part: unexpected end of input"),
         "{}",
         added.err
     );
@@ -768,7 +768,7 @@ fn messages_about_private_documents_name_no_part() {
     let root = text(&corpus.source).to_owned();
     let public = corpus.run(&["add", "--source", "example", "--root", &root, "public.docx"]);
     assert!(
-        public.err.contains("part /word/jane-doe-diagnosis.xml"),
+        public.err.contains("part /word/Jane-Doe-diagnosis.xml"),
         "{}",
         public.err
     );
@@ -800,7 +800,7 @@ fn messages_about_private_documents_name_no_part() {
     assert!(
         tagged
             .err
-            .contains("cannot be tagged: a part: not well-formed XML"),
+            .contains("cannot be tagged: a part: unexpected end of input"),
         "{}",
         tagged.err
     );

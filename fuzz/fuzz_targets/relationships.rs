@@ -1,4 +1,4 @@
-//! The relationships part parser (bayan-opc's `Relationships`) and the minimal XML parser under it, on arbitrary bytes. For every part it accepts: written back unchanged it gives exactly the input; with a relationship added it parses again and holds it; with that relationship removed it gives the input again. Every target resolves or fails cleanly.
+//! The relationships part parser (bayan-opc's `Relationships`) and bayan-xml's reader under it, which bayan-opc reads its metadata with (CORE-011), on arbitrary bytes. For every part it accepts: written back unchanged it gives exactly the input; with a relationship added it parses again and holds it; with that relationship removed it gives the input again. Every target resolves or fails cleanly.
 
 #![no_main]
 

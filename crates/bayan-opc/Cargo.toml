@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The XML of the metadata parts: the content types stream, relationships parts and the core properties part (CORE-011). bayan-xml is in the Foundation layer too, and does not depend on bayan-opc.
+bayan-xml = { path = "../bayan-xml" }
 cfb.workspace = true
 miniz_oxide.workspace = true
 
