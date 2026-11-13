@@ -30,7 +30,7 @@ pub struct Unguarded {
 }
 
 /// The lints that the pinned compiler turns on by default but the audit cannot force-warn, each with the reason why force-warning it fails. The audit fails when force-warning a listed lint no longer fails for the reason given, and when the compiler calls a force-warned lint unknown that this list does not hold, so the list changes together with the toolchain, in the monthly dependency session.
-pub const UNGUARDED: [Unguarded; 6] = [
+pub const UNGUARDED: [Unguarded; 7] = [
     Unguarded {
         lint: "warnings",
         refusal: Refusal::NotSupported,
@@ -40,6 +40,11 @@ pub const UNGUARDED: [Unguarded; 6] = [
         lint: "default_overrides_default_fields",
         refusal: Refusal::Unknown,
         reason: "unstable: only code that switches on the feature `default_field_values` can trigger it",
+    },
+    Unguarded {
+        lint: "ineffective_unstable_reexports",
+        refusal: Refusal::Unknown,
+        reason: "unstable: it reports `#[unstable]` attributes on re-exports, which only code that switches on the feature `staged_api` of the standard library can write (error E0658 on stable)",
     },
     Unguarded {
         lint: "duplicate_tools",
@@ -490,14 +495,24 @@ pub fn compiler_groups(help: &str) -> Result<Vec<String>, String> {
     Ok(groups)
 }
 
-/// The lint groups of the tool `tool`, `clippy` or `rustdoc`, from what its `-W help` prints: the table under "Lint groups loaded by this crate:". A name that does not start with `<tool>::` is an error.
+/// Names that a tool still accepts for one of its groups but that its `-W help` does not print, each with the group it names: rustc leaves a group's old names out of the table. Clippy 1.100 lists the group of its default lints as `clippy::default` and keeps `clippy::all`, the name that the lint tables and the lint canary use, as a silent alias of it (`--force-warn clippy::all` and `#[deny(clippy::all)]` still imply every lint of the group, without a warning). The audit must count such a name as a group, or it would take an `allow` at a lower priority than the group for one that switches its lint off.
+const GROUP_ALIASES: [(&str, &str); 1] = [("clippy::all", "clippy::default")];
+
+/// The lint groups of the tool `tool`, `clippy` or `rustdoc`, from what its `-W help` prints: the table under "Lint groups loaded by this crate:", together with the names of [`GROUP_ALIASES`] whose group the table lists. A name that does not start with `<tool>::` is an error.
 pub fn tool_groups(help: &str, tool: &str) -> Result<Vec<String>, String> {
-    let groups = group_names(help, "Lint groups loaded by this crate:")?;
+    let mut groups = group_names(help, "Lint groups loaded by this crate:")?;
     let own = format!("{tool}::");
     if let Some(group) = groups.iter().find(|group| !group.starts_with(&own)) {
         return Err(format!(
             "the table of {tool}'s lint groups lists `{group}`, which is not one of {tool}'s"
         ));
+    }
+    for (alias, group) in GROUP_ALIASES {
+        if groups.iter().any(|listed| listed == group)
+            && !groups.iter().any(|listed| listed == alias)
+        {
+            groups.push(alias.to_owned());
+        }
     }
     Ok(groups)
 }
@@ -769,6 +784,15 @@ Lint groups loaded by this crate:
             tool_groups(CLIPPY_HELP, "clippy").unwrap(),
             ["clippy::all", "clippy::pedantic"]
         );
+        // As Clippy 1.100 prints it: the group under its new name, `clippy::all` left out, which the audit adds as its alias.
+        assert_eq!(
+            tool_groups(
+                &CLIPPY_HELP.replace("     clippy::all", " clippy::default"),
+                "clippy"
+            )
+            .unwrap(),
+            ["clippy::default", "clippy::pedantic", "clippy::all"]
+        );
         assert!(
             tool_groups(CLIPPY_HELP, "rustdoc")
                 .unwrap_err()
@@ -779,7 +803,7 @@ Lint groups loaded by this crate:
                 .unwrap_err()
                 .contains("no table of lint groups")
         );
-        // The pinned toolchain's own: Clippy's ten groups, and rustdoc's one.
+        // The pinned toolchain's own: Clippy's ten groups, among them `clippy::default`, and with it its alias `clippy::all` (`GROUP_ALIASES`); and rustdoc's one.
         let root = crate::workspace_root();
         for (tool, program, args) in TOOL_HELP {
             let output = Command::new(program)
@@ -790,7 +814,8 @@ Lint groups loaded by this crate:
             let groups = tool_groups(&String::from_utf8_lossy(&output.stdout), tool).unwrap();
             assert!(groups.contains(&format!("{tool}::all")), "{groups:?}");
             if tool == "clippy" {
-                assert_eq!(groups.len(), 10, "{groups:?}");
+                assert!(groups.contains(&"clippy::default".to_owned()), "{groups:?}");
+                assert_eq!(groups.len(), 11, "{groups:?}");
             }
         }
     }
