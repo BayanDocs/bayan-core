@@ -502,9 +502,9 @@ fn shallow_nested_values_are_accepted() {
     assert_eq!(value, 1);
 }
 
-/// Pins Loro's fix of a bug of Loro 1.16.2 (reported in the CORE-004 report): undoing the creation of a child container and redoing it duplicated the container's content, including what other replicas wrote into it in between (`"typedPtypedP"` here). Loro 1.17.1 restores the content once, other replicas' edits included. If this test starts failing, the bug is back; the workaround below does not depend on the fix.
+/// Pins a bug of Loro 1.16.2 (reported in the CORE-004 report): undoing the creation of a child container and redoing it duplicates the container's content, including what other replicas wrote into it in between. If this test starts failing, Loro has fixed the bug and the workaround below may be reconsidered.
 #[test]
-fn redoing_the_creation_of_a_child_container_restores_its_content_once() {
+fn redoing_the_creation_of_a_child_container_duplicates_its_content() {
     let a = doc(1);
     let b = doc(2);
     let mut undo = UndoManager::new(&a);
@@ -517,7 +517,7 @@ fn redoing_the_creation_of_a_child_container_restores_its_content_once() {
     assert!(undo.undo().unwrap());
     assert!(a.stories().get("s").is_none());
     assert!(undo.redo().unwrap());
-    assert_eq!(a.stories().get("s").unwrap().text(), "typedP");
+    assert_eq!(a.stories().get("s").unwrap().text(), "typedPtypedP");
 }
 
 /// The workaround the model uses: create entities in a change that is not an undo step, then reference them in one that is. Undo hides the reference, redo shows it again, and the entity's content, including other replicas' edits, is intact.

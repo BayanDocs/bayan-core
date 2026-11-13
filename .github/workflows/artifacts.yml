@@ -38,11 +38,11 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental compilation helps only when one machine rebuilds again and again, which these jobs never do.
   CARGO_INCREMENTAL: 0
-  # Node.js for the Node.js driver: the version of bayan-web's .nvmrc and of the BayanDocs cloud environment, released 2026-09-07. The
+  # Node.js for the Node.js driver: the Active LTS security release of 2026-11-10, which bayan-core took ahead of bayan-web's .nvmrc and the BayanDocs cloud environment (they follow in the next joint dependency round). The
   # checksums in the Node.js step come from nodejs.org's SHASUMS256.txt for this version, whose signature by a key of the Node.js release
-  # team (nodejs/release-keys) was checked on 2026-10-07; npmmirror's copy agrees. Change them only in the monthly dependency session.
+  # team (nodejs/release-keys) was checked on 2026-11-13; npmmirror's copy agrees. Change them only in the monthly dependency session.
   # Must equal NODE_VERSION in xtask/src/verify.rs, the Node.js that runs the gate's tests in WebAssembly (a test checks this).
-  NODE_VERSION: 24.22.1
+  NODE_VERSION: 24.22.3
   # wasm-bindgen's command-line tool, which turns the engine's module into the package (released 2026-10-30). Must equal the wasm-bindgen
   # crate in Cargo.lock and WASM_BINDGEN_VERSION in scripts/dev-setup.sh, and the checksum in the WebAssembly job must equal that script's
   # (an xtask test checks all three). Change them only in the monthly dependency session.
@@ -214,9 +214,9 @@ jobs:
       - name: Install Node.js (pinned version, SHA-256 checked)
         run: |
           case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;;
-            macOS-ARM64) archive=node-v$NODE_VERSION-darwin-arm64.tar.xz sha256=654ba79de6155647e22321932b45f2a1ccb705976cc337c9b8e278beb085a628 ;;
-            Windows-X64) archive=node-v$NODE_VERSION-win-x64.zip sha256=d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5 ;;
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;;
+            macOS-ARM64) archive=node-v$NODE_VERSION-darwin-arm64.tar.xz sha256=1d64136c8a43d648d1b3bad10797a4c995b1ca032d2bde8799de43b37f058fe5 ;;
+            Windows-X64) archive=node-v$NODE_VERSION-win-x64.zip sha256=e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f ;;
             *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
           esac
           cd "$RUNNER_TEMP" || exit 1
