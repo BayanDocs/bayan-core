@@ -11,7 +11,7 @@ exclude = ["fuzz"]
 version = "0.0.0"
 edition = "2024"
 # Equal to the toolchain pinned in rust-toolchain.toml, which is also the minimum supported Rust version (ADR-0006 §7). `cargo xtask verify` checks that they match.
-rust-version = "1.99.0"
+rust-version = "1.100.0"
 # The SPDX 3.0 spelling of the repository license, which cargo-deny accepts (ADR-0003 §4). REUSE metadata writes the same permission as `LicenseRef-BayanDocs-App-Store-Permission`.
 license = "GPL-3.0-or-later WITH AdditionRef-BayanDocs-App-Store-Permission"
 repository = "https://github.com/BayanDocs/bayan-core"
@@ -22,51 +22,51 @@ publish = false
 [workspace.dependencies]
 # Rust types to and from JSON: the engine protocol's messages are serde types (ADR-0012 §1). Published 2026-07-18; MIT OR Apache-2.0.
 serde = { version = "=1.0.229", features = ["derive"] }
-# The JSON encoding of the engine protocol (ADR-0012 §1). `float_roundtrip` parses numbers exactly as JavaScript and Qt do, so a zoom factor means the same on both sides. Published 2026-07-20; MIT OR Apache-2.0.
-serde_json = { version = "=1.0.151", features = ["float_roundtrip", "raw_value"] }
-# Generates the protocol's JSON Schema from the same Rust types (ADR-0012 §1, CORE-007). Published 2026-07-27; MIT.
-schemars = "=1.2.2"
-# The WebAssembly binding of the engine for the web shell (ADR-0012 §4). Must equal the wasm-bindgen CLI pinned in scripts/dev-setup.sh. Published 2026-09-25; MIT OR Apache-2.0.
-wasm-bindgen = "=0.2.129"
+# The JSON encoding of the engine protocol (ADR-0012 §1). `float_roundtrip` parses numbers exactly as JavaScript and Qt do, so a zoom factor means the same on both sides. Published 2026-10-11; MIT OR Apache-2.0.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip", "raw_value"] }
+# Generates the protocol's JSON Schema from the same Rust types (ADR-0012 §1, CORE-007). Published 2026-10-12; MIT.
+schemars = "=1.2.3"
+# The WebAssembly binding of the engine for the web shell (ADR-0012 §4). Must equal the wasm-bindgen CLI pinned in scripts/dev-setup.sh. Published 2026-10-30; MIT OR Apache-2.0.
+wasm-bindgen = "=0.2.130"
 # Generates the C header of bayan-ffi (ADR-0012 §3); a test dependency only, which checks that the committed header is current. Without default features, so without its command-line parser. Published 2026-06-09; MPL-2.0.
 cbindgen = { version = "=0.29.4", default-features = false }
 # The Serialize and Deserialize traits without the derive macro, for types that implement them by hand (bayan-units). The same traits that `serde` re-exports, so both crates' types work with every serde format. Published 2026-07-18; MIT OR Apache-2.0.
 serde_core = { version = "=1.0.229", default-features = false }
-# Test-only. Property-based testing. Without its default features it seeds every run with the same fixed value, so a failure reproduces on every platform, and it needs no operating-system randomness: its `std` feature would pull in getrandom, which does not build for wasm32-unknown-unknown. `no_std` makes num-traits use libm for the float strategies proptest offers. Published 2026-03-24; MIT OR Apache-2.0.
-proptest = { version = "=1.11.0", default-features = false, features = ["alloc", "no_std"] }
+# Test-only. Property-based testing. Without its default features it seeds every run with the same fixed value, so a failure reproduces on every platform, and it needs no operating-system randomness: its `std` feature would pull in getrandom, which does not build for wasm32-unknown-unknown. `no_std` makes num-traits use libm for the float strategies proptest offers. Published 2026-10-10; MIT OR Apache-2.0.
+proptest = { version = "=1.12.0", default-features = false, features = ["alloc", "no_std"] }
 # Test-only. Arbitrary-precision integers for the independent reference implementations that the rounding, parsing and trigonometry tests compare against. Published 2026-07-05; MIT OR Apache-2.0.
 num-bigint = { version = "=0.5.1", default-features = false }
 # Test-only. Checks Serialize and Deserialize implementations against the exact serde calls they make. Published 2024-08-05; MIT OR Apache-2.0.
 serde_test = "=1.0.177"
-# SHA-256, the identity of every Fidelity Lab corpus document (LAB-001). From RustCrypto, the family of ADR-0016's crypto provider; without default features (no allocation helpers or object identifiers). Already in Cargo.lock through automerge, so it adds no package. Published 2026-03-25; MIT OR Apache-2.0.
-sha2 = { version = "=0.11.0", default-features = false }
-# The CRDT library of ADR-0008 (MIT, published 2026-09-21). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
-loro = "=1.16.2"
+# SHA-256, the identity of every Fidelity Lab corpus document (LAB-001). From RustCrypto, the family of ADR-0016's crypto provider; without default features (no allocation helpers or object identifiers). Already in Cargo.lock through automerge, so it adds no package. Published 2026-10-12; MIT OR Apache-2.0.
+sha2 = { version = "=0.11.1", default-features = false }
+# The CRDT library of ADR-0008 (MIT, published 2026-10-22). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
+loro = "=1.17.1"
 # The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.
 automerge = "=0.12.0"
 # DEFLATE in pure Rust for bayan-opc's ZIP layer (CORE-005), which decompresses the parts of a package and compresses the parts BayanDocs writes, and for the Fidelity Lab's package scanner (LAB-001), which only decompresses. It and its only dependency, adler2, are `#![forbid(unsafe_code)]`; the default features (`with-alloc` only) leave out serde and the SIMD checksum. Published 2026-03-13; MIT OR Zlib OR Apache-2.0.
 miniz_oxide = "=0.9.1"
-# Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-09-18; MIT.
-cfb = "=0.15.0"
+# Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-10-31; MIT.
+cfb = "=0.16.0"
 # The tokenizer under bayan-xml (CORE-006): it splits a part's text into tags, text, references, comments, CDATA sections and processing instructions, with exact byte positions, from a borrowed slice without copying. bayan-xml checks everything inside those pieces itself, because quick-xml accepts much that XML forbids. `#![forbid(unsafe_code)]`; its only required dependency is memchr, already here. 0.41 fixed two denial-of-service advisories (RUSTSEC-2026-0194, RUSTSEC-2026-0195). No features. Published 2026-08-22; MIT.
 quick-xml = { version = "=0.42.0", default-features = false }
 # The text stack of ADR-0009 and the rasterizers of ADR-0011, which the CORE-003 spike (spikes/text-pipeline) validates; only that spike uses them. The font crates are built with `libm` instead of `std`, so that every transcendental function they call (`hypot` for the offsets of transformed components in TrueType composite glyphs, `sin_cos` and `tan` for variable composite glyphs, `sin`, `cos` and `tan` for colour-glyph transforms) comes from the pure-Rust libm crate rather than each platform's math library (ADR-0005 §4); spikes/text-pipeline/REPORT.md §4 explains each choice.
-# Shaping: HarfBuzz 14.5.1 ported to Rust, `#![forbid(unsafe_code)]`, output in integer font units. Without `std` it needs spin (a lock for its caches) and core_maths. Published 2026-10-04; MIT.
-harfrust = { version = "=0.14.0", default-features = false, features = ["libm"] }
-# Glyph outlines (TrueType and CFF), drawn unhinted (ADR-0011 §4); the same read-fonts parser as harfrust, so one font parser serves shaping and rendering (ADR-0009 §1). `#![forbid(unsafe_code)]`. Published 2026-10-03; MIT OR Apache-2.0.
-skrifa = { version = "=0.48.0", default-features = false, features = ["libm"] }
-# Line break opportunities (UAX #14) with the dictionary models for Thai, Lao, Khmer and Burmese, and grapheme clusters, from compiled data. Without `auto` and `lstm`, so the LSTM models, which run floating-point inference, are not even compiled (ADR-0009 §2). Published 2026-08-13; Unicode-3.0.
-icu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
-# Unicode properties from compiled data: Script and Script_Extensions for itemization, and Bidi_Class, which `unicode_bidi` hands to the unicode-bidi crate (ADR-0009 §3). Published 2026-08-13; Unicode-3.0.
-icu_properties = { version = "=2.3.0", default-features = false, features = ["compiled_data", "unicode_bidi"] }
+# Shaping: HarfBuzz 15.1.0 ported to Rust, `#![forbid(unsafe_code)]`, output in integer font units. Without `std` it needs spin (a lock for its caches) and core_maths. Published 2026-11-12; MIT.
+harfrust = { version = "=0.16.0", default-features = false, features = ["libm"] }
+# Glyph outlines (TrueType and CFF), drawn unhinted (ADR-0011 §4); the same read-fonts parser as harfrust, so one font parser serves shaping and rendering (ADR-0009 §1). `#![forbid(unsafe_code)]`. Published 2026-11-10; MIT OR Apache-2.0.
+skrifa = { version = "=0.50.0", default-features = false, features = ["libm"] }
+# Line break opportunities (UAX #14) with the dictionary models for Thai, Lao, Khmer and Burmese, and grapheme clusters, from compiled data. Without `auto` and `lstm`, so the LSTM models, which run floating-point inference, are not even compiled (ADR-0009 §2). Published 2026-10-22; Unicode-3.0.
+icu_segmenter = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+# Unicode properties from compiled data: Script and Script_Extensions for itemization, and Bidi_Class, which `unicode_bidi` hands to the unicode-bidi crate (ADR-0009 §3). Published 2026-10-22; Unicode-3.0.
+icu_properties = { version = "=2.4.0", default-features = false, features = ["compiled_data", "unicode_bidi"] }
 # The Unicode Bidirectional Algorithm, with ICU4X's data instead of its own tables (no `hardcoded-data`; ADR-0009 §3). Published 2024-12-16; MIT OR Apache-2.0.
 unicode-bidi = { version = "=0.3.18", default-features = false, features = ["std"] }
 # The reference rasterizer (ADR-0011 §2) in its reference mode: without `simd`, so every target runs the same portable code, and with `no-std-float`, so its geometry takes acos, cos and powf from libm (ADR-0005 §4). Published 2026-02-02; BSD-3-Clause.
 tiny-skia = { version = "=0.12.0", default-features = false, features = ["no-std-float"] }
-# The interactive rasterizer that ADR-0011 §3 asks CORE-003 to evaluate, with its u8 (speed) and f32 (quality) pipelines, and libm instead of the platform's math library. Published 2026-10-02; Apache-2.0 OR MIT.
-vello_cpu = { version = "=0.3.0", default-features = false, features = ["libm", "u8_pipeline", "f32_pipeline"] }
-# vello_cpu's SIMD layer, named here only to switch on the scalar `Fallback` level (`force_support_fallback`), so that the spike can compare vello_cpu with and without SIMD, and run-time detection of the best level on x86 (`std`). The version vello_cpu 0.3.0 requires. Published 2026-08-11; Apache-2.0 OR MIT.
-fearless_simd = { version = "=0.7.0", default-features = false, features = ["std", "force_support_fallback"] }
+# The interactive rasterizer that ADR-0011 §3 asks CORE-003 to evaluate, with its u8 (speed) and f32 (quality) pipelines, and libm instead of the platform's math library. Published 2026-11-11; Apache-2.0 OR MIT.
+vello_cpu = { version = "=0.4.0", default-features = false, features = ["libm", "u8_pipeline", "f32_pipeline"] }
+# vello_cpu's SIMD layer, named here only to switch on the scalar `Fallback` level (`force_support_fallback`), so that the spike can compare vello_cpu with and without SIMD, and run-time detection of the best level on x86 (`std`). vello_cpu 0.4.0 requires 1.1 or later. Published 2026-10-25; Apache-2.0 OR MIT.
+fearless_simd = { version = "=1.2.0", default-features = false, features = ["std", "force_support_fallback"] }
 
 # Lint levels for every crate (`[lints] workspace = true`). bayan-ffi and bayan-wasm keep a copy of these tables with only `unsafe_code` changed, because Cargo cannot override one inherited lint; `cargo xtask verify` checks that the copies stay identical. Keep each entry on one line.
 # "warn" lints fail the gate, which runs Clippy with `-D warnings`; locally they stay warnings while you work.

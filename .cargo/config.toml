@@ -5,5 +5,5 @@
 xtask = "run --package xtask --locked --"
 
 [registry]
-# Never resolve a dependency version published less than one day ago (ADR-0017). Cargo enforces this from Rust 1.100; until the workspace moves to 1.100, Cargo prints "ignoring `registry.global-min-publish-age` without `-Zmin-publish-age`", which is expected. Keep the setting.
+# Never resolve a dependency version published less than one day ago (ADR-0017). Cargo enforces this from Rust 1.100, the pinned toolchain, whenever it resolves new versions (`cargo update` prints "as of 24 hours ago" and names the younger versions it leaves out); it never re-checks the versions that Cargo.lock already holds, which `cargo xtask check-lockfile-age` does. Keep the setting.
 global-min-publish-age = "1 day"
