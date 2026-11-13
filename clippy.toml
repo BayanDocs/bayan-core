@@ -5,7 +5,7 @@
 # - Platform math (sin, exp, powf and the like) calls each platform's own math library, whose results differ between Windows, macOS, Linux and WebAssembly. Use the deterministic functions in bayan-units.
 # - The algebraic_* methods let the compiler reorder the operation, fuse a multiply and an add, or replace a division by a reciprocal, so results depend on the platform and the optimization level. Use the plain + - * / % operators.
 # - min, max and clamp may return +0.0 or -0.0 non-deterministically when the inputs compare equal (Rust's documentation says so). Compare explicitly instead.
-# The other stable float methods of Rust 1.99 (arithmetic, sqrt, mul_add, rounding, sign, comparisons and bit conversions) give the same bits on every platform and stay allowed. When Rust stabilizes another method whose result is not exactly specified (for example gamma, erf or exp10), add it here in the monthly dependency session and call it in xtask/lint-canary.
+# The other stable float methods of Rust 1.100 (arithmetic, sqrt, mul_add, rounding, sign, comparisons and bit conversions) give the same bits on every platform and stay allowed. When Rust stabilizes another method whose result is not exactly specified (for example gamma, erf or exp10), add it here in the monthly dependency session and call it in xtask/lint-canary.
 disallowed-methods = [
   { path = "f32::sin", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },
   { path = "f32::cos", reason = "platform math differs between platforms; use the deterministic functions in bayan-units (ADR-0005 §4)" },

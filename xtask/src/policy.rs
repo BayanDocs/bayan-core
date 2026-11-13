@@ -12,7 +12,7 @@ pub const BINDING_CRATES: [&str; 2] = ["bayan-ffi", "bayan-wasm"];
 /// The tool tables of `[workspace.lints]`.
 const LINT_TOOLS: [&str; 3] = ["rust", "clippy", "rustdoc"];
 
-/// The floating-point methods that `clippy.toml` must forbid for both `f32` and `f64`: every stable method of Rust 1.99 whose result is not exactly specified, which ADR-0005 §4 rules out because it allows only exact IEEE-754 basic operations. The other stable float methods (arithmetic, `sqrt`, `mul_add`, rounding, sign, comparisons, bit conversions) give the same bits on every platform.
+/// The floating-point methods that `clippy.toml` must forbid for both `f32` and `f64`: every stable method of Rust 1.100 whose result is not exactly specified, which ADR-0005 §4 rules out because it allows only exact IEEE-754 basic operations. The other stable float methods (arithmetic, `sqrt`, `mul_add`, rounding, sign, comparisons, bit conversions) give the same bits on every platform.
 pub const REQUIRED_FLOAT_METHODS: [&str; 34] = [
     // Platform math: the list in work package CORE-001, plus `sin_cos`, `asinh`, `acosh` and `atanh`. Each platform's math library rounds them differently.
     "sin",

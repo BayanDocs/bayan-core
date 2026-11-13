@@ -1,7 +1,7 @@
 # The exact Rust toolchain for bayan-core (ADR-0006 §1). rustup reads this file and installs this version automatically.
-# Rust 1.99.0 was released on 2026-10-01. Change it only in the monthly dependency session, to the newest stable release that is at least 24 hours old, together with `rust-version` in Cargo.toml and RUST_STABLE in the docs repository's scripts/cloud-environment-setup.sh.
+# Rust 1.100.0 was released on 2026-11-12. Change it only in the monthly dependency session, to the newest stable release that is at least 24 hours old, together with `rust-version` in Cargo.toml and RUST_STABLE in the docs repository's scripts/cloud-environment-setup.sh.
 [toolchain]
-channel = "1.99.0"
+channel = "1.100.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
 # wasm32-unknown-unknown is the web app's engine (ADR-0014); wasm32-wasip1 runs the tests in WebAssembly with Node.js (CORE-002; see WASM_TEST_TARGET in xtask/src/verify.rs).

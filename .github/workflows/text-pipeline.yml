@@ -56,13 +56,13 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental compilation helps only when one machine rebuilds again and again, which these jobs never do.
   CARGO_INCREMENTAL: 0
-  # Node.js for the WebAssembly runners: the same version and checksums as artifacts.yml (released 2026-10-20; the checksums come from
+  # Node.js for the WebAssembly runners: the same version and checksums as artifacts.yml (released 2026-11-10; the checksums come from
   # nodejs.org's signed SHASUMS256.txt). Must equal NODE_VERSION in xtask/src/verify.rs (a test checks this). Change them only in the
   # monthly dependency session.
-  NODE_VERSION: 24.22.1
-  # wasm-bindgen's command-line tool, which writes the module's JavaScript glue (released 2026-09-25). Must equal the wasm-bindgen crate in
+  NODE_VERSION: 24.22.3
+  # wasm-bindgen's command-line tool, which writes the module's JavaScript glue (released 2026-10-30). Must equal the wasm-bindgen crate in
   # Cargo.lock and WASM_BINDGEN_VERSION in scripts/dev-setup.sh, with the same checksum (an xtask test checks this, as for artifacts.yml).
-  WASM_BINDGEN_VERSION: 0.2.129
+  WASM_BINDGEN_VERSION: 0.2.130
   # Chrome for Testing's headless shell for Linux x86-64 (released 2026-08-25), the same build and checksum as bayan-server's and bayan-web's
   # scripts/dev-setup.sh: hashed from storage.googleapis.com and confirmed identical on npmmirror, a mirror run by another organization.
   CHROME_VERSION: 153.0.8010.12
@@ -141,7 +141,7 @@ jobs:
         run: |
           # The project's release archive for Linux x86-64; the checksum matches the .sha256sum file published with it.
           name="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
-          sha256=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
+          sha256=9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f
           cd "$RUNNER_TEMP" || exit 1
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 --output "$name.tar.gz" \
             "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$name.tar.gz"
@@ -206,9 +206,9 @@ jobs:
       - name: Install Node.js (pinned version, SHA-256 checked)
         run: |
           case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;;
-            macOS-ARM64) archive=node-v$NODE_VERSION-darwin-arm64.tar.xz sha256=654ba79de6155647e22321932b45f2a1ccb705976cc337c9b8e278beb085a628 ;;
-            Windows-X64) archive=node-v$NODE_VERSION-win-x64.zip sha256=d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5 ;;
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;;
+            macOS-ARM64) archive=node-v$NODE_VERSION-darwin-arm64.tar.xz sha256=1d64136c8a43d648d1b3bad10797a4c995b1ca032d2bde8799de43b37f058fe5 ;;
+            Windows-X64) archive=node-v$NODE_VERSION-win-x64.zip sha256=e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f ;;
             *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
           esac
           cd "$RUNNER_TEMP" || exit 1
@@ -276,7 +276,7 @@ jobs:
       - name: Install Node.js (pinned version, SHA-256 checked)
         run: |
           case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;;
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;;
             *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
           esac
           cd "$RUNNER_TEMP" || exit 1
@@ -367,7 +367,7 @@ jobs:
       - name: Install Node.js (pinned version, SHA-256 checked)
         run: |
           case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;;
+            Linux-X64) archive=node-v$NODE_VERSION-linux-x64.tar.xz sha256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;;
             *) echo "::error::No pinned Node.js build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
           esac
           cd "$RUNNER_TEMP" || exit 1

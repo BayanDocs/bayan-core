@@ -6,13 +6,13 @@
 #   - The Rust toolchain pinned in rust-toolchain.toml, with the components and targets it lists, among them wasm32-wasip1
 #     for the tests in WebAssembly. rustup checks every download against the checksums of the Rust release, and never
 #     updates itself here (`--no-self-update`).
-#   - Node.js 24.22.1 (NODE_VERSION below), which runs those tests in the gate's `test` and `determinism` steps. A node of
+#   - Node.js 24.22.3 (NODE_VERSION below), which runs those tests in the gate's `test` and `determinism` steps. A node of
 #     exactly that version on PATH is used as it is, then the one the BayanDocs cloud environment installs; otherwise the
 #     script downloads it from nodejs.org, checks its SHA-256 before unpacking it, and installs it in
 #     ~/.local/share/bayandocs/core-tools (or $BAYAN_TOOLS_DIR). A script cannot change the PATH of the shell that started
-#     it, so it prints the line to add. On Windows, install Node.js 24.22.1 from nodejs.org yourself; CI does that in
+#     it, so it prints the line to add. On Windows, install Node.js 24.22.3 from nodejs.org yourself; CI does that in
 #     .github/workflows/verify.yml.
-#   - wasm-bindgen 0.2.129 (the command-line tool of the wasm-bindgen-cli crate, released 2026-09-25; MIT OR
+#   - wasm-bindgen 0.2.130 (the command-line tool of the wasm-bindgen-cli crate, released 2026-10-30; MIT OR
 #     Apache-2.0), which turns the engine's WebAssembly module into the package for the web shell (`cargo xtask
 #     wasm-package`). It must equal the version of the wasm-bindgen crate in Cargo.lock; an xtask test checks that. A
 #     wasm-bindgen of that version already on PATH, such as the BayanDocs cloud environment's, is used as it is.
@@ -35,30 +35,30 @@
 # their other copies.
 set -euo pipefail
 
-NODE_VERSION=24.22.1 # Active LTS security release of 2026-10-20 (CVE-2026-111497 in the Brotli decoder); must equal NODE_VERSION in xtask/src/verify.rs and .github/workflows/verify.yml
-WASM_BINDGEN_VERSION=0.2.129 # must equal the wasm-bindgen crate in Cargo.lock (xtask test: dev_setup_pins_the_locked_wasm_bindgen)
+NODE_VERSION=24.22.3 # Active LTS security release of 2026-11-10 (High-severity fixes in http2, TLS and the HTTP parser, among them CVE-2026-123863 and CVE-2026-126051); must equal NODE_VERSION in xtask/src/verify.rs and .github/workflows/verify.yml
+WASM_BINDGEN_VERSION=0.2.130 # must equal the wasm-bindgen crate in Cargo.lock (xtask test: dev_setup_pins_the_locked_wasm_bindgen)
 MIRI_TOOLCHAIN=nightly-2026-10-02 # must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs (xtask test: dev_setup_pins_the_miri_toolchain)
 
-# The SHA-256 of each Node.js download, from nodejs.org's SHASUMS256.txt for v24.22.1, whose signature by the Node.js
+# The SHA-256 of each Node.js download, from nodejs.org's SHASUMS256.txt for v24.22.3, whose signature by the Node.js
 # release key 5BE8 A3F6 C8A5 C01D 106C 0AD8 20B1 A390 B168 D356 was checked.
 node_sha256() {
   case "$1" in
-    linux-x64) echo 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;;
-    darwin-arm64) echo 654ba79de6155647e22321932b45f2a1ccb705976cc337c9b8e278beb085a628 ;;
-    darwin-x64) echo 65e450f90a6eaacd5000f611861c4ce65fadc87f813795dc4ed0c0e5f2fca2d4 ;;
+    linux-x64) echo 4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;;
+    darwin-arm64) echo 1d64136c8a43d648d1b3bad10797a4c995b1ca032d2bde8799de43b37f058fe5 ;;
+    darwin-x64) echo 4daeec962855c1a6e66cda398a25037319dc1bbd4a0939188b3547afbbfb6490 ;;
     *) return 1 ;;
   esac
 }
 
 # The SHA-256 of wasm-bindgen's release archive for each platform, equal to the checksum the project publishes next to
-# it (<archive>.sha256sum); every archive was downloaded and checked on 2026-10-08. The archive names carry the version,
+# it (<archive>.sha256sum); every archive was downloaded and checked on 2026-11-13. The archive names carry the version,
 # and the xtask test dev_setup_pins_the_locked_wasm_bindgen keeps it equal to WASM_BINDGEN_VERSION.
 wasm_bindgen_sha256() {
   case "$1" in
-    wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz) echo 82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e ;;
-    wasm-bindgen-0.2.129-aarch64-unknown-linux-musl.tar.gz) echo 2ed4351c35dd9440308bbb02767d47ea278efe851a52465300f3c94f5b6c2a87 ;;
-    wasm-bindgen-0.2.129-x86_64-apple-darwin.tar.gz) echo 7e028879a68ec53dae14048b55cc5215f6df75b17a9c1426fac8fa086d3202fd ;;
-    wasm-bindgen-0.2.129-aarch64-apple-darwin.tar.gz) echo 81d4a23d56b3c3eb8187658329116d50e0b228a93b343825fb71f70179051cd1 ;;
+    wasm-bindgen-0.2.130-x86_64-unknown-linux-musl.tar.gz) echo 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f ;;
+    wasm-bindgen-0.2.130-aarch64-unknown-linux-musl.tar.gz) echo 99ffc93ce80081b91632e2b539b782821a8f3439ab0fddc645287462b2f55d3d ;;
+    wasm-bindgen-0.2.130-x86_64-apple-darwin.tar.gz) echo eb209c115b7cb95832423c1aa3f4d06d6c53f63ef74fc4b6fb79ef0b2eea5f10 ;;
+    wasm-bindgen-0.2.130-aarch64-apple-darwin.tar.gz) echo b90ddb9357f584b1af897d58ad77e4cce2b48fc17e2a967bc249a87f72809444 ;;
     *) return 1 ;;
   esac
 }

@@ -61,7 +61,7 @@ const UNREAD: (&str, &str) = (
 /// The environment variables that Clippy reads for every unit it checks, and so records in the unit's dependency file: the arguments that `cargo clippy` hands it, and the folder of its configuration, which the preflight requires to be unset.
 const CLIPPY_VARIABLES: [&str; 2] = ["CLIPPY_ARGS", "CLIPPY_CONF_DIR"];
 
-/// The variables `CARGO_PKG_*` that Cargo 1.99 sets, from the package's manifest, for every crate it compiles: the only ones, besides Clippy's own, that the code that ships of a member that `OUTSIDE_WORLD` does not list with the whole of `std::env` may read while it is compiled. Any other name that begins with `CARGO_PKG_` is not Cargo's, so its value would come from the environment of whoever runs Cargo. A toolchain whose Cargo sets more is adopted in the monthly dependency session, which adds them here.
+/// The variables `CARGO_PKG_*` that Cargo 1.100 sets (the same fourteen as Cargo 1.99), from the package's manifest, for every crate it compiles: the only ones, besides Clippy's own, that the code that ships of a member that `OUTSIDE_WORLD` does not list with the whole of `std::env` may read while it is compiled. Any other name that begins with `CARGO_PKG_` is not Cargo's, so its value would come from the environment of whoever runs Cargo. A toolchain whose Cargo sets more is adopted in the monthly dependency session, which adds them here.
 pub const CARGO_PKG_VARIABLES: [&str; 14] = [
     "CARGO_PKG_AUTHORS",
     "CARGO_PKG_DESCRIPTION",
