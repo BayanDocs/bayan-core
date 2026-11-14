@@ -48,16 +48,7 @@ pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 pub const PROC_MACROS: [(&str, &str); 0] = [];
 
 /// Files that workspace members read as data, with `include_str!` or `include_bytes!`, although the source check does not read them, with the members that read them and the reason. After each Clippy run, the Clippy step compares the files that the compiler read for every unit of a workspace member, as the dependency file it wrote for the unit lists them, with the files that the source check read (`dep_info.rs`). Any other file fails the step, unless it is one of Clippy's own two (the root clippy.toml and Cargo.toml, named as Clippy names them) or listed here for the unit's member. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every file listed here is data, never Rust code. A file that a member it is listed for read in none of the runs, a file that the source check reads anyway, and a member that does not exist fail the step too, so the list cannot go stale.
-pub const DATA_FILES: [DataFiles; 10] = [
-    DataFiles {
-        files: &[
-            "crates/bayan-crdt/tests/fixtures/loro-panic-base.bin",
-            "crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin",
-            "crates/bayan-crdt/tests/fixtures/loro-panic-update.bin",
-        ],
-        members: &["bayan-crdt"],
-        reason: "the snapshot and updates with which CORE-004's fuzzer made Loro panic, which the test `import_panic` replays to show that the panic is contained",
-    },
+pub const DATA_FILES: [DataFiles; 9] = [
     DataFiles {
         files: &[
             "crates/bayan-opc/tests/fixtures/python-docx/default.docx",

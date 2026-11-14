@@ -157,7 +157,7 @@ impl Doc {
 
     /// Ends the current change without making it an undo step: [`crate::UndoManager`] treats it like a change from another replica, never undoing it but transforming later undo steps against it.
     ///
-    /// For changes that create entities before an undoable change references them. Undo then removes only the reference, and the entity stays stored but invisible, as the document model intends (normalization rule N5). Undoing the creation itself is harmful with Loro 1.16.2: redoing the creation of a child container duplicates its content, including edits other replicas made to it in between (CORE-004 report).
+    /// For changes that create entities before an undoable change references them. Undo then removes only the reference, and the entity stays stored but invisible, as the document model intends (normalization rule N5). Undoing the creation itself was harmful with Loro 1.16.2, whose redo of the creation of a child container duplicated its content, including edits other replicas made to it in between (CORE-004 report); Loro 1.17.1 no longer does (the adapter's test `redoing_the_creation_of_a_child_container_restores_its_content_once`).
     pub fn commit_without_undo(&self) {
         if self.is_poisoned() {
             return;

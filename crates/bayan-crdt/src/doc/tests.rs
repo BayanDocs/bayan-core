@@ -7,7 +7,7 @@
 //!
 //! The panic hook that these tests install stays installed for the rest of the unit-test program, which bayan-crdt's other unit tests share (today those of `value.rs`): once either test has started, a failing assertion elsewhere reports only its location, and no other unit test may install a hook of its own, which would replace this one.
 //!
-//! The fixture tests in `tests/import_panic.rs` check the same with a real panic of Loro 1.16.2, on CORE-004's crafted update, which ties them to that version's bug; these tests carry the guarantee once a version of Loro no longer panics on that update.
+//! Since Loro 1.17.1 these tests carry the guarantee alone: the fixture tests in `tests/import_panic.rs`, which checked the same with a real panic of Loro 1.16.2 on CORE-004's crafted update, needed that version's bug and were deleted when Loro moved (DEP-CORE-2026-11-LORO). The crafted update stays a seed of the fuzz target `crdt_import`.
 //!
 //! Host only (see the declaration in `doc.rs`). In a file of its own, declared with `#[cfg(test)] mod tests;`, as AGENTS.md asks of tests: the compiler does not read it for the code that ships, every line of which the gate's outside-world check reads.
 
