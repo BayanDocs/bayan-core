@@ -518,6 +518,13 @@ fn redoing_the_creation_of_a_child_container_restores_its_content_once() {
     assert!(a.stories().get("s").is_none());
     assert!(undo.redo().unwrap());
     assert_eq!(a.stories().get("s").unwrap().text(), "typedP");
+    // The redone story reaches the other replica, and that replica's later edits reach it.
+    sync(&a, &b);
+    assert_eq!(b.stories().get("s").unwrap().text(), "typedP");
+    b.stories().get("s").unwrap().insert(6, "!").unwrap();
+    b.commit();
+    sync(&b, &a);
+    assert_eq!(a.stories().get("s").unwrap().text(), "typedP!");
 }
 
 /// The workaround the model uses: create entities in a change that is not an undo step, then reference them in one that is. Undo hides the reference, redo shows it again, and the entity's content, including other replicas' edits, is intact.

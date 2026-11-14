@@ -793,11 +793,26 @@ mod tests {
             } else {
                 ImportLimits::LOCAL_SNAPSHOT
             };
-            match doc.import(&seed[1..], &limits) {
+            let result = doc.import(&seed[1..], &limits);
+            if seed[1..] == *PANIC_CRAFTED {
+                assert!(
+                    matches!(result, Err(ImportError::Malformed(_))),
+                    "{result:?}"
+                );
+                continue;
+            }
+            match result {
                 Ok(_) | Err(ImportError::SnapshotNotAccepted) => {}
-                Err(ImportError::Malformed(_)) if seed[1..] == *PANIC_CRAFTED => {}
                 other => panic!("{other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn the_seeds_pass() {
+        // The target's own checks (`import_case`, `check_result`) on every seed, so that they run in CI while `crdt_import` is parked. No seed panics in Loro or poisons its document, so `check_poisoned` runs only when the target is fuzzed.
+        for seed in &corpus().seeds {
+            import_case(seed);
         }
     }
 
