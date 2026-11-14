@@ -8,6 +8,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +18,7 @@ use bayan_crdt::{
     PropertyMap, Registry, Stories, Story, UndoManager, Value, Version, VersionVector,
 };
 
-use crate::loro_panics::{self, Lockfile, Owner};
+use crate::loro_panics::{self, Lockfile, Owner, Package};
 
 /// The mark families of the document model (`crates/bayan-model/src/marks.rs`): run properties continue at the end of a run, links, comments and revisions never expand.
 pub const FAMILIES: [MarkFamily; 4] = [
@@ -48,7 +49,7 @@ const LORO_SEED: u32 = u32::from_le_bytes(*b"LORO");
 /// Where a blob's body starts: after its magic, its other header fields and its checksum (bytes 16 to 19), and its two mode bytes (20 and 21).
 const BODY: usize = 22;
 
-/// The base document and update of CORE-004's crafted blob, which the adapter's test `import_panic` replays: a document made by random editing, and the update with which Loro 1.16.2 panics (and its valid original), seeds of this target too.
+/// The base document and update of CORE-004's crafted blob, seeds of this target: a document made by random editing, the update with which Loro 1.16.2 panicked, and its valid original.
 const PANIC_BASE: &[u8] =
     include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-base.bin");
 const PANIC_UPDATE: &[u8] =
@@ -57,7 +58,7 @@ const PANIC_CRAFTED: &[u8] =
     include_bytes!("../../crates/bayan-crdt/tests/fixtures/loro-panic-crafted.bin");
 
 /// The index in [`Corpus::bases`] of CORE-004's base document.
-pub const PANIC_BASE_INDEX: u8 = 1;
+const PANIC_BASE_INDEX: u8 = 1;
 
 /// How many documents [`Corpus::new`] makes by editing.
 const EDITED: u64 = 6;
@@ -78,6 +79,12 @@ pub fn loro_panics() -> u64 {
 pub fn install_panic_hook() -> Result<(), String> {
     let lockfile = Lockfile::parse(crate::LOCKFILE)?;
     let loro = loro_panics::loro_packages(&lockfile, "bayan-fuzz")?;
+    install_panic_hook_for(lockfile, loro);
+    Ok(())
+}
+
+/// The hook of [`install_panic_hook`], which lets the panics of the packages `loro` unwind: Loro's packages, or, in this crate's tests, a package that stands in for them, because no input may make Loro panic (`tests.rs`).
+pub(crate) fn install_panic_hook_for(lockfile: Lockfile, loro: BTreeSet<Package>) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
@@ -97,7 +104,6 @@ pub fn install_panic_hook() -> Result<(), String> {
             }
         }
     }));
-    Ok(())
 }
 
 /// A small deterministic pseudo-random generator (xorshift64*), so that the seeds are the same on every run and the mutator follows libFuzzer's seed.
@@ -585,11 +591,6 @@ thread_local! {
     static POISONED: ManuallyDrop<RefCell<Vec<Box<dyn Any>>>> = ManuallyDrop::new(RefCell::new(Vec::new()));
 }
 
-/// How many poisoned documents this process keeps.
-pub fn poisoned_documents() -> usize {
-    POISONED.with(|kept| kept.borrow().len())
-}
-
 /// Imports one input (see the module's documentation) and checks its properties; panics, which fails the run, when one does not hold.
 pub fn import_case(data: &[u8]) {
     let Some((&selector_byte, blob)) = data.split_first() else {
@@ -780,7 +781,7 @@ mod tests {
             assert!(seed.len() > 1 + BODY, "{} bytes", seed.len());
             assert_eq!(&seed[1..5], b"loro", "a Loro blob starts with its magic");
         }
-        // Every seed but CORE-004's crafted one imports into its base (or is refused for the limits it is offered with), and none panics.
+        // Every seed but CORE-004's crafted one imports into its base (or is refused for the limits it is offered with), and none panics: Loro 1.17.1 refuses the crafted one as malformed, where 1.16.2 panicked.
         for seed in &corpus.seeds {
             let doc = Doc::new(PeerId(11), &FAMILIES).unwrap();
             let base = &corpus.bases[usize::from(seed[0] >> 1) % corpus.bases.len()];
@@ -792,11 +793,26 @@ mod tests {
             } else {
                 ImportLimits::LOCAL_SNAPSHOT
             };
-            match doc.import(&seed[1..], &limits) {
+            let result = doc.import(&seed[1..], &limits);
+            if seed[1..] == *PANIC_CRAFTED {
+                assert!(
+                    matches!(result, Err(ImportError::Malformed(_))),
+                    "{result:?}"
+                );
+                continue;
+            }
+            match result {
                 Ok(_) | Err(ImportError::SnapshotNotAccepted) => {}
-                Err(ImportError::Panicked) if seed[1..] == *PANIC_CRAFTED => std::mem::forget(doc),
                 other => panic!("{other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn the_seeds_pass() {
+        // The target's own checks (`import_case`, `check_result`) on every seed, so that they run in CI while `crdt_import` is parked. No seed panics in Loro or poisons its document, so `check_poisoned` runs only when the target is fuzzed.
+        for seed in &corpus().seeds {
+            import_case(seed);
         }
     }
 
