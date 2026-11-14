@@ -1,9 +1,11 @@
 //! Tests of the containment of a panic inside the CRDT library during [`Doc::import`] that depend on no bug of the library (follow-up FU-16 of the dependency session DEP-CORE-2026-11). They make the panic themselves, in two ways:
 //!
 //! - **Out of the library's own import.** [`inject_a_panic_into_an_import`] subscribes a callback of the test's own to the library's document, which panics when the library delivers the events of an import. The library delivers them inside its import (its documentation of `LoroDoc::subscribe_root` says so) and lets the panic out of its import, so the panic reaches [`Doc::import`] from inside the library's code, as a panic of the library's own would. What the panic leaves behind in the library differs between versions of Loro (1.16.2 leaves the lock of its transaction poisoned, 1.17.1 does not), so the test relies on none of it.
-//! - **Inside the containment itself.** [`poison_through_the_containment`] hands [`Doc::contain`], the containment of [`Doc::import`], a closure of the test's own that panics. The library takes no part in that panic and stays usable, so the test can watch it while every method of the poisoned document and its handles runs: an edit waits in the library for the next commit and must still be waiting, the library's state and history must not change, and while the library shows an older version, the document must answer that it does not and must not bring it back. Every place that a handle reads holds something, so a method that asked the library instead of answering as for an empty document would answer differently. And a handle or undo manager that the poisoned document hands out must not be attached to the library's document at all, which the test asks it.
+//! - **Inside the containment itself.** [`poison_through_the_containment`] hands [`Doc::contain`], the containment of [`Doc::import`], a closure of the test's own that panics. The library takes no part in that panic and stays usable, so the test can watch it while every method of the poisoned document and its handles runs: an edit waits in the library for the next commit and must still be waiting, the library's state and history must not change, and while the library shows an older version, the document must answer that it does not and must not bring it back. Every place that a handle reads holds something, so a method that asked the library instead of answering as for an empty document would answer differently. A handle or undo manager that the poisoned document hands out must not be attached to the library's document at all, which the test asks it, and dropping the undo manager obtained before must leak the library's undo manager instead of freeing it.
 //!
-//! The code that ships never subscribes such a callback and hands [`Doc::contain`] only the real import. Besides these, the tests use only the accessors `is_attached` of [`Story`](crate::Story), [`Stories`](crate::Stories) and [`UndoManager`], which exist in test builds only: no other condition, no feature and no hook.
+//! The code that ships never subscribes such a callback and hands [`Doc::contain`] only the real import. Besides these, the tests use only the accessors `is_attached` of [`Story`](crate::Story), [`Stories`](crate::Stories) and [`UndoManager`], and [`UndoManager::hold_while_alive`], which exist in test builds only: no other condition, no feature and no hook.
+//!
+//! The panic hook that these tests install stays installed for the rest of the unit-test program, which bayan-crdt's other unit tests share (today those of `value.rs`): once either test has started, a failing assertion elsewhere reports only its location, and no other unit test may install a hook of its own, which would replace this one.
 //!
 //! The fixture tests in `tests/import_panic.rs` check the same with a real panic of Loro 1.16.2, on CORE-004's crafted update, which ties them to that version's bug; these tests carry the guarantee once a version of Loro no longer panics on that update.
 //!
@@ -90,7 +92,8 @@ fn inject_a_panic_into_an_import(doc: &Doc, update: &[u8]) {
     }
     // `Some`: the panic did not escape `Doc::import`. If the import returns normally instead after an upgrade of Loro, the library no longer lets a subscriber's panic out of its import: inject the panic through another callback that the library runs inside its import, and never with a blob that makes the library panic, which the project neither searches for nor commits.
     assert_eq!(outcome.ok(), Some(Err(ImportError::Panicked)));
-    assert_eq!(panics, 1);
+    // At least the injected panic: how many times the hook fires while the library hands that panic on is up to the library, which may raise it again as a new panic.
+    assert!(panics >= 1);
     assert!(doc.is_poisoned());
     // The callback stays with the library's document, and panics again only if something imports into it.
     subscription.detach();
@@ -146,6 +149,9 @@ fn a_poisoned_document_and_its_handles_refuse_everything_without_calling_the_lib
     let update = remote_update();
     let doc = Doc::new(PeerId(1), &FAMILIES).unwrap();
     let mut undo = UndoManager::new(&doc);
+    // A token that a callback of the library's undo manager holds for as long as that manager lives.
+    let token = Arc::new(());
+    undo.hold_while_alive(Arc::clone(&token));
     // Something in every place a handle reads, written in three undo steps.
     let main = doc.main_story();
     main.insert(0, "abc").unwrap();
@@ -201,6 +207,12 @@ fn a_poisoned_document_and_its_handles_refuse_everything_without_calling_the_lib
     assert_ne!(earlier, Version(Frontiers::default()));
     assert_ne!(doc.version_vector(), VersionVector::new());
     assert_ne!(doc.stats(), DocStats { ops: 0, changes: 0 });
+    // And the token shows a free: dropping the undo manager of a document that is not poisoned frees the library's manager, and the callback with it.
+    let control = Arc::new(());
+    let mut healthy = UndoManager::new(&doc);
+    healthy.hold_while_alive(Arc::clone(&control));
+    drop(healthy);
+    assert_eq!(Arc::strong_count(&control), 1);
 
     poison_through_the_containment(&doc);
     assert_eq!(doc.peer(), PeerId(1));
@@ -319,4 +331,8 @@ fn a_poisoned_document_and_its_handles_refuse_everything_without_calling_the_lib
     assert!(!doc.is_detached());
     doc.checkout_latest();
     assert!(doc.loro.is_detached());
+
+    // Dropping the undo manager from before leaks the library's manager instead of freeing it (see `UndoManager`'s `Drop`): its callback still holds the token.
+    drop(undo);
+    assert_eq!(Arc::strong_count(&token), 2);
 }

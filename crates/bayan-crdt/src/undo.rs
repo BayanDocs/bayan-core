@@ -94,6 +94,17 @@ impl UndoManager {
         self.manager.is_some()
     }
 
+    /// Gives the CRDT library's undo manager a callback that holds `token` for as long as that manager lives, so that the host-only tests in `doc/tests.rs` can tell whether dropping this one freed it.
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn hold_while_alive(&mut self, token: std::sync::Arc<()>) {
+        if let Some(manager) = self.manager.as_mut() {
+            manager.set_on_pop(Some(Box::new(move |_, _, _| {
+                let _ = &token;
+            })));
+        }
+    }
+
     fn usable(&mut self) -> Result<Option<&mut loro::UndoManager>, CrdtError> {
         self.poison.check()?;
         Ok(self.manager.as_mut())
