@@ -352,6 +352,13 @@ impl Stories {
         ids
     }
 
+    /// Whether the handle refers to the stories of a document in the CRDT library. A handle that a poisoned document hands out does not (see [`crate::Doc::stories`]); the host-only tests in `doc/tests.rs` check that.
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn is_attached(&self) -> bool {
+        self.map.is_attached()
+    }
+
     /// Every story, in identifier order.
     #[must_use]
     pub fn entries(&self) -> BTreeMap<String, Story> {

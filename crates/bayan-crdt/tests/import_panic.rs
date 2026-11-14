@@ -1,5 +1,7 @@
 //! A panic of the CRDT library during an import is contained and poisons the document, and the poisoned document and every handle to it refuse to work instead of panicking again.
 //!
+//! **Tied to a bug of Loro 1.16.2.** These tests need Loro to panic on CORE-004's crafted update (the fixtures below). The unit tests in `src/doc/tests.rs` check the same containment with a panic that they inject themselves, and depend on no bug of Loro (FU-16): they carry the guarantee once a version of Loro no longer panics on this update. The two tests below that import it then fail, and this test program goes, with its entry in `DATA_FILES` (`xtask/src/verify.rs`); its fixtures are never replaced by another input that makes Loro panic, which the project neither searches for nor commits.
+//!
 //! A test program of its own, because it installs a panic hook for the whole process, in the pattern a host must follow before importing untrusted blobs (see `Doc::import`): the hook never prints or records a panic's message, whatever code raised it, and reports only where a panic happened. Filtering by crate is not enough: a panic message of Loro's can quote document text, and so can one of the crates Loro uses (generic-btree's prints the tree element, which for rich text holds the text; it raised 48% of the panics of the CORE-004 fuzzing run), or an assertion that compares document state.
 //!
 //! Host only: in WebAssembly (wasm32-wasip1, where the gate also runs the tests) a panic aborts the whole test program instead of unwinding, so the adapter cannot contain it there; the engine's host restarts an engine that aborts (CORE-004 report).
@@ -93,7 +95,7 @@ fn a_panic_during_an_import_poisons_the_document_instead_of_crashing() {
     let doc = load();
     let undo = UndoManager::new(&doc);
     let library_panics = LIBRARY_PANICS.load(Ordering::Relaxed);
-    // When Loro stops panicking on this blob, replace the fixtures with a case that still panics (the fuzzer finds them), so that this test keeps exercising the containment.
+    // Tied to Loro 1.16.2's bug (see the top of this file): once a version of Loro no longer panics on this blob, this assertion fails, and the unit tests in `src/doc/tests.rs` carry the guarantee instead.
     assert_eq!(
         doc.import(PANIC_CRAFTED, &ImportLimits::UPDATE),
         Err(ImportError::Panicked)
