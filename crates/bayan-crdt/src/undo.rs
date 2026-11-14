@@ -20,7 +20,7 @@ pub const MAX_UNDO_STEPS: usize = 1_000;
 
 /// The interval within which Loro merges consecutive commits into one undo step, in milliseconds: none at all, whatever the clock does.
 ///
-/// Loro 1.16.2 merges a commit into the previous undo step when `now - last_undo_time < merge_interval`, with `now` from the system clock (`Date.now()` in WebAssembly). An interval of 0 merges nothing while the clock moves forward, but when it steps backwards (a clock correction) the difference is negative, so every commit until the clock catches up would join one step, and undo grouping would depend on the clock, which ADR-0005 forbids for anything that affects output (CORE-004 report, F12). No difference of two timestamps is below `i64::MIN`, so with it the comparison is never true.
+/// Loro 1.17.1, like 1.16.2, merges a commit into the previous undo step when `now - last_undo_time < merge_interval`, with `now` from the system clock (`Date.now()` in WebAssembly). An interval of 0 merges nothing while the clock moves forward, but when it steps backwards (a clock correction) the difference is negative, so every commit until the clock catches up would join one step, and undo grouping would depend on the clock, which ADR-0005 forbids for anything that affects output (CORE-004 report, F12). No difference of two timestamps is below `i64::MIN`, so with it the comparison is never true.
 const NEVER_MERGE: i64 = i64::MIN;
 
 impl UndoManager {
