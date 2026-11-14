@@ -45,7 +45,7 @@ impl UndoManager {
         }
     }
 
-    /// Undoes the latest local step that is not undone yet. Returns whether there was one.
+    /// Undoes the latest local step that is not undone yet. Returns whether the call changed the document: `false` also when other replicas' edits had emptied that step, which the call then consumes, leaving the earlier steps for the next call; [`Self::can_undo`] tells whether any step is left.
     ///
     /// # Errors
     ///
@@ -57,7 +57,7 @@ impl UndoManager {
         }
     }
 
-    /// Redoes the latest undone step. Returns whether there was one.
+    /// Redoes the latest undone step. Returns whether the call changed the document: `false` also when other replicas' edits had emptied that step, which the call then consumes, leaving the earlier steps for the next call; [`Self::can_redo`] tells whether any step is left.
     ///
     /// # Errors
     ///

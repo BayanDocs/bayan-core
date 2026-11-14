@@ -985,7 +985,7 @@ impl Document {
 
     // ----- Undo -----
 
-    /// Undoes this replica's latest operation (changes received from other replicas are never undone). Returns whether there was one.
+    /// Undoes this replica's latest operation (changes received from other replicas are never undone). Returns whether the call changed the document: `false` also when other replicas' edits had emptied that operation, which the call then consumes, leaving the earlier operations for the next call; [`Self::can_undo`] tells whether any operation is left.
     ///
     /// # Errors
     ///
@@ -997,7 +997,7 @@ impl Document {
         Ok(undone)
     }
 
-    /// Redoes the latest undone operation. Returns whether there was one.
+    /// Redoes the latest undone operation. Returns whether the call changed the document: `false` also when other replicas' edits had emptied that operation, which the call then consumes, leaving the earlier operations for the next call.
     ///
     /// # Errors
     ///
