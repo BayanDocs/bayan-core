@@ -224,6 +224,13 @@ impl Story {
         Ok(runs_from_delta(delta))
     }
 
+    /// Whether the handle refers to a story of a document in the CRDT library. A handle that a poisoned document hands out does not (see [`crate::Doc::main_story`]); the host-only tests in `doc/tests.rs` check that.
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn is_attached(&self) -> bool {
+        self.text.is_attached()
+    }
+
     fn check_position(&self, pos: usize) -> Result<(), CrdtError> {
         let len = self.len();
         if pos > len {

@@ -275,15 +275,22 @@ impl Doc {
     ///
     /// [`ImportError`] when the blob is refused; with [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`] the document is poisoned and must be discarded.
     pub fn import(&self, bytes: &[u8], limits: &ImportLimits) -> Result<ImportReport, ImportError> {
+        self.contain(|| self.import_unguarded(bytes, limits))
+    }
+
+    /// Runs `import`, which calls the CRDT library, and contains a panic in it, unless the document is poisoned already. [`Doc::import`] is its only caller in the code that ships; the tests in `doc/tests.rs` also hand it a closure that panics, to test the containment without a bug of the library.
+    fn contain(
+        &self,
+        import: impl FnOnce() -> Result<ImportReport, ImportError>,
+    ) -> Result<ImportReport, ImportError> {
         if self.is_poisoned() {
             return Err(ImportError::Poisoned);
         }
         // Loro 1.16.2 panics on many crafted blobs whose checksum is correct (CORE-004 report). Such a panic is contained here, where the document is known: its state may be half updated and the library's locks are poisoned, so the document is poisoned too, which also means it is never freed, because freeing it can panic again. Where panics abort instead of unwinding (WebAssembly builds), the host must restart the engine and reload the last good state.
-        std::panic::catch_unwind(AssertUnwindSafe(|| self.import_unguarded(bytes, limits)))
-            .unwrap_or_else(|_| {
-                self.poison.set();
-                Err(ImportError::Panicked)
-            })
+        std::panic::catch_unwind(AssertUnwindSafe(import)).unwrap_or_else(|_| {
+            self.poison.set();
+            Err(ImportError::Panicked)
+        })
     }
 
     fn import_unguarded(
@@ -414,3 +421,8 @@ const fn expand_type(expand: Expand) -> ExpandType {
         Expand::Both => ExpandType::Both,
     }
 }
+
+// Host only: these tests check that `Doc::import` contains a panic, and in WebAssembly (wasm32-wasip1, where the gate also runs the tests) a panic aborts the whole test program instead. The condition is a second attribute, not part of `cfg(all(test, …))`, because Clippy treats a module as test code, where `unwrap()` is allowed, only under a plain `#[cfg(test)]`.
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests;

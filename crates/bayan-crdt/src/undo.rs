@@ -87,6 +87,13 @@ impl UndoManager {
         self.readable().map_or(0, loro::UndoManager::undo_count)
     }
 
+    /// Whether the manager records the changes of a document in the CRDT library. One created for a poisoned document does not (see [`UndoManager::new`]); the host-only tests in `doc/tests.rs` check that.
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn is_attached(&self) -> bool {
+        self.manager.is_some()
+    }
+
     fn usable(&mut self) -> Result<Option<&mut loro::UndoManager>, CrdtError> {
         self.poison.check()?;
         Ok(self.manager.as_mut())
