@@ -117,14 +117,14 @@ jobs:
 
       - name: Upload the C SDK
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bayan-core-sdk-${{ matrix.target }}
           path: target/artifacts/bayan-core-sdk-${{ matrix.target }}
           if-no-files-found: error
 
       - name: Upload the tile digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tile-c-${{ matrix.target }}
           path: ${{ runner.temp }}/tile
@@ -181,7 +181,7 @@ jobs:
 
       - name: Upload the WebAssembly package
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bayan-core-wasm
           path: target/artifacts/bayan-core-wasm
@@ -242,7 +242,7 @@ jobs:
           echo "NODE=$node" >> "$GITHUB_ENV"
 
       - name: Download the WebAssembly package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bayan-core-wasm
           path: wasm-package
@@ -270,7 +270,7 @@ jobs:
           printf 'Node.js driver, %s: %s\n' "$OS" "${tile#tile }" > "$RUNNER_TEMP/tile/node-$OS.txt"
 
       - name: Upload the tile digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tile-node-${{ matrix.os }}
           path: ${{ runner.temp }}/tile
@@ -297,7 +297,7 @@ jobs:
           fi
 
       - name: Download the tile digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: tile-*
           path: tiles
