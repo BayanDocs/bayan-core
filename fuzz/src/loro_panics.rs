@@ -4,7 +4,7 @@
 //!
 //! **Loro's** panics are decided by crate, as the brief defines them: Loro's packages are `loro` and the packages that only Loro brings into `fuzz/Cargo.lock` ([`loro_packages`], which reads the lockfile compiled into the target, so that the list cannot go stale), not packages that BayanDocs' own crates or the fuzzing harness also use. A panic is Loro's when, counting outward from the frame that raised it, the first frame outside the standard library belongs to one of those packages ([`owner`]). The frame that raised it is the one that the backtrace lists right after the frames of `std::panicking` and `core::panicking`; the frames before those are the hook's own and the backtrace's, which must not count, and `std::panicking` appears again further out wherever a caller catches panics, which must not count either. So [`owner`] starts at the first frame of `std::panicking` or `core::panicking` and skips every frame in the standard library's files, the rest of the panicking machinery and a frame of std that raised the panic for its caller (such as `Option::unwrap`) among them. A frame belongs to the package whose source folder holds its file, as the target's debug information names it: `…/registry/src/<index>/<name>-<version>/…` for a package from crates.io, and one of the standard library's two folders (below) for the standard library. The panic's location alone is not enough: a panic that std, alloc or one of Loro's own dependencies raises for Loro carries a location outside the `loro` crate, and a panic that BayanDocs code raises inside a call from Loro carries Loro's packages further out, which must not count either.
 //!
-//! **The standard library's files** have one of two names in the debug information ([`StdLibrary`]). The code that the toolchain compiled in advance, such as `std::panicking` and `core::option::unwrap_failed`, is always named `/rustc/<commit>/library/…`. The standard library's code that the compiler compiles into the target's own crates, its generic functions such as `Option::unwrap` and the functions it inlines, is named the same way unless the toolchain has its rust-src component, the standard library's source code, which `scripts/dev-setup.sh` installs on the fuzz nightly for Miri: the compiler then names that code by its place in the component, `<sysroot>/lib/rustlib/src/rust/library/…`, such as `/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs`. That folder is not written into the code, and no environment variable or file is read for it: when the hook is installed, [`StdLibrary::of_this_program`] reads it from the program's own debug information, from the frame of `Option::get_or_insert_with`, a generic function of the standard library that the compiler compiled into this crate, in a backtrace that it takes through that function. So only the very folder in which the compiler that built the program found the standard library counts, never another folder of that shape, such as one inside a package of the lockfile, inside BayanDocs' crates or the fuzz targets, or in a build script's output. In both folders a file counts as the standard library's only while it stays below the folder once `..` is resolved: the standard library names some of its own files with `..` (`core/src/../../stdarch/…`), and a name with `..` could otherwise lead out of the folder. Cargo does not rebuild a crate when rust-src is installed or removed, so a target whose crates were compiled partly before and partly after such a change can name the standard library's code in a folder that its own frame does not show; that code then counts as other code and fails the run, and building the targets again from clean (`cargo clean` in `fuzz/`) puts it right.
+//! **The standard library's files** have one of two names in the debug information ([`StdLibrary`]). The code that the toolchain compiled in advance, such as `std::panicking` and `core::option::unwrap_failed`, is always named `/rustc/<commit>/library/…`. The standard library's code that the compiler compiles into the target's own crates, its generic functions such as `Option::unwrap` and the functions it inlines, is named the same way unless the toolchain has its rust-src component, the standard library's source code, which `scripts/dev-setup.sh` installs on the fuzz nightly for Miri: the compiler then names that code by its place in the component, `<sysroot>/lib/rustlib/src/rust/library/…`, such as `/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs`. That folder is not written into the code, and no environment variable or file is read for it: when the hook is installed, [`StdLibrary::of_this_program`] reads it from the program's own debug information, from the frame of `Option::get_or_insert_with`, a generic function of the standard library that the compiler compiled into this crate, in a backtrace that it takes through that function. So only the very folder in which the compiler that built the program found the standard library counts, never another folder of that shape, such as one inside a package of the lockfile, inside BayanDocs' crates or the fuzz targets, or in a build script's output. The names that this module reads also depend on the process's current folder: in the text form of a backtrace (`{:?}`), which [`frames`] reads, std writes every file below the current folder as `./…`. Such a name never matches either folder, so the current folder can only make the hook refuse to install, or count a frame as other code, never accept more: a target started from `/` refuses to start (`/rustc/…` becomes `./rustc/…`), and where rust-src is installed, so does one started from a folder above the toolchain, such as the home folder that holds `~/.rustup`. The targets are therefore started from inside the repository, as the commands in `fuzz/README.md` are. In both folders a file counts as the standard library's only while it stays below the folder once `..` is resolved: the standard library names some of its own files with `..` (`core/src/../../stdarch/…`), and a name with `..` could otherwise lead out of the folder. Cargo does not rebuild a crate when rust-src is installed or removed, so a target whose crates were compiled partly before and partly after such a change can name the standard library's code in a folder that its own frame does not show; that code then counts as other code and fails the run, and building the targets again from clean (`cargo clean` in `fuzz/`) puts it right.
 //!
 //! Everything that this module cannot read for certain counts as not Loro's, so that it fails the run: a backtrace that std did not capture, a frame without a file where the decision falls, a file in no package of the lockfile, a lockfile in a layout that the parser does not know, and a backtrace through `Option::get_or_insert_with` that does not show where the standard library is (for these two, the hook is then not installed and the target stops before fuzzing).
 
@@ -251,7 +251,7 @@ pub struct StdLibrary {
 }
 
 impl StdLibrary {
-    /// Where this program's debug information puts the standard library's files, read from a backtrace that this function takes through `Option::get_or_insert_with`. That function of the standard library is generic, so the compiler compiled it into this crate and named its file as it named the standard library's code in every crate of the program; it calls `Backtrace::force_capture` itself, so the backtrace starts in it (std leaves out its own frames that take the backtrace), and this function's frame follows. Nothing else is read: no environment variable, and no file but the program's debug information, which every backtrace reads.
+    /// Where this program's debug information puts the standard library's files, read from a backtrace that this function takes through `Option::get_or_insert_with`. That function of the standard library is generic, so the compiler compiled it into this crate and named its file as it named the standard library's code in every crate of the program; it calls `Backtrace::force_capture` itself, so the backtrace starts in it (std leaves out its own frames that take the backtrace), and this function's frame follows. No environment variable is read for it, and no file but the program's debug information, which every backtrace reads. The names also depend on the current folder, below which std writes every file as `./…` in the text form of a backtrace; such a name matches neither folder, so a program started from `/`, or with rust-src from a folder above the toolchain, gets an error here and never a folder that it should not accept (see the module's documentation).
     ///
     /// # Errors
     ///
@@ -747,6 +747,10 @@ mod tests {
             format!("{RUST_SRC}/./core/src/option.rs"),
             format!("{STD}/"),
             format!("{STD}/./core/src/option.rs"),
+            // The standard library's own files as std writes them below the current folder, started from `/` or from the home folder: refused, never accepted.
+            "./rustc/0123456789abcdef0123456789abcdef01234567/library/core/src/option.rs"
+                .to_owned(),
+            "./.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
         ] {
             assert_eq!(
                 source(&other, &lockfile, &std_library),
@@ -824,9 +828,10 @@ mod tests {
         let frames = through_get_or_insert_with(RUST_SRC, "./src/loro_panics.rs");
         let mut cases = vec![
             Vec::new(),
-            // No frame in this module's file, or none of the standard library's before it.
+            // No frame in this module's file (a file whose name only ends like it, also right after a folder whose own name ends in `src`, is another file), or none of the standard library's before it.
             through_get_or_insert_with(RUST_SRC, "./src/other.rs"),
             through_get_or_insert_with(RUST_SRC, "./src/evil_loro_panics.rs"),
+            through_get_or_insert_with(RUST_SRC, "./evilsrc/loro_panics.rs"),
             frames[2..].to_vec(),
         ];
         // The frame that called this module's code is not in `core/src/option.rs`, has no file, or is a package's.
@@ -849,16 +854,20 @@ mod tests {
             "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library-old",
             "/rustc/0123/library",
             "/rustc/0123456789abcdef0123456789abcdef01234567/src/library",
+            // As std writes the two folders below the current folder, started from `/` or from the home folder.
+            "./rustc/0123456789abcdef0123456789abcdef01234567/library",
+            "./.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library",
         ] {
             cases.push(through_get_or_insert_with(library, "./src/loro_panics.rs"));
         }
-        // A frame before it that is not in the standard library's folders that it shows.
+        // A frame before it that is not in the standard library's folders that it shows, or has no file.
         for file in [
-            format!("{REGISTRY}/serde_json-1.0.151/src/lib.rs"),
-            "/root/.rustup/toolchains/nightly-2026-10-02-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs".to_owned(),
+            Some(format!("{REGISTRY}/serde_json-1.0.151/src/lib.rs")),
+            Some("/root/.rustup/toolchains/nightly-2026-10-02-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs".to_owned()),
+            None,
         ] {
             let mut changed = frames.clone();
-            changed[0].file = Some(file);
+            changed[0].file = file;
             cases.push(changed);
         }
         for case in cases {
