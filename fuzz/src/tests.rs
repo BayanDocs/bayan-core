@@ -57,7 +57,7 @@ fn run_case(case: &str) {
                 .cloned()
                 .collect();
             assert_eq!(stand_in.len(), 1);
-            crdt::install_panic_hook_for(lockfile, stand_in);
+            crdt::install_panic_hook_for(lockfile, stand_in).unwrap();
             panic_in_serde_json();
             assert_eq!(crdt::loro_panics(), 1);
         }

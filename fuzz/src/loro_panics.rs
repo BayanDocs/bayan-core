@@ -2,10 +2,13 @@
 //!
 //! libfuzzer-sys's own hook aborts the process on every panic, before anything can catch it, so that a panic which the code under test would catch still fails the run (`initialize` in libfuzzer-sys 0.4.13's `src/lib.rs`). That is right for every target but `crdt_import`: `bayan_crdt::Doc::import` contains the panics of Loro, which the owner accepted with that guard (ADR-0008, amendment of 2026-10-08), and poisons the document. So `crdt_import` replaces the hook with one that lets a panic unwind only when it is Loro's, and hands every other panic to libfuzzer-sys's hook, which aborts.
 //!
-//! **Loro's** panics are decided by crate, as the brief defines them: Loro's packages are `loro` and the packages that only Loro brings into `fuzz/Cargo.lock` ([`loro_packages`], which reads the lockfile compiled into the target, so that the list cannot go stale), not packages that BayanDocs' own crates or the fuzzing harness also use. A panic is Loro's when, counting outward from the frame that raised it, the first frame outside the standard library belongs to one of those packages ([`owner`]). The frame that raised it is the one that the backtrace lists right after the frames of `std::panicking` and `core::panicking`; the frames before those are the hook's own and the backtrace's, which must not count, and `std::panicking` appears again further out wherever a caller catches panics, which must not count either. So [`owner`] starts at the first frame of `std::panicking` or `core::panicking` and skips every frame in the standard library's files, the rest of the panicking machinery and a frame of std that raised the panic for its caller (such as `Option::unwrap`) among them. A frame belongs to the package whose source folder holds its file, as the target's debug information names it: `…/registry/src/<index>/<name>-<version>/…` for a package from crates.io, and `/rustc/<commit>/library/…` for the standard library. The panic's location alone is not enough: a panic that std, alloc or one of Loro's own dependencies raises for Loro carries a location outside the `loro` crate, and a panic that BayanDocs code raises inside a call from Loro carries Loro's packages further out, which must not count either.
+//! **Loro's** panics are decided by crate, as the brief defines them: Loro's packages are `loro` and the packages that only Loro brings into `fuzz/Cargo.lock` ([`loro_packages`], which reads the lockfile compiled into the target, so that the list cannot go stale), not packages that BayanDocs' own crates or the fuzzing harness also use. A panic is Loro's when, counting outward from the frame that raised it, the first frame outside the standard library belongs to one of those packages ([`owner`]). The frame that raised it is the one that the backtrace lists right after the frames of `std::panicking` and `core::panicking`; the frames before those are the hook's own and the backtrace's, which must not count, and `std::panicking` appears again further out wherever a caller catches panics, which must not count either. So [`owner`] starts at the first frame of `std::panicking` or `core::panicking` and skips every frame in the standard library's files, the rest of the panicking machinery and a frame of std that raised the panic for its caller (such as `Option::unwrap`) among them. A frame belongs to the package whose source folder holds its file, as the target's debug information names it: `…/registry/src/<index>/<name>-<version>/…` for a package from crates.io, and one of the standard library's two folders (below) for the standard library. The panic's location alone is not enough: a panic that std, alloc or one of Loro's own dependencies raises for Loro carries a location outside the `loro` crate, and a panic that BayanDocs code raises inside a call from Loro carries Loro's packages further out, which must not count either.
 //!
-//! Everything that this module cannot read for certain counts as not Loro's, so that it fails the run: a backtrace that std did not capture, a frame without a file where the decision falls, a file in no package of the lockfile, and a lockfile in a layout that the parser does not know (the hook is then not installed and the target stops before fuzzing).
+//! **The standard library's files** have one of two names in the debug information ([`StdLibrary`]). The code that the toolchain compiled in advance, such as `std::panicking` and `core::option::unwrap_failed`, is always named `/rustc/<commit>/library/…`. The standard library's code that the compiler compiles into the target's own crates, its generic functions such as `Option::unwrap` and the functions it inlines, is named the same way unless the toolchain has its rust-src component, the standard library's source code, which `scripts/dev-setup.sh` installs on the fuzz nightly for Miri: the compiler then names that code by its place in the component, `<sysroot>/lib/rustlib/src/rust/library/…`, such as `/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs`. That folder is not written into the code, and no environment variable or file is read for it: when the hook is installed, [`StdLibrary::of_this_program`] reads it from the program's own debug information, from the frame of `Option::get_or_insert_with`, a generic function of the standard library that the compiler compiled into this crate, in a backtrace that it takes through that function. So only the very folder in which the compiler that built the program found the standard library counts, never another folder of that shape, such as one inside a package of the lockfile, inside BayanDocs' crates or the fuzz targets, or in a build script's output. In both folders a file counts as the standard library's only while it stays below the folder once `..` is resolved: the standard library names some of its own files with `..` (`core/src/../../stdarch/…`), and a name with `..` could otherwise lead out of the folder. Cargo does not rebuild a crate when rust-src is installed or removed, so a target whose crates were compiled partly before and partly after such a change can name the standard library's code in a folder that its own frame does not show; that code then counts as other code and fails the run, and building the targets again from clean (`cargo clean` in `fuzz/`) puts it right.
+//!
+//! Everything that this module cannot read for certain counts as not Loro's, so that it fails the run: a backtrace that std did not capture, a frame without a file where the decision falls, a file in no package of the lockfile, a lockfile in a layout that the parser does not know, and a backtrace through `Option::get_or_insert_with` that does not show where the standard library is (for these two, the hook is then not installed and the target stops before fuzzing).
 
+use std::backtrace::Backtrace;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -240,10 +243,132 @@ fn frame(text: &str) -> Result<Frame, String> {
     })
 }
 
+/// The two folders of the standard library's files in the program's debug information (see the module's documentation): `/rustc/<commit>/library/`, and the `library` folder of the toolchain's rust-src component when the compiler named the standard library's code that it compiled into the program's own crates there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdLibrary {
+    /// The `library` folder of the toolchain's rust-src component, `<sysroot>/lib/rustlib/src/rust/library`, when the program's debug information names the standard library's code that the compiler compiled into its crates there; `None` when it names that code `/rustc/<commit>/library/…` too.
+    rust_src: Option<String>,
+}
+
+impl StdLibrary {
+    /// Where this program's debug information puts the standard library's files, read from a backtrace that this function takes through `Option::get_or_insert_with`. That function of the standard library is generic, so the compiler compiled it into this crate and named its file as it named the standard library's code in every crate of the program; it calls `Backtrace::force_capture` itself, so the backtrace starts in it (std leaves out its own frames that take the backtrace), and this function's frame follows. Nothing else is read: no environment variable, and no file but the program's debug information, which every backtrace reads.
+    ///
+    /// # Errors
+    ///
+    /// When std captured no backtrace that can be read, or its frames do not show the standard library's `core/src/option.rs` in one of the two folders right before this function's own frame ([`StdLibrary::from_frames`]).
+    pub fn of_this_program() -> Result<Self, String> {
+        // Not `Backtrace::force_capture()` itself: the standard library's code must call it, so that the backtrace starts in that code.
+        let mut slot = None;
+        let backtrace = slot.get_or_insert_with(Backtrace::force_capture);
+        Self::from_frames(&frames(&format!("{backtrace:?}"))?, file!())
+    }
+
+    /// Where the standard library's files are, from the frames of the backtrace that [`StdLibrary::of_this_program`] takes in the file `own_file` (`file!()`, this module's file as the compiler was given it). The frames before the first one in that file must all be the standard library's code that called `Backtrace::force_capture`, the last of them `Option::get_or_insert_with` in `<library>/core/src/option.rs`, where `<library>` is either `/rustc/<commit>/library` or the `library` folder of a rust-src component, an absolute folder that ends in `lib/rustlib/src/rust/library` and has no empty part, `.` or `..`.
+    fn from_frames(frames: &[Frame], own_file: &str) -> Result<Self, String> {
+        let unreadable = |what: String| {
+            format!(
+                "the backtrace through `Option::get_or_insert_with` does not show where the standard library's files are: {what}"
+            )
+        };
+        let is_own = |frame: &Frame| {
+            frame.file.as_deref().is_some_and(|file| {
+                file.strip_suffix(own_file)
+                    .is_some_and(|folder| folder.is_empty() || folder.ends_with('/'))
+            })
+        };
+        let own = frames
+            .iter()
+            .position(is_own)
+            .ok_or_else(|| unreadable(format!("none of its frames is in {own_file}")))?;
+        let Some(caller) = own.checked_sub(1).map(|index| &frames[index]) else {
+            return Err(unreadable(format!("it starts in {own_file}")));
+        };
+        let library = caller
+            .file
+            .as_deref()
+            .and_then(|file| file.strip_suffix("/core/src/option.rs"))
+            .ok_or_else(|| unreadable(format!("the frame that called {own_file} is {caller:?}")))?;
+        let std_library = if is_rustc_library(library) {
+            Self { rust_src: None }
+        } else if is_rust_src_library(library) {
+            Self {
+                rust_src: Some(library.to_owned()),
+            }
+        } else {
+            return Err(unreadable(format!(
+                "`core/src/option.rs` is in {library}, which is neither `/rustc/<commit>/library` nor the `library` folder of a rust-src component"
+            )));
+        };
+        if let Some(frame) = frames[..own].iter().find(|frame| {
+            !frame
+                .file
+                .as_deref()
+                .is_some_and(|file| std_library.holds(file))
+        }) {
+            return Err(unreadable(format!(
+                "it starts with {frame:?}, which is not in the standard library's folders"
+            )));
+        }
+        Ok(std_library)
+    }
+
+    /// Whether `file` is one of the standard library's files: below `/rustc/<commit>/library/` or below the rust-src component's `library` folder, and still below it once `..` is resolved.
+    fn holds(&self, file: &str) -> bool {
+        let below_rustc = file
+            .strip_prefix("/rustc/")
+            .and_then(|rest| rest.split_once('/'))
+            .filter(|(commit, _)| is_commit(commit))
+            .and_then(|(_, rest)| rest.strip_prefix("library/"));
+        let below_rust_src = self
+            .rust_src
+            .as_deref()
+            .and_then(|library| file.strip_prefix(library)?.strip_prefix('/'));
+        below_rustc.is_some_and(stays_below) || below_rust_src.is_some_and(stays_below)
+    }
+}
+
+/// Whether `commit` is a commit as the toolchain names it in `/rustc/<commit>/`: 40 hexadecimal digits.
+fn is_commit(commit: &str) -> bool {
+    commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Whether `folder` is `/rustc/<commit>/library`.
+fn is_rustc_library(folder: &str) -> bool {
+    folder
+        .strip_prefix("/rustc/")
+        .and_then(|rest| rest.strip_suffix("/library"))
+        .is_some_and(is_commit)
+}
+
+/// Whether `folder` has the shape of a rust-src component's `library` folder: an absolute folder that ends in `lib/rustlib/src/rust/library` and has no empty part, `.` or `..`.
+fn is_rust_src_library(folder: &str) -> bool {
+    folder.strip_prefix('/').is_some_and(|path| {
+        let parts: Vec<&str> = path.split('/').collect();
+        parts.ends_with(&["lib", "rustlib", "src", "rust", "library"])
+            && parts.iter().all(|part| !matches!(*part, "" | "." | ".."))
+    })
+}
+
+/// Whether `path`, relative to a folder, names something below that folder: it has no empty part and no `.`, and no `..` in it leads out of the folder.
+fn stays_below(path: &str) -> bool {
+    let mut depth = 0_usize;
+    for part in path.split('/') {
+        match part {
+            "" | "." => return false,
+            ".." => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            _ => depth += 1,
+        }
+    }
+    depth > 0
+}
+
 /// Whose code a file is, by the folder that holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// Rust's standard library (`core`, `alloc`, `std` and the crates inside it), as the toolchain's debug information names its files: `/rustc/<commit>/library/…`.
+    /// Rust's standard library (`core`, `alloc`, `std` and the crates inside it), in one of its two folders ([`StdLibrary`]): `/rustc/<commit>/library/…`, or the `library` folder of the toolchain's rust-src component that the program's own frame showed.
     Std,
     /// A package of the lockfile, in Cargo's registry: `…/registry/src/<index>/<name>-<version>/…`.
     Package(Package),
@@ -251,16 +376,12 @@ pub enum Source {
     Other(String),
 }
 
-/// Whose code `file` is, for the packages of `lockfile`.
-pub fn source(file: &str, lockfile: &Lockfile) -> Source {
-    let parts: Vec<&str> = file.split('/').collect();
-    if let [_, "rustc", commit, "library", ..] = parts.as_slice()
-        && file.starts_with('/')
-        && commit.len() == 40
-        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+/// Whose code `file` is, for the packages of `lockfile` and the standard library's folders `std_library`.
+pub fn source(file: &str, lockfile: &Lockfile, std_library: &StdLibrary) -> Source {
+    if std_library.holds(file) {
         return Source::Std;
     }
+    let parts: Vec<&str> = file.split('/').collect();
     for window in parts.windows(4) {
         if let ["registry", "src", _index, folder] = window
             && let Some(package) = lockfile
@@ -282,8 +403,13 @@ pub enum Owner {
     NotLoro(String),
 }
 
-/// Whose a panic is, from the frames of a backtrace captured in the panic hook (see the module's documentation).
-pub fn owner(frames: &[Frame], lockfile: &Lockfile, loro: &BTreeSet<Package>) -> Owner {
+/// Whose a panic is, from the frames of a backtrace captured in the panic hook (see the module's documentation), in a program whose standard library's files are in `std_library`.
+pub fn owner(
+    frames: &[Frame],
+    lockfile: &Lockfile,
+    loro: &BTreeSet<Package>,
+    std_library: &StdLibrary,
+) -> Owner {
     let is_panicking = |frame: &Frame| {
         frame.function.as_deref().is_some_and(|name| {
             name.starts_with("std::panicking::") || name.starts_with("core::panicking::")
@@ -303,7 +429,7 @@ pub fn owner(frames: &[Frame], lockfile: &Lockfile, loro: &BTreeSet<Package>) ->
                 frame.function.as_deref().unwrap_or("<unknown>")
             ));
         };
-        match source(file, lockfile) {
+        match source(file, lockfile, std_library) {
             Source::Std => {}
             Source::Package(package) if loro.contains(&package) => return Owner::Loro(package),
             Source::Package(package) => {
@@ -325,9 +451,25 @@ mod tests {
 
     const REGISTRY: &str = "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
     const STD: &str = "/rustc/0123456789abcdef0123456789abcdef01234567/library";
+    /// The `library` folder of a toolchain's rust-src component, where the compiler names the standard library's code that it compiles into the program's crates once that component is installed.
+    const RUST_SRC: &str = "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library";
+    /// This module's file, as `file!()` gives it.
+    const OWN_FILE: &str = "src/loro_panics.rs";
 
     fn lockfile() -> Lockfile {
         Lockfile::parse(LOCKFILE).unwrap()
+    }
+
+    /// A program whose crates name the standard library's code `/rustc/<commit>/library/…`, as where the toolchain has no rust-src component.
+    fn without_rust_src() -> StdLibrary {
+        StdLibrary { rust_src: None }
+    }
+
+    /// A program whose crates name the standard library's code in [`RUST_SRC`].
+    fn with_rust_src() -> StdLibrary {
+        StdLibrary {
+            rust_src: Some(RUST_SRC.to_owned()),
+        }
     }
 
     fn loro() -> BTreeSet<Package> {
@@ -378,11 +520,33 @@ mod tests {
     }
 
     fn panic_from(frames: &[Frame]) -> Owner {
+        panic_in(&with_rust_src(), frames)
+    }
+
+    /// Whose a panic is in a program whose standard library's files are in `std_library`, with `frames` after the panicking ones.
+    fn panic_in(std_library: &StdLibrary, frames: &[Frame]) -> Owner {
         owner(
             &[panicking(), frames.to_vec()].concat(),
             &lockfile(),
             &loro(),
+            std_library,
         )
+    }
+
+    /// The frames of the backtrace that [`StdLibrary::of_this_program`] takes, in a program whose crates name the standard library's code below `library` and this module's file `own`.
+    fn through_get_or_insert_with(library: &str, own: &str) -> Vec<Frame> {
+        vec![
+            at(
+                "<<std::backtrace::Backtrace>::force_capture as core::ops::function::FnOnce<()>>::call_once",
+                &format!("{library}/core/src/ops/function.rs"),
+            ),
+            at(
+                "<core::option::Option<std::backtrace::Backtrace>>::get_or_insert_with::<<std::backtrace::Backtrace>::force_capture>",
+                &format!("{library}/core/src/option.rs"),
+            ),
+            at("bayan_fuzz::loro_panics::StdLibrary::of_this_program", own),
+            at("bayan_fuzz::crdt::install_panic_hook_for", "./src/crdt.rs"),
+        ]
     }
 
     #[test]
@@ -483,14 +647,20 @@ mod tests {
     #[test]
     fn a_file_belongs_to_the_package_whose_folder_holds_it() {
         let lockfile = lockfile();
+        let std_library = with_rust_src();
         assert_eq!(
-            source(&format!("{STD}/core/src/option.rs"), &lockfile),
+            source(
+                &format!("{STD}/core/src/option.rs"),
+                &lockfile,
+                &std_library
+            ),
             Source::Std
         );
         assert_eq!(
             source(
                 &format!("{REGISTRY}/generic-btree-0.10.7/src/lib.rs"),
-                &lockfile
+                &lockfile,
+                &std_library
             ),
             Source::Package(Package {
                 name: "generic-btree".to_owned(),
@@ -506,11 +676,221 @@ mod tests {
             "rustc/0123456789abcdef0123456789abcdef01234567/library/core/src/option.rs".to_owned(),
         ] {
             assert_eq!(
-                source(&other, &lockfile),
+                source(&other, &lockfile, &std_library),
                 Source::Other(other.clone()),
                 "{other}"
             );
         }
+    }
+
+    #[test]
+    fn the_standard_library_s_files_are_in_one_of_two_folders() {
+        let lockfile = lockfile();
+        // The code that the toolchain compiled in advance, in every program, also where the standard library names a file with `..` that stays in its folder.
+        for file in [
+            format!("{STD}/core/src/option.rs"),
+            format!("{STD}/std/src/../../backtrace/src/backtrace/libunwind.rs"),
+            format!("{STD}/core/src/../../stdarch/crates/core_arch/src/x86/sse2.rs"),
+        ] {
+            for std_library in [without_rust_src(), with_rust_src()] {
+                assert_eq!(
+                    source(&file, &lockfile, &std_library),
+                    Source::Std,
+                    "{file}"
+                );
+            }
+        }
+        // The code that the compiler compiled into the program's crates, where the toolchain has its rust-src component: the standard library's only in a program whose own frame showed that folder, and someone else's in one whose frame did not.
+        for file in [
+            format!("{RUST_SRC}/core/src/option.rs"),
+            format!("{RUST_SRC}/core/src/ops/function.rs"),
+            format!("{RUST_SRC}/core/src/../../portable-simd/crates/core_simd/src/vector.rs"),
+        ] {
+            assert_eq!(
+                source(&file, &lockfile, &with_rust_src()),
+                Source::Std,
+                "{file}"
+            );
+            assert_eq!(
+                source(&file, &lockfile, &without_rust_src()),
+                Source::Other(file.clone()),
+                "{file}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_else_passes_for_the_standard_library() {
+        let lockfile = lockfile();
+        let std_library = with_rust_src();
+        for other in [
+            // A folder of the same shape elsewhere: another toolchain's, BayanDocs' crates, the fuzz targets' (named from their own folder, with or without `./`), a build script's output, and the rust-src component outside its `library` folder.
+            "/root/.rustup/toolchains/nightly-2026-10-02-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "/home/user/bayan-core/crates/bayan-crdt/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "./lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "/home/user/bayan-core/fuzz/target/x86_64-unknown-linux-gnu/release/build/serde_json-0123456789abcdef/out/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/src/tools/x.rs".to_owned(),
+            // A folder whose name only starts like the standard library's.
+            format!("{RUST_SRC}-old/core/src/option.rs"),
+            format!("{RUST_SRC}2/core/src/option.rs"),
+            // Names that `..` leads out of the standard library's folders.
+            format!("{RUST_SRC}/../../../../../../../../home/user/bayan-core/crates/bayan-crdt/src/import.rs"),
+            format!("{RUST_SRC}/core/../../library-old/core/src/option.rs"),
+            format!("{STD}/../../../home/user/bayan-core/crates/bayan-crdt/src/import.rs"),
+            format!("{STD}/core/../../x.rs"),
+            // The folders themselves, and names with empty parts or `.`, which no file of the standard library has.
+            RUST_SRC.to_owned(),
+            format!("{RUST_SRC}/"),
+            format!("{RUST_SRC}/core/.."),
+            format!("{RUST_SRC}//core/src/option.rs"),
+            format!("{RUST_SRC}/./core/src/option.rs"),
+            format!("{STD}/"),
+            format!("{STD}/./core/src/option.rs"),
+        ] {
+            assert_eq!(
+                source(&other, &lockfile, &std_library),
+                Source::Other(other.clone()),
+                "{other}"
+            );
+        }
+        // A package of the lockfile that holds a folder of that shape is that package.
+        assert_eq!(
+            source(
+                &format!(
+                    "{REGISTRY}/generic-btree-0.10.7/lib/rustlib/src/rust/library/core/src/option.rs"
+                ),
+                &lockfile,
+                &std_library
+            ),
+            Source::Package(Package {
+                name: "generic-btree".to_owned(),
+                version: "0.10.7".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn reads_the_standard_library_s_folder_from_the_program_s_own_frames() {
+        assert_eq!(
+            StdLibrary::from_frames(
+                &through_get_or_insert_with(STD, "./src/loro_panics.rs"),
+                OWN_FILE
+            ),
+            Ok(without_rust_src())
+        );
+        assert_eq!(
+            StdLibrary::from_frames(
+                &through_get_or_insert_with(RUST_SRC, "./src/loro_panics.rs"),
+                OWN_FILE
+            ),
+            Ok(with_rust_src())
+        );
+        // This module's file named in full, as other builds can name it.
+        assert_eq!(
+            StdLibrary::from_frames(
+                &through_get_or_insert_with(
+                    RUST_SRC,
+                    "/home/user/bayan-core/fuzz/src/loro_panics.rs"
+                ),
+                OWN_FILE
+            ),
+            Ok(with_rust_src())
+        );
+        // The short names of cargo-fuzz's builds, whose debug information has line tables only; and without a frame for the call of `force_capture`.
+        let short = [
+            at(
+                "call_once<fn() -> std::backtrace::Backtrace, ()>",
+                &format!("{RUST_SRC}/core/src/ops/function.rs"),
+            ),
+            at(
+                "get_or_insert_with<std::backtrace::Backtrace, fn() -> std::backtrace::Backtrace>",
+                &format!("{RUST_SRC}/core/src/option.rs"),
+            ),
+            at("of_this_program", "./src/loro_panics.rs"),
+        ];
+        assert_eq!(
+            StdLibrary::from_frames(&short, OWN_FILE),
+            Ok(with_rust_src())
+        );
+        assert_eq!(
+            StdLibrary::from_frames(&short[1..], OWN_FILE),
+            Ok(with_rust_src())
+        );
+    }
+
+    #[test]
+    fn refuses_frames_that_do_not_show_where_the_standard_library_is() {
+        let frames = through_get_or_insert_with(RUST_SRC, "./src/loro_panics.rs");
+        let mut cases = vec![
+            Vec::new(),
+            // No frame in this module's file, or none of the standard library's before it.
+            through_get_or_insert_with(RUST_SRC, "./src/other.rs"),
+            through_get_or_insert_with(RUST_SRC, "./src/evil_loro_panics.rs"),
+            frames[2..].to_vec(),
+        ];
+        // The frame that called this module's code is not in `core/src/option.rs`, has no file, or is a package's.
+        for file in [
+            Some(format!("{RUST_SRC}/core/src/result.rs")),
+            None,
+            Some(format!("{REGISTRY}/libfuzzer-sys-0.4.13/src/lib.rs")),
+        ] {
+            let mut changed = frames.clone();
+            changed[1].file = file;
+            cases.push(changed);
+        }
+        // `core/src/option.rs` in a folder of another shape.
+        for library in [
+            "/home/user/bayan-core/crates/bayan-crdt",
+            "lib/rustlib/src/rust/library",
+            "./lib/rustlib/src/rust/library",
+            "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/../rust/library",
+            "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu//lib/rustlib/src/rust/library",
+            "/root/.rustup/toolchains/nightly-2026-11-16-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library-old",
+            "/rustc/0123/library",
+            "/rustc/0123456789abcdef0123456789abcdef01234567/src/library",
+        ] {
+            cases.push(through_get_or_insert_with(library, "./src/loro_panics.rs"));
+        }
+        // A frame before it that is not in the standard library's folders that it shows.
+        for file in [
+            format!("{REGISTRY}/serde_json-1.0.151/src/lib.rs"),
+            "/root/.rustup/toolchains/nightly-2026-10-02-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs".to_owned(),
+        ] {
+            let mut changed = frames.clone();
+            changed[0].file = Some(file);
+            cases.push(changed);
+        }
+        for case in cases {
+            assert!(
+                StdLibrary::from_frames(&case, OWN_FILE).is_err(),
+                "{case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_program_s_standard_library_counts_as_the_standard_library() {
+        // As the hook reads it when it is installed: in this test program, with or without rust-src.
+        let std_library = StdLibrary::of_this_program().unwrap();
+        // The standard library's code that the compiler compiled into this crate, here `Option::map`, is in the folder that the program's own frame showed.
+        let backtrace = Some(()).map(|()| Backtrace::force_capture()).unwrap();
+        let frames = frames(&format!("{backtrace:?}")).unwrap();
+        let map = frames
+            .iter()
+            .find_map(|frame| {
+                frame
+                    .file
+                    .as_deref()
+                    .filter(|file| file.ends_with("/core/src/option.rs"))
+            })
+            .unwrap();
+        assert_eq!(source(map, &lockfile(), &std_library), Source::Std, "{map}");
+        assert_eq!(
+            std_library.rust_src.is_some(),
+            !map.starts_with("/rustc/"),
+            "{map}"
+        );
     }
 
     #[test]
@@ -539,6 +919,27 @@ mod tests {
         assert!(
             matches!(panic_from(&[btree, loro_frame.clone()]), Owner::Loro(package) if package.name == "generic-btree")
         );
+        // The same where the toolchain has its rust-src component: `Option::unwrap` compiled into Loro's crate, and a failed `assert_eq!` in Loro, whose `assert_failed` is generic too, are in that component's folder.
+        let unwrap_in_loro = at(
+            "<core::option::Option<u8>>::unwrap",
+            &format!("{RUST_SRC}/core/src/option.rs"),
+        );
+        assert!(matches!(
+            panic_from(&[unwrap.clone(), unwrap_in_loro, loro_frame.clone()]),
+            Owner::Loro(_)
+        ));
+        let assert_failed_inner = at(
+            "core::panicking::assert_failed_inner",
+            &format!("{STD}/core/src/panicking.rs"),
+        );
+        let assert_failed = at(
+            "core::panicking::assert_failed::<u8, u8>",
+            &format!("{RUST_SRC}/core/src/panicking.rs"),
+        );
+        assert!(matches!(
+            panic_from(&[assert_failed_inner, assert_failed, loro_frame.clone()]),
+            Owner::Loro(_)
+        ));
         // The adapter that called Loro is further out, and does not count, nor does std::panicking further out, where the adapter and libfuzzer-sys catch panics.
         let adapter = at(
             "bayan_crdt::doc::Doc::import_unguarded",
@@ -592,9 +993,29 @@ mod tests {
             Owner::NotLoro(_)
         ));
         assert!(matches!(panic_from(&[]), Owner::NotLoro(_)));
+        // The standard library's code in the rust-src component's folder, in a program whose own frame did not show that folder: someone else's.
+        let unwrap_in_loro = at(
+            "<core::option::Option<u8>>::unwrap",
+            &format!("{RUST_SRC}/core/src/option.rs"),
+        );
+        assert!(
+            matches!(panic_in(&without_rust_src(), &[unwrap_in_loro, loro_frame.clone()]), Owner::NotLoro(reason) if reason.contains(RUST_SRC))
+        );
+        // Other code in a folder of that shape, or named with `..` that leads out of it: it raised the panic, and Loro's frame further out does not count.
+        for file in [
+            "/home/user/bayan-core/crates/bayan-crdt/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            "/root/.rustup/toolchains/nightly-2026-10-02-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs".to_owned(),
+            format!("{RUST_SRC}/../../../../../../../../home/user/bayan-core/crates/bayan-crdt/src/import.rs"),
+        ] {
+            let elsewhere = at("bayan_crdt::import::check_header", &file);
+            assert!(
+                matches!(panic_from(&[elsewhere, loro_frame.clone()]), Owner::NotLoro(reason) if reason == format!("raised in {file}")),
+                "{file}"
+            );
+        }
         // A backtrace without the panicking frames: Loro's frame alone does not make it Loro's.
         assert!(matches!(
-            owner(&[loro_frame], &lockfile(), &loro()),
+            owner(&[loro_frame], &lockfile(), &loro(), &with_rust_src()),
             Owner::NotLoro(_)
         ));
         // The hook's own frames, before the panicking ones, never count, whoever they are.
@@ -605,7 +1026,7 @@ mod tests {
         );
         hook_in_loro.push(adapter);
         assert!(matches!(
-            owner(&hook_in_loro, &lockfile(), &loro()),
+            owner(&hook_in_loro, &lockfile(), &loro(), &with_rust_src()),
             Owner::NotLoro(_)
         ));
     }
