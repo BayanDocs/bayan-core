@@ -37,7 +37,7 @@ set -euo pipefail
 
 NODE_VERSION=24.22.3 # Active LTS security release of 2026-11-10 (High-severity fixes in http2, TLS and the HTTP parser, among them CVE-2026-123863 and CVE-2026-126051); must equal NODE_VERSION in xtask/src/verify.rs and .github/workflows/verify.yml
 WASM_BINDGEN_VERSION=0.2.130 # must equal the wasm-bindgen crate in Cargo.lock (xtask test: dev_setup_pins_the_locked_wasm_bindgen)
-MIRI_TOOLCHAIN=nightly-2026-10-02 # must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs (xtask test: dev_setup_pins_the_miri_toolchain)
+MIRI_TOOLCHAIN=nightly-2026-11-16 # must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs (xtask test: dev_setup_pins_the_miri_toolchain)
 
 # The SHA-256 of each Node.js download, from nodejs.org's SHASUMS256.txt for v24.22.3, whose signature by the Node.js
 # release key 5BE8 A3F6 C8A5 C01D 106C 0AD8 20B1 A390 B168 D356 was checked.

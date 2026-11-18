@@ -16,7 +16,7 @@ use crate::sources::{self, Condition};
 use crate::{canary, flags, policy};
 
 /// The cargo-deny version the gate uses. CI installs exactly this version, checked against SHA-256 checksums in `.github/workflows/verify.yml`; change both together, in the monthly dependency session.
-pub const CARGO_DENY_VERSION: &str = "0.20.2";
+pub const CARGO_DENY_VERSION: &str = "0.21.0";
 
 /// The WebAssembly target of the web app's engine (ADR-0014).
 const WASM_TARGET: &str = "wasm32-unknown-unknown";

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the seed corpora of the fuzz targets, runs the targets and minimizes their corpora, as .github/workflows/fuzz.yml does in CI (bayan-core#21, follow-up 1 of CORE-005). README.md in this folder explains the targets, their settings and how to reproduce a failure.
 
-Usage, from anywhere in the repository, after `cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu`:
+Usage, from anywhere in the repository, after `cargo +nightly-2026-11-16 fuzz build --target x86_64-unknown-linux-gnu`:
 
   python3 -I fuzz/ci.py seeds SEEDS
       Writes the seeds of every target into SEEDS/<target>/, from public files only: the five python-docx documents that bayan-opc's tests keep, the metadata parts and the XML parts inside them, bayan-xml's two sample parts, for the PDF extractor the two PDFs of bayan-lab-layout's tests and three small PDFs written here, for the hint reader the documents, their main document parts and three small main document parts written here, for the engine's targets sessions of protocol messages, tile requests and configurations written here and the recordings that bayan-engine's tests commit, and for crdt_import nothing, because its own mutator starts from blobs that real editing makes (fuzz/src/crdt.rs). Never add documents of the private corpus: CI saves the corpora that grow from the seeds in the Actions cache, which the workflows of pull requests can read.
@@ -473,7 +473,7 @@ def environment() -> Dict[str, str]:
 def binary(name: str, binaries: Path) -> Path:
     path = binaries / name
     if not path.is_file():
-        raise SystemExit(f"ci.py: {path} does not exist; build the targets first: cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu")
+        raise SystemExit(f"ci.py: {path} does not exist; build the targets first: cargo +nightly-2026-11-16 fuzz build --target x86_64-unknown-linux-gnu")
     return path
 
 
