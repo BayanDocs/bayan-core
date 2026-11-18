@@ -27,11 +27,11 @@ Every parser of untrusted input gets a fuzz target that feeds it random and muta
 
 ## Running them
 
-The targets use [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz), which needs a nightly Rust toolchain, so this folder is a separate Cargo workspace, excluded from the main one in the root `Cargo.toml`. Use the nightly version and the cargo-fuzz version pinned in the docs repository's `scripts/cloud-environment-setup.sh` (`RUST_NIGHTLY`, today `nightly-2026-10-02`, and cargo-fuzz 0.13.2), which CI uses too; BayanDocs cloud sessions have both. From the repository's root:
+The targets use [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz), which needs a nightly Rust toolchain, so this folder is a separate Cargo workspace, excluded from the main one in the root `Cargo.toml`. Use the nightly version and the cargo-fuzz version pinned in the docs repository's `scripts/cloud-environment-setup.sh` (`RUST_NIGHTLY`, today `nightly-2026-11-16`, and cargo-fuzz 0.13.2), which CI uses too; BayanDocs cloud sessions have both. From the repository's root:
 
 ```sh
-cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu
-cargo +nightly-2026-10-02 fuzz run --target x86_64-unknown-linux-gnu zip_archive fuzz/corpus/zip_archive -- -max_total_time=600 -dict=fuzz/dictionaries/zip.dict -rss_limit_mb=2048 -timeout=10
+cargo +nightly-2026-11-16 fuzz build --target x86_64-unknown-linux-gnu
+cargo +nightly-2026-11-16 fuzz run --target x86_64-unknown-linux-gnu zip_archive fuzz/corpus/zip_archive -- -max_total_time=600 -dict=fuzz/dictionaries/zip.dict -rss_limit_mb=2048 -timeout=10
 ```
 
 `--target` names the host explicitly because cargo-fuzz's release build is statically linked (musl) and would otherwise build for its own target. Use `-dict=fuzz/dictionaries/xml.dict` for bayan-opc's targets that read XML, and `-dict=fuzz/dictionaries/ooxml.dict` (WordprocessingML and Markup Compatibility) for bayan-xml's. To run the targets the way CI does, with its seeds, settings and summary, use `ci.py` (Python 3.11 or later, standard library only) after building them:
@@ -47,7 +47,7 @@ python3 -I fuzz/ci.py minimize --all
 The targets of the engine and of CRDT updates (CORE-010) keep their code in a library of this workspace, `src/` (`bayan_fuzz`), whose tests run their checks without a fuzzing engine. CI runs them before fuzzing; run them after changing `src/`:
 
 ```sh
-cargo +nightly-2026-10-02 test --locked --manifest-path fuzz/Cargo.toml --lib
+cargo +nightly-2026-11-16 test --locked --manifest-path fuzz/Cargo.toml --lib
 ```
 
 ## In CI
@@ -130,7 +130,7 @@ What a run finds stays private, because it can disclose a vulnerability. libFuzz
 
    ```sh
    git checkout <commit>
-   cargo +nightly-2026-10-02 fuzz build --target x86_64-unknown-linux-gnu
+   cargo +nightly-2026-11-16 fuzz build --target x86_64-unknown-linux-gnu
    python3 -I fuzz/ci.py seeds fuzz/seeds
    python3 -I fuzz/ci.py run package_default_limits --seconds 1800 --seeds fuzz/seeds
    ```
@@ -138,8 +138,8 @@ What a run finds stays private, because it can disclose a vulnerability. libFuzz
    When the target fails, `ci.py` says where its log is (`fuzz/logs/<target>.log`, with the panic message and its stack trace, or libFuzzer's report of a timeout, of running out of memory or of a leak) and where the input that failed is (`fuzz/artifacts/<target>/`, named by what went wrong and by its SHA-1: `crash-…`, `timeout-…`, `oom-…` or `leak-…`). Run the target on that input alone, with the target's options from the settings above for a timeout or out of memory, and let `cargo fuzz tmin` shrink it to the smallest input that still fails. An `oom-…` input may not be the one that used the memory: libFuzzer checks the peak memory only once a second and blames the input that is running at that moment, so if the kept input alone stays within the limit, find the failure again by running the target, as above:
 
    ```sh
-   cargo +nightly-2026-10-02 fuzz run --target x86_64-unknown-linux-gnu package_default_limits fuzz/artifacts/package_default_limits/crash-<sha1> -- -rss_limit_mb=2048 -timeout=60
-   cargo +nightly-2026-10-02 fuzz tmin --target x86_64-unknown-linux-gnu package_default_limits fuzz/artifacts/package_default_limits/crash-<sha1>
+   cargo +nightly-2026-11-16 fuzz run --target x86_64-unknown-linux-gnu package_default_limits fuzz/artifacts/package_default_limits/crash-<sha1> -- -rss_limit_mb=2048 -timeout=60
+   cargo +nightly-2026-11-16 fuzz tmin --target x86_64-unknown-linux-gnu package_default_limits fuzz/artifacts/package_default_limits/crash-<sha1>
    ```
 
    For `crdt_import`, the log also says why the panic was not Loro's (for example `raised in /…/crates/bayan-crdt/src/import.rs`), with the whole backtrace; an abort or running out of memory has the sanitizer's report instead. The input's first byte chooses the preset and the base document (`src/crdt.rs`). Whose code failed decides who reports it: the first frame outside the standard library, counting outward from the one that raised the panic or made the allocation, is BayanDocs' or another project's.
@@ -149,7 +149,7 @@ What a run finds stays private, because it can disclose a vulnerability. libFuzz
 
 ## Rules
 
-- **The harness of the engine's and the CRDT's targets is tested.** Its library in `src/` has tests (`cargo +nightly-2026-10-02 test --locked --manifest-path fuzz/Cargo.toml --lib`), which the fuzzing workflow runs before it fuzzes; a change to `src/` keeps them passing. The JSON Schema validator it uses is the engine tests' own file (`crates/bayan-engine/tests/engine/support/schema_validator.rs`), compiled by its path.
+- **The harness of the engine's and the CRDT's targets is tested.** Its library in `src/` has tests (`cargo +nightly-2026-11-16 test --locked --manifest-path fuzz/Cargo.toml --lib`), which the fuzzing workflow runs before it fuzzes; a change to `src/` keeps them passing. The JSON Schema validator it uses is the engine tests' own file (`crates/bayan-engine/tests/engine/support/schema_validator.rs`), compiled by its path.
 
 - Its `Cargo.lock` is committed, and its dependencies follow the same rules as the main workspace: exact pins, at least 24 hours old, licenses on the allowlist (ADR-0017). Resolve it with the pinned stable toolchain of `rust-toolchain.toml` at the root, whose Cargo enforces the 24-hour minimum age (`cargo update` in this folder), and give every package that the main `Cargo.lock` also has that lockfile's version (`cargo update -p <package>@<new> --precise <main's>`), because a fresh resolution picks newer ones. CI builds the targets from it with `cargo fetch --locked` and fails if building would change it.
 - **License check:** `cargo xtask verify` checks this workspace's dependencies with cargo-deny against its own `deny.toml`: the main policy plus one exception, the NCSA license of libFuzzer that libfuzzer-sys bundles, which ADR-0017's amendment of 2026-10-08 accepts for fuzzing dependencies that never ship. The exception is for that one crate and never goes into the main workspace's `deny.toml` (an xtask test keeps it so).

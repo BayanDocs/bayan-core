@@ -18,7 +18,7 @@ use crate::{json, notices};
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 /// The nightly toolchain that runs Miri: the BayanDocs cloud environment's nightly (`RUST_NIGHTLY` in the docs repository's `scripts/cloud-environment-setup.sh`). `scripts/dev-setup.sh` installs it with Miri, and a test keeps the two equal; change them in the monthly dependency session.
-pub const MIRI_TOOLCHAIN: &str = "nightly-2026-10-02";
+pub const MIRI_TOOLCHAIN: &str = "nightly-2026-11-16";
 
 /// The licence of the artifacts, as an SPDX expression in the form of REUSE metadata and of the files under `LICENSES/` that hold it (ADR-0003 §4).
 const LICENSE: &str = "GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission";

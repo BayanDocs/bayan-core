@@ -1,4 +1,4 @@
-//! The harness of the fuzz targets of the engine boundary and of CRDT updates (work package CORE-010), shared by their targets in `fuzz_targets/` and tested here with `cargo +nightly-2026-10-02 test --manifest-path fuzz/Cargo.toml --lib`, which needs no fuzzing engine (README.md, "Targets").
+//! The harness of the fuzz targets of the engine boundary and of CRDT updates (work package CORE-010), shared by their targets in `fuzz_targets/` and tested here with `cargo +nightly-2026-11-16 test --manifest-path fuzz/Cargo.toml --lib`, which needs no fuzzing engine (README.md, "Targets").
 //!
 //! - [`engine`]: `engine_messages`, `engine_tile`, `engine_config` and `engine_replay`.
 //! - [`crdt`]: `crdt_import`, with [`loro_panics`], which tells Loro's panics from all others.

@@ -42,8 +42,8 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental compilation helps only when one machine rebuilds again and again, which this job never does.
   CARGO_INCREMENTAL: 0
-  # The nightly toolchain that cargo-fuzz needs (for AddressSanitizer and libFuzzer's instrumentation): the BayanDocs cloud environment's RUST_NIGHTLY (docs/scripts/cloud-environment-setup.sh), built on 2026-10-02. Must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs and scripts/dev-setup.sh (an xtask test checks this). Change it only in the monthly dependency session.
-  FUZZ_TOOLCHAIN: nightly-2026-10-02
+  # The nightly toolchain that cargo-fuzz needs (for AddressSanitizer and libFuzzer's instrumentation): the BayanDocs cloud environment's RUST_NIGHTLY (docs/scripts/cloud-environment-setup.sh), built on 2026-11-16. Must equal MIRI_TOOLCHAIN in xtask/src/artifacts.rs and scripts/dev-setup.sh (an xtask test checks this). Change it only in the monthly dependency session.
+  FUZZ_TOOLCHAIN: nightly-2026-11-16
   # cargo-fuzz 0.13.2 (published 2026-06-09), its release archive for x86-64 Linux, a statically linked (musl) build. The release publishes no checksum file; the SHA-256 is the one that the cargo-fuzz line of BINARIES in docs/scripts/cloud-environment-setup.sh pins. Change both only in the monthly dependency session.
   CARGO_FUZZ_VERSION: 0.13.2
   CARGO_FUZZ_SHA256: b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c

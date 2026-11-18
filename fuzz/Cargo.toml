@@ -10,7 +10,7 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
-# The harness of the engine's and the CRDT's targets (CORE-010), which those targets share and this crate's tests check without a fuzzing engine: `cargo +nightly-2026-10-02 test --manifest-path fuzz/Cargo.toml --lib` (README.md).
+# The harness of the engine's and the CRDT's targets (CORE-010), which those targets share and this crate's tests check without a fuzzing engine: `cargo +nightly-2026-11-16 test --manifest-path fuzz/Cargo.toml --lib` (README.md).
 [lib]
 name = "bayan_fuzz"
 path = "src/lib.rs"
