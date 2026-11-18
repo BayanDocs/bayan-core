@@ -18,7 +18,7 @@ use bayan_crdt::{
     PropertyMap, Registry, Stories, Story, UndoManager, Value, Version, VersionVector,
 };
 
-use crate::loro_panics::{self, Lockfile, Owner, Package};
+use crate::loro_panics::{self, Lockfile, Owner, Package, StdLibrary};
 
 /// The mark families of the document model (`crates/bayan-model/src/marks.rs`): run properties continue at the end of a run, links, comments and revisions never expand.
 pub const FAMILIES: [MarkFamily; 4] = [
@@ -75,21 +75,29 @@ pub fn loro_panics() -> u64 {
 ///
 /// # Errors
 ///
-/// When the lockfile compiled into the target cannot be read, or does not name Loro's packages; the target then stops before it fuzzes anything.
+/// When the lockfile compiled into the target cannot be read, or does not name Loro's packages, or the target's debug information does not show where the standard library's files are ([`StdLibrary::of_this_program`]); the target then stops before it fuzzes anything.
 pub fn install_panic_hook() -> Result<(), String> {
     let lockfile = Lockfile::parse(crate::LOCKFILE)?;
     let loro = loro_panics::loro_packages(&lockfile, "bayan-fuzz")?;
-    install_panic_hook_for(lockfile, loro);
-    Ok(())
+    install_panic_hook_for(lockfile, loro)
 }
 
 /// The hook of [`install_panic_hook`], which lets the panics of the packages `loro` unwind: Loro's packages, or, in this crate's tests, a package that stands in for them, because no input may make Loro panic (`tests.rs`).
-pub(crate) fn install_panic_hook_for(lockfile: Lockfile, loro: BTreeSet<Package>) {
+///
+/// # Errors
+///
+/// When the program's debug information does not show where the standard library's files are ([`StdLibrary::of_this_program`]); the hook that is installed then stays.
+pub(crate) fn install_panic_hook_for(
+    lockfile: Lockfile,
+    loro: BTreeSet<Package>,
+) -> Result<(), String> {
+    // Read once, before the hook replaces the one that is installed: the hook then decides from the program's frames alone.
+    let std_library = StdLibrary::of_this_program()?;
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let owner = loro_panics::frames(&format!("{backtrace:?}"))
-            .map(|frames| loro_panics::owner(&frames, &lockfile, &loro));
+            .map(|frames| loro_panics::owner(&frames, &lockfile, &loro, &std_library));
         match owner {
             Ok(Owner::Loro(_)) => {
                 LORO_PANICS.fetch_add(1, Ordering::SeqCst);
@@ -104,6 +112,7 @@ pub(crate) fn install_panic_hook_for(lockfile: Lockfile, loro: BTreeSet<Package>
             }
         }
     }));
+    Ok(())
 }
 
 /// A small deterministic pseudo-random generator (xorshift64*), so that the seeds are the same on every run and the mutator follows libFuzzer's seed.
