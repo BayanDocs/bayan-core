@@ -1164,7 +1164,7 @@ mod tests {
         );
     }
 
-    /// The fuzz workspace builds bayan-crdt, and with it Loro, so it needs the advisory exceptions of Loro's dependencies that ADR-0008's amendment of 2026-10-08 accepts (CORE-010), and no other: its `deny.toml` copies the main policy's, with the same reasons, so that the two policies differ only by libFuzzer's NCSA license.
+    /// The fuzz workspace builds bayan-crdt, and with it Loro, so it needs the advisory exceptions of Loro's dependencies (the six that ADR-0008's amendment of 2026-10-08 accepts, CORE-010, and the nine for heapless of SEC-HEAPLESS), and no other: its `deny.toml` copies the main policy's, with the same reasons, so that the two policies differ only by libFuzzer's NCSA license.
     #[test]
     fn the_fuzz_workspace_ignores_the_same_advisories() {
         fn ignored(text: &str) -> Vec<&str> {
