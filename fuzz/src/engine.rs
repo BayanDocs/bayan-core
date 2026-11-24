@@ -29,7 +29,7 @@ const LAST_TILE_PIXELS: u64 = 8 * 10;
 /// The request of the tile that `engine_messages` renders after the input, of the whole first page of document `doc_id`: [`LAST_TILE_PIXELS`] pixels.
 fn last_tile(doc_id: u64) -> String {
     format!(
-        r#"{{"v":0,"id":3,"type":"render.tile","payload":{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":10}}}}"#
+        r#"{{"v":1,"id":3,"type":"render.tile","payload":{{"doc_id":{doc_id},"page":0,"rect":{{"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":10}}}}"#
     )
 }
 
@@ -242,7 +242,7 @@ fn engine_after_hello(config: Config) -> Engine {
     let mut engine = Engine::new(config, blobs);
     let welcome = send(
         &mut engine,
-        br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+        br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#,
     );
     assert_eq!(welcome[0]["type"], json!("welcome"));
     engine
@@ -295,7 +295,7 @@ pub fn messages_with(config: Config, data: &[u8]) {
     let id = bayan_engine::limits::MAX_ID;
     let welcome = send(
         &mut engine,
-        format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#)
+        format!(r#"{{"v":1,"id":{id},"type":"hello","payload":{{"protocol_versions":[1]}}}}"#)
             .as_bytes(),
     );
     assert_eq!(
@@ -305,7 +305,7 @@ pub fn messages_with(config: Config, data: &[u8]) {
     );
     let opened = send(
         &mut engine,
-        format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+        format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
             .as_bytes(),
     );
     let doc_id = opened[0]
@@ -336,7 +336,7 @@ fn engine_with_document(config: Config) -> Engine {
     let mut engine = engine_after_hello(config);
     let opened = send(
         &mut engine,
-        format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+        format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
             .as_bytes(),
     );
     assert_eq!(opened[0].pointer("/payload/doc_id"), Some(&json!(1)));
@@ -371,7 +371,7 @@ pub fn tile(data: &[u8]) {
     }
     let mut engine = engine_with_document(config());
     if record {
-        send(&mut engine, br#"{"v":0,"id":3,"type":"diag.record.start"}"#);
+        send(&mut engine, br#"{"v":1,"id":3,"type":"diag.record.start"}"#);
     }
     let outcome = engine.render_tile(request, width, height, 7);
     assert!(
@@ -392,7 +392,7 @@ pub fn tile(data: &[u8]) {
     }
     if record {
         // Not through `send`, which would release the recording's blob.
-        let answers = engine.handle(br#"{"v":0,"id":4,"type":"diag.record.stop"}"#, 9);
+        let answers = engine.handle(br#"{"v":1,"id":4,"type":"diag.record.stop"}"#, 9);
         let stopped = check_answer(&answers[0]);
         let blob = stopped
             .pointer("/payload/blob")
@@ -438,7 +438,7 @@ pub fn config_json(data: &[u8]) {
     );
     let mut engine = engine_after_hello(config);
     if !config.allow_panic {
-        let refused = send(&mut engine, br#"{"v":0,"id":2,"type":"diag.panic"}"#);
+        let refused = send(&mut engine, br#"{"v":1,"id":2,"type":"diag.panic"}"#);
         assert_eq!(
             refused[0].pointer("/error/code"),
             Some(&json!("not_allowed"))
@@ -532,25 +532,25 @@ mod tests {
 
     #[test]
     fn counts_the_pixels_the_engine_would_render() {
-        assert_eq!(message_pixels(br#"{"v":0,"id":4,"type":"render.tile","payload":{"doc_id":1,"page":0,"rect":{},"width":8,"height":3}}"#), 24);
+        assert_eq!(message_pixels(br#"{"v":1,"id":4,"type":"render.tile","payload":{"doc_id":1,"page":0,"rect":{},"width":8,"height":3}}"#), 24);
         // Invalid UTF-8 in a field the engine skips hides nothing.
-        assert_eq!(message_pixels(b"{\"v\":0,\"x\":\"\xff\",\"type\":\"render.tile\",\"payload\":{\"width\":4096,\"height\":4096}}"), 1 << 24);
+        assert_eq!(message_pixels(b"{\"v\":1,\"x\":\"\xff\",\"type\":\"render.tile\",\"payload\":{\"width\":4096,\"height\":4096}}"), 1 << 24);
         // Escapes in the type are read as the engine reads them.
         assert_eq!(
-            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":2,"height":2}}"#),
+            message_pixels(br#"{"v":1,"type":"render.tile","payload":{"width":2,"height":2}}"#),
             4
         );
         // Sizes the engine refuses cost nothing.
         assert_eq!(
-            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":4097,"height":2}}"#),
+            message_pixels(br#"{"v":1,"type":"render.tile","payload":{"width":4097,"height":2}}"#),
             0
         );
         assert_eq!(
-            message_pixels(br#"{"v":0,"type":"render.tile","payload":{"width":0,"height":2}}"#),
+            message_pixels(br#"{"v":1,"type":"render.tile","payload":{"width":0,"height":2}}"#),
             0
         );
         assert_eq!(
-            message_pixels(br#"{"v":0,"type":"diag.replay","payload":{"blob":3}}"#),
+            message_pixels(br#"{"v":1,"type":"diag.replay","payload":{"blob":3}}"#),
             recording_pixels(SESSION_RECORDING)
         );
         assert!(recording_pixels(SESSION_RECORDING) > 0);
@@ -564,7 +564,7 @@ mod tests {
         let mut engine = engine_after_hello(config());
         let opened = send(
             &mut engine,
-            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
+            format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
                 .as_bytes(),
         );
         let doc_id = opened[0]
@@ -593,7 +593,7 @@ mod tests {
     fn counts_a_message_with_fields_nested_deeper_than_a_value_reads() {
         let nested = nested();
         let message = format!(
-            r#"{{"v":0,"id":4,"skipped":{nested},"type":"render.tile","payload":{{"skipped":{nested},"doc_id":1,"page":0,"rect":{{"skipped":{nested},"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":3}}}}"#
+            r#"{{"v":1,"id":4,"skipped":{nested},"type":"render.tile","payload":{{"skipped":{nested},"doc_id":1,"page":0,"rect":{{"skipped":{nested},"x":0,"y":0,"width":15544800,"height":20116800}},"width":8,"height":3}}}}"#
         );
         assert_eq!(message_pixels(message.as_bytes()), 24);
         // The engine skips those fields and renders the tile: 8 pixels of 4 bytes a row.
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn the_seeds_pass() {
-        messages(b"{\"v\":0,\"id\":2,\"type\":\"doc.open\",\"payload\":{\"blob\":1}}\n{\"v\":0,\"id\":3,\"type\":\"diag.replay\",\"payload\":{\"blob\":3}}\n{\"v\":0,\"id\":4,\"type\":\"diag.panic\"}");
+        messages(b"{\"v\":1,\"id\":2,\"type\":\"doc.open\",\"payload\":{\"blob\":1}}\n{\"v\":1,\"id\":3,\"type\":\"diag.replay\",\"payload\":{\"blob\":3}}\n{\"v\":1,\"id\":4,\"type\":\"diag.panic\"}");
         let mut input = vec![1, 64, 0, 48, 0];
         input.extend_from_slice(REFERENCE_TILE);
         tile(&input);

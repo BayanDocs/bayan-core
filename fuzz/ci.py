@@ -253,7 +253,7 @@ def jsonl(*messages: object) -> bytes:
 
 def request(id_: int, kind: str, payload: object = None) -> Dict[str, object]:
     """A request envelope (engine protocol §4); without a payload, the message has none."""
-    message: Dict[str, object] = {"v": 0, "id": id_, "type": kind}
+    message: Dict[str, object] = {"v": 1, "id": id_, "type": kind}
     if payload is not None:
         message["payload"] = payload
     return message
@@ -279,7 +279,7 @@ def engine_sessions() -> List[bytes]:
         request(11, "query.a11y", {"doc_id": 1}),
         request(12, "query.a11y", {"doc_id": 1, "node": 5}),
         request(13, "ui.manifest", {"locale": "ar"}),
-        {"v": 0, "type": "input.key", "payload": {"doc_id": 1, "key": "Backspace"}},
+        {"v": 1, "type": "input.key", "payload": {"doc_id": 1, "key": "Backspace"}},
         request(14, "doc.close", {"doc_id": 1}),
     )
     recording = jsonl(
@@ -297,18 +297,18 @@ def engine_sessions() -> List[bytes]:
         b"not json",
         b"[]",
         b"{\"v\":0,\"id\":2,\"type\":\"ui.manifest\",\"type\":\"ui.manifest\"}",
-        {"v": 1, "id": 3, "type": "ui.manifest"},
-        {"v": 0, "id": 0, "type": "ui.manifest"},
-        {"v": 0, "id": 9007199254740992, "type": "ui.manifest"},
-        {"v": 0, "type": "no.such.message"},
-        request(4, "hello", {"protocol_versions": [1, 2]}),
+        {"v": 0, "id": 3, "type": "ui.manifest"},
+        {"v": 1, "id": 0, "type": "ui.manifest"},
+        {"v": 1, "id": 9007199254740992, "type": "ui.manifest"},
+        {"v": 1, "type": "no.such.message"},
+        request(4, "hello", {"protocol_versions": [0, 2]}),
         request(5, "diag.panic"),
         request(6, "render.tile", tile),
         request(7, "doc.open", {"blob": 99}),
         request(8, "doc.open", {"blob": 0}),
         request(9, "doc.open"),
         request(10, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 1, "height": 1}, "zoom": 0, "device_scale": 1}),
-        request(11, "hello", {"protocol_versions": [0], "shell": {"name": "x", "version": "1", "platform": "p"}}),
+        request(11, "hello", {"protocol_versions": [1], "shell": {"name": "x", "version": "1", "platform": "p", "runtime": "r"}}),
         request(12, "query.a11y", {"doc_id": 1}),
     )
     limits = jsonl(
@@ -320,7 +320,26 @@ def engine_sessions() -> List[bytes]:
         request(24, "render.tile", dict(tile, page=3)),
         request(25, "input.pointer", {"doc_id": 1, "kind": "move", "x": 1e9, "y": -1e9, "button": 0}),
     )
-    return [document, recording, refusals, limits]
+    # Protocol v1 (CORE-013): hello read whatever its v, the platform and runtime, the keys they resolve, the view modes that invalidate, and ranges of an accessibility node's children.
+    version_1 = jsonl(
+        {"v": 0, "id": 2, "type": "hello", "payload": {"protocol_versions": [0, 1], "shell": {"platform": "macos", "runtime": "browser"}}},
+        {"v": 2, "id": 3, "type": "ui.manifest"},
+        request(4, "ui.manifest", {"locale": "en"}),
+        request(5, "doc.open", {"blob": 1}),
+        request(6, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 640, "height": 480}, "zoom": 2, "device_scale": 1, "mode": "web", "show_formatting_marks": True}),
+        request(7, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 800, "height": 480}, "zoom": 1, "device_scale": 1, "mode": "focus"}),
+        request(8, "input.text", {"doc_id": 1, "text": "ab"}),
+        request(9, "input.key", {"doc_id": 1, "key": "b", "code": "KeyB", "modifiers": {"meta": True}}),
+        request(10, "input.key", {"doc_id": 1, "key": "PageDown", "code": "PageDown", "modifiers": {"ctrl": True}}),
+        request(11, "input.key", {"doc_id": 1, "key": "и", "code": "KeyB", "modifiers": {"ctrl": True, "alt": True}}),
+        request(12, "input.key", {"doc_id": 1, "key": "ArrowLeft", "code": "ArrowLeft", "modifiers": {"shift": True}, "composing": True}),
+        request(13, "query.a11y", {"doc_id": 1, "children": {"start": 2, "count": 3}}),
+        request(14, "query.a11y", {"doc_id": 1, "node": 1, "children": {"start": 4294967295, "count": 4294967295}}),
+        request(15, "query.a11y", {"doc_id": 1, "children": {"start": 0, "count": 0}}),
+        request(16, "render.tile", tile),
+        request(17, "hello", {"protocol_versions": [1], "shell": {"platform": "windows", "runtime": "native"}}),
+    )
+    return [document, recording, refusals, limits, version_1]
 
 
 def tile_requests() -> List[bytes]:
