@@ -714,8 +714,8 @@ fn blobs_and_tiles_are_written_into_buffers_that_were_never_initialized() {
 
 /// Moves the engine's clock forward, as if `ms` milliseconds had passed.
 fn advance_clock(engine: *mut BayanEngine, ms: u64) {
-    // SAFETY: `engine` is live; the offset is an atomic that the engine only reads.
-    let engine = unsafe { &*engine };
+    // SAFETY: `engine` is null or live, as for the C functions: `as_ref` turns null into `None`, and the offset is an atomic that the engine only reads.
+    let engine = unsafe { engine.as_ref() }.expect("a live engine");
     engine.clock_offset_ms.fetch_add(ms, Ordering::SeqCst);
 }
 
