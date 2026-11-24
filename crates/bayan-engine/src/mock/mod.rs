@@ -2,11 +2,14 @@
 //!
 //! It exists so the shells can prove scrolling, tiles, input and accessibility end to end (DESK-002, WEB-002). Its pages hold a heading, paragraphs, a bulleted list, a small table and, on the first page, an **editable line** that shows the text the shell sends: committed text as dark boxes, one per character, and input method composition as blue boxes with an underline (thicker under the composition's selected part), so the input method path is visible. Text is drawn as grey bars ("greeked") until the text pipeline exists (CORE-003); screen readers get the real words through the accessibility tree.
 //!
-//! The editable line understands `input.text`, `input.composition`, the document keys `Backspace`, `Delete`, `ArrowLeft`, `ArrowRight`, `Home` and `End` (with any modifiers, as spec §14.3 matches document keys), and a primary-button press inside it, which moves the caret. It holds at most 1,024 UTF-16 code units of text and 256 of composition. Its render revision grows with every change to what its tiles show: the editable line's text and composition, but not the caret, which the shell draws over the tiles, and the view's mode and formatting marks; it lays every mode out like `print` (spec §14.6).
+//! The editable line understands `input.text` (also with `replace`, a range of its text), `input.select`, `input.paste` and `clipboard.copy` (spec §14.4, §14.5), `input.composition`, the document keys `Backspace`, `Delete`, `ArrowLeft`, `ArrowRight`, `Home` and `End` (with any modifiers, as spec §14.3 matches document keys; with Shift, the arrows, Home and End extend the selection), and a primary-button press inside it, which moves the caret. It holds at most 1,024 UTF-16 code units of text and 256 of composition, also when text is pasted. It is the only text that holds a caret or a selection, which the shell draws from `overlay.update`. Its render revision grows with every change to what its tiles show: the editable line's text and composition, but not the caret or the selection, which the shell draws over the tiles, and the view's mode and formatting marks; it lays every mode out like `print` (spec §14.6).
+//!
+//! The document is in English, left to right, which every node inherits, except for one paragraph on the last page in Arabic, right to left, with an English phrase in it, so that the shells can test language, direction and runs (spec §14.7); every node with text reports where its lines start. `query.hit` finds the text position at a point from the same lines and character boxes that the accessibility tree reports (spec §14.4).
 
 mod content;
 mod editable;
 mod geometry;
+mod hit;
 mod layout;
 mod text;
 
@@ -16,23 +19,59 @@ use serde::{Deserialize, Serialize};
 
 use crate::limits::MAX_ID;
 use crate::protocol::{
-    A11yCaret, A11yNode, A11yRole, Caret, CharBox, PageInfo, PageRect, Rect, TextRange, ViewMode,
+    A11yCaret, A11yNode, A11yRole, A11ySelection, Caret, CharBox, Hit, PageInfo, PageRect, Rect,
+    SelectionRects, TextPosition, TextRange, ViewMode,
 };
 use crate::raster::{Shape, TileGeometry, rasterize};
 
-pub(crate) use editable::TooLong;
-use editable::{EditableLine, Shown};
+use editable::{EditError, EditableLine, Shown};
+pub(crate) use editable::{TooLong, clipboard_text};
 use geometry::{
     ACCENT, CARET_WIDTH, CHAR_GAP, CHAR_HEIGHT, EDITABLE_BORDER, EDITABLE_FILL, EDITABLE_PADDING,
     INK, PAGE_GAP, PAGE_HEIGHT, PAGE_WIDTH, UNDERLINE,
 };
-use layout::{DOCUMENT_ID, Layout, Slot};
-use text::{BODY, advance};
+use layout::{DOCUMENT_ID, Layout, Lines, Slot};
+use text::{BODY, HitItem, HitLine, advance};
 
 /// The fixed part of the mock document, laid out the first time it is needed.
 fn fixed() -> &'static Layout {
     static LAYOUT: OnceLock<Layout> = OnceLock::new();
     LAYOUT.get_or_init(layout::lay_out)
+}
+
+/// Why the mock document refuses a text position or range that the shell sent (spec §14.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextError {
+    /// The node does not exist (`not_found`).
+    NotFound,
+    /// The node is not editable, or the position or range lies beyond its text, backwards or inside a surrogate pair (`invalid_request`).
+    Invalid,
+    /// The text would be longer than its limit (`limit_exceeded`).
+    TooLong,
+}
+
+impl From<EditError> for TextError {
+    fn from(error: EditError) -> Self {
+        match error {
+            EditError::Invalid => Self::Invalid,
+            EditError::TooLong => Self::TooLong,
+        }
+    }
+}
+
+/// Checks that the nodes `ids` exist and are editable: in the mock document, only the editable line is, until editing arrives (Phase 2). A node that does not exist counts before one that is not editable.
+fn editable_nodes(ids: &[u64]) -> Result<(), TextError> {
+    let layout = fixed();
+    if ids
+        .iter()
+        .any(|id| !(DOCUMENT_ID..=layout.last_id).contains(id))
+    {
+        return Err(TextError::NotFound);
+    }
+    if ids.iter().any(|&id| id != layout.editable_id) {
+        return Err(TextError::Invalid);
+    }
+    Ok(())
 }
 
 /// What the shell last told the engine about its view of a document (`view.set`).
@@ -257,8 +296,45 @@ impl MockDocument {
                 width: CARET_WIDTH,
                 height: BODY.line_pitch,
             },
-            visible: true,
+            // While text is selected the shell shows the selection, not the caret, as Word does; the caret's place still serves input methods and magnifiers.
+            visible: !self.has_selection(),
         }
+    }
+
+    /// Whether text is selected.
+    fn has_selection(&self) -> bool {
+        self.line.shown_anchor() != self.line.shown_caret()
+    }
+
+    /// The selection's rectangles (spec §6.3): over the selected characters of the editable line, which neither wraps nor scrolls, clipped to its frame as the caret is; none when nothing is selected or nothing selected lies inside the frame.
+    pub(crate) fn selection_rects(&self) -> Vec<SelectionRects> {
+        if !self.has_selection() {
+            return Vec::new();
+        }
+        let region = fixed().editable;
+        let area = text_area(region.rect);
+        let edges = positions(&self.line.shown());
+        let edge = |index: u32| {
+            let offset = edges
+                .get(usize::try_from(index).unwrap_or(usize::MAX))
+                .copied()
+                .unwrap_or(0);
+            (area.left + offset).min(area.right)
+        };
+        let (anchor, focus) = (self.line.shown_anchor(), self.line.shown_caret());
+        let (left, right) = (edge(anchor.min(focus)), edge(anchor.max(focus)));
+        if left >= right {
+            return Vec::new();
+        }
+        vec![SelectionRects {
+            page: region.page,
+            rects: vec![Rect {
+                x: left,
+                y: area.top,
+                width: right - left,
+                height: BODY.line_pitch,
+            }],
+        }]
     }
 
     /// The editable line's accessibility node. The line neither wraps nor scrolls, so characters past its frame (after about the 99th) are not drawn; their boxes continue beyond the frame's right edge, possibly beyond the page (spec §6.6).
@@ -292,26 +368,53 @@ impl MockDocument {
             editable: true,
             bounds: Some(layout.editable),
             chars: Some(chars),
+            lang: None,
+            dir: None,
+            runs: None,
+            // The line neither wraps nor scrolls: one line.
+            line_starts: Some(vec![0]),
             child_count: None,
             children_start: None,
             children: None,
         }
     }
 
-    /// The accessibility caret: in the editable line, in UTF-16 code units.
-    pub(crate) fn a11y_caret(&self) -> A11yCaret {
-        let index = usize::try_from(self.line.shown_caret()).unwrap_or(usize::MAX);
+    /// The UTF-16 offset of the editable line's shown character `index`.
+    fn units(&self, index: u32) -> u32 {
         let offset: usize = self
             .line
             .shown()
             .iter()
-            .take(index)
+            .take(usize::try_from(index).unwrap_or(usize::MAX))
             .map(|shown| shown.character.len_utf16())
             .sum();
+        u32::try_from(offset).unwrap_or(u32::MAX)
+    }
+
+    /// The accessibility caret: in the editable line, in UTF-16 code units.
+    pub(crate) fn a11y_caret(&self) -> A11yCaret {
         A11yCaret {
             node: fixed().editable_id,
-            offset: u32::try_from(offset).unwrap_or(u32::MAX),
+            offset: self.units(self.line.shown_caret()),
         }
+    }
+
+    /// The accessibility tree's selection (spec §14.7): the editable line's, in UTF-16 code units, or none when nothing is selected.
+    pub(crate) fn a11y_selection(&self) -> Vec<A11ySelection> {
+        if !self.has_selection() {
+            return Vec::new();
+        }
+        let node = fixed().editable_id;
+        vec![A11ySelection {
+            anchor: TextPosition {
+                node,
+                offset: self.units(self.line.shown_anchor()),
+            },
+            focus: TextPosition {
+                node,
+                offset: self.units(self.line.shown_caret()),
+            },
+        }]
     }
 
     /// The whole accessibility tree.
@@ -320,7 +423,7 @@ impl MockDocument {
             .slots
             .iter()
             .map(|slot| match slot {
-                Slot::Fixed(node) => node.clone(),
+                Slot::Fixed(node) => node.as_ref().clone(),
                 Slot::Editable => self.editable_node(),
             })
             .collect();
@@ -333,18 +436,23 @@ impl MockDocument {
             editable: false,
             bounds: None,
             chars: None,
+            lang: Some(content::DOCUMENT_LANG.to_owned()),
+            dir: Some(content::DOCUMENT_DIR),
+            runs: None,
+            line_starts: None,
             child_count: None,
             children_start: None,
             children: Some(children),
         }
     }
 
-    /// The accessibility tree and the accessibility caret within the depth limit of spec §14.7, flattened below level 64; the mock document's tree is three levels deep, so nothing is.
-    pub(crate) fn a11y_tree_and_caret(&self) -> (A11yNode, Option<A11yCaret>) {
+    /// The accessibility tree, its caret and its selection within the depth limit of spec §14.7, flattened below level 64; the mock document's tree is three levels deep, so nothing is.
+    pub(crate) fn a11y_state(&self) -> (A11yNode, Option<A11yCaret>, Vec<A11ySelection>) {
         let mut tree = self.a11y_tree();
         let mut caret = Some(self.a11y_caret());
-        crate::a11y::flatten(&mut tree, &mut caret);
-        (tree, caret)
+        let mut selection = self.a11y_selection();
+        crate::a11y::flatten_with_selection(&mut tree, &mut caret, &mut selection);
+        (tree, caret, selection)
     }
 
     /// The identifier of the editable line's accessibility node.
@@ -394,9 +502,106 @@ impl MockDocument {
         self.edit(|line| line.insert(text))
     }
 
-    /// Applies an editing key (`input.key`).
-    pub(crate) fn key(&mut self, key: &str) -> bool {
-        self.edit(|line| line.key(key))
+    /// Applies an editing key (`input.key`); `shift` extends the selection with the arrows, Home and End.
+    pub(crate) fn key(&mut self, key: &str, shift: bool) -> bool {
+        self.edit(|line| line.key(key, shift))
+    }
+
+    /// Replaces the UTF-16 range `start` to `end` of node `node`'s text (`input.text` with `replace`, spec §14.4). Returns whether anything changed.
+    pub(crate) fn replace_text(
+        &mut self,
+        node: u64,
+        start: u32,
+        end: u32,
+        text: &str,
+    ) -> Result<bool, TextError> {
+        editable_nodes(&[node])?;
+        Ok(self.edit(|line| line.replace(start, end, text))?)
+    }
+
+    /// Sets the selection (`input.select`, spec §14.4). Returns whether it changed.
+    pub(crate) fn select(
+        &mut self,
+        anchor: TextPosition,
+        focus: TextPosition,
+    ) -> Result<bool, TextError> {
+        editable_nodes(&[anchor.node, focus.node])?;
+        Ok(self.line.select(anchor.offset, focus.offset)?)
+    }
+
+    /// The selected text, for `clipboard.copy` (spec §14.5); empty when nothing is selected.
+    pub(crate) fn selected_text(&self) -> String {
+        self.line.selected_text()
+    }
+
+    /// Deletes the selected text, for `clipboard.copy` with `cut`. Returns whether anything changed.
+    pub(crate) fn cut(&mut self) -> bool {
+        self.edit(EditableLine::cut)
+    }
+
+    /// The text position at a point in device-independent pixels from the view origin (`query.hit`, spec §14.4): `None` when the point is on no page, or before a `view.set` has given the zoom.
+    pub(crate) fn hit(&self, x: f64, y: f64) -> Option<Hit> {
+        let view = self.view?;
+        let (x, y) = (dip_to_blu(x, view.zoom)?, dip_to_blu(y, view.zoom)?);
+        let pitch = PAGE_HEIGHT + PAGE_GAP;
+        if !(0..PAGE_WIDTH).contains(&x) || y < 0 {
+            return None;
+        }
+        let (page, page_y) = (y / pitch, y % pitch);
+        if page_y >= PAGE_HEIGHT || page >= i64::from(Self::page_count()) {
+            return None;
+        }
+        let page = u32::try_from(page).ok()?;
+        let layout = fixed();
+        let editable = self.editable_line();
+        let lines = layout
+            .lines
+            .iter()
+            .flat_map(|lines| -> Vec<(u64, &HitLine)> {
+                match lines {
+                    Lines::Fixed {
+                        node,
+                        page: on,
+                        lines,
+                    } if *on == page => lines.iter().map(|line| (*node, line)).collect(),
+                    Lines::Editable if layout.editable.page == page => {
+                        vec![(layout.editable_id, &editable)]
+                    }
+                    Lines::Fixed { .. } | Lines::Editable => Vec::new(),
+                }
+            });
+        hit::hit(lines, x, page_y)
+    }
+
+    /// The editable line as hit-testing sees it: one line of its shown characters, left to right, with the boxes that its accessibility node reports.
+    fn editable_line(&self) -> HitLine {
+        let area = text_area(fixed().editable.rect);
+        let shown = self.line.shown();
+        let edges = positions(&shown);
+        let mut offset = 0_u32;
+        let items = shown
+            .iter()
+            .enumerate()
+            .map(|(index, character)| {
+                let units = u32::try_from(character.character.len_utf16()).unwrap_or(1);
+                let item = HitItem {
+                    left: area.left + edges[index],
+                    right: area.left + edges[index + 1],
+                    start: offset,
+                    end: offset + units,
+                    rtl: false,
+                };
+                offset += units;
+                item
+            })
+            .collect();
+        HitLine {
+            top: area.top,
+            bottom: area.top + BODY.line_pitch,
+            start: 0,
+            empty_x: area.left,
+            items,
+        }
     }
 
     /// Starts a composition (`input.composition` `start`).
@@ -465,6 +670,7 @@ impl MockDocument {
 mod tests {
     use super::geometry::BLU_PER_DIP;
     use super::*;
+    use crate::protocol::TextDirection;
 
     #[test]
     fn stacks_three_pages_with_gaps() {
@@ -544,10 +750,10 @@ mod tests {
         document.insert_text("ab").unwrap();
         assert_eq!(document.revision(), 2);
         // Moving the caret, or a key that changes nothing, keeps the revision.
-        assert!(document.key("ArrowLeft"));
-        assert!(!document.key("Escape"));
+        assert!(document.key("ArrowLeft", false));
+        assert!(!document.key("Escape", false));
         assert_eq!(document.revision(), 2);
-        assert!(document.key("Backspace"));
+        assert!(document.key("Backspace", false));
         assert_eq!(document.revision(), 3);
         // A composition shows in the tiles.
         assert!(document.start_composition());
@@ -566,10 +772,266 @@ mod tests {
         assert_eq!(document.revision(), MAX_ID);
     }
 
+    /// The mock document, viewed at zoom 1.
+    fn viewed() -> MockDocument {
+        MockDocument {
+            view: Some(View { zoom: 1.0 }),
+            ..MockDocument::default()
+        }
+    }
+
+    /// The point at page coordinates `x`, `y` of page `page`, in device-independent pixels from the view origin at zoom 1.
+    fn point(page: u32, x: i64, y: i64) -> (f64, f64) {
+        let dip = |blu: i64| f64::from(i32::try_from(blu).unwrap()) / 19_050.0;
+        (dip(x), dip(i64::from(page) * (PAGE_HEIGHT + PAGE_GAP) + y))
+    }
+
+    /// The caret and the character at a point of a page.
+    fn hit_at(
+        document: &MockDocument,
+        page: u32,
+        x: i64,
+        y: i64,
+    ) -> Option<(u64, u32, Option<u32>)> {
+        let (x, y) = point(page, x, y);
+        document
+            .hit(x, y)
+            .map(|hit| (hit.node, hit.caret, hit.character))
+    }
+
+    /// A node of the accessibility tree, its page and the box of its character `index`.
+    fn character(document: &MockDocument, node: u64, index: usize) -> (u32, Rect) {
+        let tree = document.a11y_tree();
+        let node = crate::a11y::find(&tree, node).unwrap();
+        (
+            node.bounds.unwrap().page,
+            node.chars.as_ref().unwrap()[index].rect,
+        )
+    }
+
+    #[test]
+    fn hits_both_halves_of_a_character_in_left_to_right_text() {
+        let mut document = MockDocument::default();
+        // Before a view.set the engine cannot place a point.
+        assert_eq!(document.hit(100.0, 100.0), None);
+        document.view = Some(View { zoom: 1.0 });
+        // The second character of the first heading (node 2).
+        let (page, rect) = character(&document, 2, 1);
+        let middle = rect.y + rect.height / 2;
+        assert_eq!(
+            hit_at(&document, page, rect.x, middle),
+            Some((2, 1, Some(1)))
+        );
+        assert_eq!(
+            hit_at(&document, page, rect.x + rect.width / 2 - 1, middle),
+            Some((2, 1, Some(1)))
+        );
+        // The exact middle counts as the right half.
+        assert_eq!(
+            hit_at(&document, page, rect.x + rect.width / 2, middle),
+            Some((2, 2, Some(1)))
+        );
+        assert_eq!(
+            hit_at(&document, page, rect.x + rect.width - 1, middle),
+            Some((2, 2, Some(1)))
+        );
+        // In the left margin beside the heading: the caret before its first character, and no character.
+        assert_eq!(hit_at(&document, page, 0, middle), Some((2, 0, None)));
+    }
+
+    #[test]
+    fn hits_both_halves_of_a_character_in_right_to_left_text() {
+        let document = viewed();
+        // The Arabic paragraph (node 35): its first character is the rightmost of its first line; its right half gives the offset before it.
+        let (page, first) = character(&document, 35, 0);
+        let middle = first.y + first.height / 2;
+        assert_eq!(
+            hit_at(&document, page, first.x + first.width - 1, middle),
+            Some((35, 0, Some(0)))
+        );
+        assert_eq!(
+            hit_at(&document, page, first.x, middle),
+            Some((35, 1, Some(0)))
+        );
+        // Right of the line, in the margin: the caret before the first character.
+        assert_eq!(
+            hit_at(&document, page, PAGE_WIDTH - 1, middle),
+            Some((35, 0, None))
+        );
+        // "H" (offset 52) of the English run, which runs left to right inside it.
+        let (_, h) = character(&document, 35, 52);
+        assert_eq!(
+            hit_at(&document, page, h.x, middle),
+            Some((35, 52, Some(52)))
+        );
+        assert_eq!(
+            hit_at(&document, page, h.x + h.width - 1, middle),
+            Some((35, 53, Some(52)))
+        );
+        // The second line starts at offset 84 at the right edge.
+        let (_, second) = character(&document, 35, 84);
+        assert_eq!(second.y, first.y + first.height);
+        assert_eq!(
+            hit_at(&document, page, second.x + second.width - 1, second.y),
+            Some((35, 84, Some(84)))
+        );
+    }
+
+    #[test]
+    fn between_lines_a_point_gets_the_nearer_line_and_between_pages_none() {
+        let document = viewed();
+        // Below the first heading, in the space before the first paragraph (node 3), nearer the heading.
+        let (page, heading) = character(&document, 2, 1);
+        let (_, paragraph) = character(&document, 3, 1);
+        let below = heading.y + heading.height;
+        assert!(below < paragraph.y);
+        assert_eq!(
+            hit_at(&document, page, heading.x, below),
+            Some((2, 1, None))
+        );
+        assert_eq!(
+            hit_at(&document, page, paragraph.x, paragraph.y - 1),
+            Some((3, 1, None))
+        );
+        // In the gap between the first two pages, and outside the pages: nothing.
+        assert_eq!(hit_at(&document, 0, 1000, PAGE_HEIGHT), None);
+        assert_eq!(hit_at(&document, 0, 1000, PAGE_HEIGHT + PAGE_GAP - 1), None);
+        assert_eq!(hit_at(&document, 0, -1, 1000), None);
+        assert_eq!(hit_at(&document, 0, PAGE_WIDTH, 1000), None);
+        assert_eq!(hit_at(&document, 0, 1000, -1), None);
+        assert_eq!(hit_at(&document, 3, 1000, 1000), None);
+        // The top of the next page is a page again.
+        assert!(hit_at(&document, 1, 1000, 0).is_some());
+    }
+
+    #[test]
+    fn hits_the_editable_line_empty_and_with_text() {
+        let mut document = viewed();
+        let frame = MockDocument::editable_region();
+        let area = text_area(frame.rect);
+        let middle = area.top + BODY.line_pitch / 2;
+        let editable = document.editable_id();
+        assert_eq!(
+            hit_at(&document, frame.page, area.left + 1000, middle),
+            Some((editable, 0, None))
+        );
+        document.insert_text("a😀").unwrap();
+        // The emoji is wide (two advances) and two UTF-16 code units: its right half gives offset 3.
+        let right = area.left + BODY.advance + 2 * BODY.advance - 1;
+        assert_eq!(
+            hit_at(&document, frame.page, right, middle),
+            Some((editable, 3, Some(1)))
+        );
+        // The character boxes of the accessibility tree say the same.
+        let (_, rect) = character(&document, editable, 1);
+        assert!((rect.x..rect.x + rect.width).contains(&right));
+    }
+
+    #[test]
+    fn every_node_has_a_language_and_a_direction_and_its_lines() {
+        fn walk(
+            node: &A11yNode,
+            lang: Option<&str>,
+            dir: Option<TextDirection>,
+            count: &mut usize,
+        ) {
+            let lang = node.lang.as_deref().or(lang);
+            let dir = node.dir.or(dir);
+            assert!(lang.is_some() && dir.is_some(), "node {}", node.id);
+            *count += 1;
+            if let (Some(chars), Some(starts)) = (&node.chars, &node.line_starts) {
+                // A line starts wherever a character's box is lower than the one before it.
+                let mut expected = vec![0];
+                for pair in chars.windows(2) {
+                    if pair[1].rect.y > pair[0].rect.y {
+                        expected.push(pair[1].start);
+                    }
+                }
+                assert_eq!(starts, &expected, "node {}", node.id);
+            }
+            for child in node.children.iter().flatten() {
+                walk(child, lang, dir, count);
+            }
+        }
+        let document = MockDocument::default();
+        let (tree, _, _) = document.a11y_state();
+        assert_eq!(
+            (tree.lang.as_deref(), tree.dir),
+            (Some("en"), Some(TextDirection::Ltr))
+        );
+        let mut count = 0;
+        walk(&tree, None, None, &mut count);
+        assert_eq!(u64::try_from(count).unwrap(), fixed().last_id);
+    }
+
+    #[test]
+    fn the_selection_shows_in_the_overlay_and_the_accessibility_tree() {
+        let mut document = MockDocument::default();
+        document.insert_text("hello").unwrap();
+        assert!(document.selection_rects().is_empty());
+        assert!(document.caret().visible);
+        let editable = document.editable_id();
+        let position = |offset| TextPosition {
+            node: editable,
+            offset,
+        };
+        assert_eq!(document.select(position(4), position(1)), Ok(true));
+        let area = text_area(MockDocument::editable_region().rect);
+        let rects = document.selection_rects();
+        assert_eq!(
+            rects,
+            [SelectionRects {
+                page: 0,
+                rects: vec![Rect {
+                    x: area.left + BODY.advance,
+                    y: area.top,
+                    width: 3 * BODY.advance,
+                    height: BODY.line_pitch,
+                }]
+            }]
+        );
+        // The caret stays at the focus but is hidden while text is selected.
+        assert!(!document.caret().visible);
+        assert_eq!(document.a11y_caret().offset, 1);
+        assert_eq!(
+            document.a11y_selection(),
+            [A11ySelection {
+                anchor: position(4),
+                focus: position(1)
+            }]
+        );
+        // Selecting changes no tile.
+        assert_eq!(document.revision(), 2);
+        // Positions in other nodes are refused.
+        assert_eq!(
+            document.select(position(0), TextPosition { node: 2, offset: 0 }),
+            Err(TextError::Invalid)
+        );
+        assert_eq!(
+            document.select(
+                TextPosition {
+                    node: 999,
+                    offset: 0
+                },
+                position(0)
+            ),
+            Err(TextError::NotFound)
+        );
+        assert_eq!(
+            document.replace_text(0, 0, 0, "x"),
+            Err(TextError::NotFound)
+        );
+        assert_eq!(document.selected_text(), "ell");
+        assert!(document.cut());
+        assert_eq!(document.revision(), 3);
+        assert!(document.a11y_selection().is_empty());
+    }
+
     #[test]
     fn finds_subtrees_by_identifier() {
         let document = MockDocument::default();
-        let (tree, caret) = document.a11y_tree_and_caret();
+        let (tree, caret, selection) = document.a11y_state();
+        assert!(selection.is_empty());
         assert_eq!(tree.role, A11yRole::Document);
         assert_eq!(tree, document.a11y_tree());
         let editable = crate::a11y::find(&tree, document.editable_id()).unwrap();

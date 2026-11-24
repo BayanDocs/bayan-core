@@ -14,7 +14,10 @@ use std::collections::VecDeque;
 use serde::Serialize;
 
 use crate::limits::MAX_MESSAGE_BYTES;
-use crate::protocol::{A11yCaret, A11yNode, A11yRole, CharBox, ChildRange, PageRect};
+use crate::protocol::{
+    A11yCaret, A11yNode, A11yRole, A11ySelection, CharBox, ChildRange, PageRect, TextDirection,
+    TextRun,
+};
 
 /// The deepest an accessibility tree may be, the document node being level 1.
 pub const MAX_DEPTH: u32 = 64;
@@ -59,16 +62,125 @@ fn utf16_len(text: &str) -> u32 {
     u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
 }
 
-/// Gives every node at level [`MAX_DEPTH`] of a document tree (whose root is level 1) no children, appending the text of the nodes below it to its own text in reading order, each starting on a new line, with their character boxes (spec §14.7). A caret in one of those nodes moves to the same character in the node they were appended to.
+/// Gives every node at level [`MAX_DEPTH`] of a document tree (whose root is level 1) no children, appending the text of the nodes below it to its own text in reading order, each starting on a new line, with their character boxes (spec §14.7). A caret in one of those nodes moves to the same character in the node they were appended to. The appended text keeps its language and direction, as runs where they differ from the node's, and its lines, each text starting a line.
 pub fn flatten(root: &mut A11yNode, caret: &mut Option<A11yCaret>) {
-    flatten_from(root, 1, MAX_DEPTH, caret);
+    flatten_with_selection(root, caret, &mut []);
 }
 
-/// [`flatten`] for a node at `level`, with any depth limit.
+/// [`flatten`], which also moves the ends of a selection that lie in the nodes it appends (spec §14.7 item 2), as it moves the caret.
+pub fn flatten_with_selection(
+    root: &mut A11yNode,
+    caret: &mut Option<A11yCaret>,
+    selection: &mut [A11ySelection],
+) {
+    let mut positions = Positions::of(caret, selection);
+    flatten_node(root, 1, MAX_DEPTH, &Context::default(), &mut positions);
+}
+
+/// [`flatten`] for a node at `level`, with any depth limit; the node's ancestors set no language or direction.
 pub fn flatten_from(node: &mut A11yNode, level: u32, depth: u32, caret: &mut Option<A11yCaret>) {
+    let mut positions = Positions::of(caret, &mut []);
+    flatten_node(node, level, depth, &Context::default(), &mut positions);
+}
+
+/// The language and direction of a node: its own, or those it inherits (spec §14.7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Context {
+    lang: Option<String>,
+    dir: Option<TextDirection>,
+}
+
+impl Context {
+    /// The language and direction of `node`, a child of a node with these.
+    fn of(&self, node: &A11yNode) -> Self {
+        Self {
+            lang: node.lang.clone().or_else(|| self.lang.clone()),
+            dir: node.dir.or(self.dir),
+        }
+    }
+
+    /// The run of `start` to `end` in a node with the language and direction `node`, for text with these: `None` where both are the node's.
+    fn run(&self, node: &Self, start: u32, end: u32) -> Option<TextRun> {
+        let lang = self.lang.clone().filter(|_| self.lang != node.lang);
+        let dir = self.dir.filter(|_| self.dir != node.dir);
+        (lang.is_some() || dir.is_some()).then_some(TextRun {
+            start,
+            end,
+            lang,
+            dir,
+        })
+    }
+}
+
+/// The text positions that move with the text they point into when [`flatten`] appends it to another node: the caret and the ends of a selection.
+struct Positions<'a> {
+    positions: Vec<(&'a mut u64, &'a mut u32)>,
+}
+
+impl<'a> Positions<'a> {
+    fn of(caret: &'a mut Option<A11yCaret>, selection: &'a mut [A11ySelection]) -> Self {
+        let mut positions = Vec::new();
+        if let Some(caret) = caret.as_mut() {
+            positions.push((&mut caret.node, &mut caret.offset));
+        }
+        for range in selection {
+            positions.push((&mut range.anchor.node, &mut range.anchor.offset));
+            positions.push((&mut range.focus.node, &mut range.focus.offset));
+        }
+        Self { positions }
+    }
+
+    /// Moves every position in node `from` to node `to`: to `offset` further on, or, for a node without text, to `offset` itself.
+    fn relocate(&mut self, from: u64, to: u64, offset: u32, has_text: bool) {
+        for (node, at) in &mut self.positions {
+            if **node == from {
+                **node = to;
+                **at = if has_text {
+                    offset.saturating_add(**at)
+                } else {
+                    offset
+                };
+            }
+        }
+    }
+}
+
+/// The parts of a node's own text, `length` UTF-16 code units long, as `(start, end, language and direction)`: its runs, and the rest with the node's own, in order. Runs out of order or outside the text are left out.
+fn segments(length: u32, own: &Context, runs: &[TextRun]) -> Vec<(u32, u32, Context)> {
+    let mut parts = Vec::new();
+    let mut at = 0;
+    for run in runs {
+        if run.start < at || run.start >= run.end || run.end > length {
+            continue;
+        }
+        if at < run.start {
+            parts.push((at, run.start, own.clone()));
+        }
+        let context = Context {
+            lang: run.lang.clone().or_else(|| own.lang.clone()),
+            dir: run.dir.or(own.dir),
+        };
+        parts.push((run.start, run.end, context));
+        at = run.end;
+    }
+    if at < length {
+        parts.push((at, length, own.clone()));
+    }
+    parts
+}
+
+/// [`flatten`] for a node at `level` whose parent has the language and direction `inherited`.
+fn flatten_node(
+    node: &mut A11yNode,
+    level: u32,
+    depth: u32,
+    inherited: &Context,
+    positions: &mut Positions<'_>,
+) {
+    let here = inherited.of(node);
     if level < depth {
         for child in node.children.iter_mut().flatten() {
-            flatten_from(child, level + 1, depth, caret);
+            flatten_node(child, level + 1, depth, &here, positions);
         }
         return;
     }
@@ -77,23 +189,37 @@ pub fn flatten_from(node: &mut A11yNode, level: u32, depth: u32, caret: &mut Opt
     };
     let mut text = node.text.take();
     let mut chars = node.chars.take();
-    // Depth first, in reading order, with a stack of its own: below the limit the tree may be deeper than the stack allows recursion, and each node is dropped once its children are taken out, so dropping never recurses either.
-    let mut pending: Vec<A11yNode> = children.into_iter().rev().collect();
-    while let Some(mut below) = pending.pop() {
+    let mut runs = node.runs.take().unwrap_or_default();
+    let own_starts = node.line_starts.take();
+    let mut starts = match (&text, &own_starts) {
+        (Some(_), Some(starts)) => starts.clone(),
+        (Some(_), None) => vec![0],
+        (None, _) => Vec::new(),
+    };
+    let mut appended = false;
+    // Depth first, in reading order, with a stack of its own: below the limit the tree may be deeper than the stack allows recursion, and each node is dropped once its children are taken out, so dropping never recurses either. Each node waits with the language and direction of its parent.
+    let mut pending: Vec<(A11yNode, Context)> = children
+        .into_iter()
+        .rev()
+        .map(|child| (child, here.clone()))
+        .collect();
+    while let Some((mut below, parent)) = pending.pop() {
+        let context = parent.of(&below);
         if let Some(grandchildren) = below.children.take() {
-            pending.extend(grandchildren.into_iter().rev());
+            pending.extend(
+                grandchildren
+                    .into_iter()
+                    .rev()
+                    .map(|child| (child, context.clone())),
+            );
         }
         let length = text.as_deref().map_or(0, utf16_len);
         let Some(own) = below.text.take() else {
-            // A node without text adds nothing; a caret in it moves to the end of the text so far.
-            if caret.is_some_and(|caret| caret.node == below.id) {
-                *caret = Some(A11yCaret {
-                    node: node.id,
-                    offset: length,
-                });
-            }
+            // A node without text adds nothing; a position in it moves to the end of the text so far.
+            positions.relocate(below.id, node.id, length, false);
             continue;
         };
+        appended = true;
         let joined = text.get_or_insert_with(String::new);
         let offset = if joined.is_empty() {
             0
@@ -102,11 +228,27 @@ pub fn flatten_from(node: &mut A11yNode, level: u32, depth: u32, caret: &mut Opt
             length + 1
         };
         joined.push_str(&own);
-        if let Some(found) = caret.as_mut().filter(|caret| caret.node == below.id) {
-            *found = A11yCaret {
-                node: node.id,
-                offset: offset.saturating_add(found.offset),
-            };
+        positions.relocate(below.id, node.id, offset, true);
+        // Its text starts a line, and keeps the lines it had.
+        if offset > 0 || starts.is_empty() {
+            starts.push(offset);
+        }
+        for &start in below
+            .line_starts
+            .iter()
+            .flatten()
+            .filter(|&&start| start > 0)
+        {
+            starts.push(offset.saturating_add(start));
+        }
+        // Its language and direction, where they differ from the node's, become runs.
+        let own_runs = below.runs.take().unwrap_or_default();
+        for (start, end, part) in segments(utf16_len(&own), &context, &own_runs) {
+            runs.extend(part.run(
+                &here,
+                offset.saturating_add(start),
+                offset.saturating_add(end),
+            ));
         }
         if let Some(boxes) = below.chars.take() {
             chars
@@ -120,6 +262,8 @@ pub fn flatten_from(node: &mut A11yNode, level: u32, depth: u32, caret: &mut Opt
     }
     node.text = text;
     node.chars = chars;
+    node.runs = (!runs.is_empty()).then_some(runs);
+    node.line_starts = if appended { Some(starts) } else { own_starts };
 }
 
 /// A node's own fields, without its children, as they appear in JSON: to measure a node.
@@ -139,6 +283,14 @@ struct OwnFields<'a> {
     bounds: Option<&'a PageRect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chars: Option<&'a [CharBox]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lang: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dir: Option<TextDirection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runs: Option<&'a [TextRun]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_starts: Option<&'a [u32]>,
 }
 
 /// Counts the bytes written to it.
@@ -157,18 +309,40 @@ impl std::io::Write for Counter {
 
 /// An upper bound of the bytes that a node takes in a tree's JSON, its children and the fields that list them not counted, but its `child_count` if it has children: whether it holds them all is known only at the end. [`CHILDREN_FIELDS`] is added when it gets its first child. A node without children whose list of children is empty rather than absent keeps that empty list in the message, so its cost counts the list.
 fn cost(node: &A11yNode) -> usize {
+    // Every field is named, so that a field added to the node cannot be left out of its measure: the compiler refuses this pattern until it names the new field too.
+    let A11yNode {
+        id,
+        role,
+        level,
+        name,
+        text,
+        editable,
+        bounds,
+        chars,
+        lang,
+        dir,
+        runs,
+        line_starts,
+        child_count: _,
+        children_start: _,
+        children,
+    } = node;
     let fields = OwnFields {
-        id: node.id,
-        role: node.role,
-        level: node.level,
-        name: node.name.as_deref(),
-        text: node.text.as_deref(),
-        editable: node.editable,
-        bounds: node.bounds.as_ref(),
-        chars: node.chars.as_deref(),
+        id: *id,
+        role: *role,
+        level: *level,
+        name: name.as_deref(),
+        text: text.as_deref(),
+        editable: *editable,
+        bounds: bounds.as_ref(),
+        chars: chars.as_deref(),
+        lang: lang.as_deref(),
+        dir: *dir,
+        runs: runs.as_deref(),
+        line_starts: line_starts.as_deref(),
     };
     let mut counter = Counter(0);
-    let list_fields = match node.children.as_deref() {
+    let list_fields = match children.as_deref() {
         None => 0,
         Some([]) => CHILDREN_FIELD,
         Some(_) => CHILD_COUNT_FIELD,
@@ -352,15 +526,37 @@ fn build(chosen: &[Chosen<'_>], index: usize) -> A11yNode {
     } else {
         (Some(total), Some(*run_start), Some(held))
     };
+    // Every field is named, so that a field added to the node cannot be dropped here unnoticed.
+    let A11yNode {
+        id,
+        role,
+        level,
+        name,
+        text,
+        editable,
+        bounds,
+        chars,
+        lang,
+        dir,
+        runs,
+        line_starts,
+        child_count: _,
+        children_start: _,
+        children: _,
+    } = node;
     A11yNode {
-        id: node.id,
-        role: node.role,
-        level: node.level,
-        name: node.name.clone(),
-        text: node.text.clone(),
-        editable: node.editable,
-        bounds: node.bounds,
-        chars: node.chars.clone(),
+        id: *id,
+        role: *role,
+        level: *level,
+        name: name.clone(),
+        text: text.clone(),
+        editable: *editable,
+        bounds: *bounds,
+        chars: chars.clone(),
+        lang: lang.clone(),
+        dir: *dir,
+        runs: runs.clone(),
+        line_starts: line_starts.clone(),
         child_count: child_count.map(|count| u32::try_from(count).unwrap_or(u32::MAX)),
         children_start: children_start.map(|start| u32::try_from(start).unwrap_or(u32::MAX)),
         children,
@@ -379,7 +575,7 @@ pub fn find(root: &A11yNode, id: u64) -> Option<&A11yNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Rect;
+    use crate::protocol::{Rect, TextPosition};
 
     fn paragraph(id: u64, text: &str) -> A11yNode {
         A11yNode {
@@ -391,6 +587,10 @@ mod tests {
             editable: false,
             bounds: None,
             chars: None,
+            lang: None,
+            dir: None,
+            runs: None,
+            line_starts: None,
             child_count: None,
             children_start: None,
             children: None,
@@ -530,6 +730,141 @@ mod tests {
         assert_eq!(
             cost(&empty),
             serde_json::to_string(&empty).unwrap().len() + SEPARATOR
+        );
+    }
+
+    #[test]
+    fn cost_counts_every_field_of_a_node() {
+        // A leaf with every field set costs exactly its JSON and a separator.
+        let mut leaf = paragraph(5, "مرحبا hello");
+        leaf.level = Some(2);
+        leaf.name = Some("name".to_owned());
+        leaf.editable = true;
+        leaf.bounds = Some(PageRect {
+            page: 1,
+            rect: Rect {
+                x: -1,
+                y: 2,
+                width: 3,
+                height: 4,
+            },
+        });
+        leaf.chars = Some(vec![CharBox {
+            start: 0,
+            end: 1,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        }]);
+        leaf.lang = Some("ar".to_owned());
+        leaf.dir = Some(TextDirection::Rtl);
+        leaf.runs = Some(vec![TextRun {
+            start: 6,
+            end: 11,
+            lang: Some("en".to_owned()),
+            dir: Some(TextDirection::Ltr),
+        }]);
+        leaf.line_starts = Some(vec![0, 6]);
+        assert_eq!(
+            cost(&leaf),
+            serde_json::to_string(&leaf).unwrap().len() + SEPARATOR
+        );
+        // A split tree keeps every field of the nodes it holds.
+        let root = with_children(paragraph(1, "root"), vec![leaf.clone(), paragraph(6, "x")]);
+        let limits = Limits {
+            nodes: 2,
+            bytes: usize::MAX,
+        };
+        let part = fill(&root, None, None, &limits);
+        assert_eq!(part.children.as_ref().unwrap()[0], leaf);
+    }
+
+    /// A node with a language and a direction of its own.
+    fn speaking(mut node: A11yNode, lang: &str, dir: TextDirection) -> A11yNode {
+        node.lang = Some(lang.to_owned());
+        node.dir = Some(dir);
+        node
+    }
+
+    #[test]
+    fn flattening_keeps_languages_directions_lines_and_the_selection() {
+        // Level 2 holds "ab" (lines at 0 and 1); below it, in reading order: an Arabic node with an English run, a node without text, and an English node with two lines.
+        let mut arabic = speaking(paragraph(4, "سلام hi"), "ar", TextDirection::Rtl);
+        arabic.runs = Some(vec![TextRun {
+            start: 5,
+            end: 7,
+            lang: Some("en".to_owned()),
+            dir: Some(TextDirection::Ltr),
+        }]);
+        arabic.line_starts = Some(vec![0]);
+        let mut english = paragraph(6, "one two");
+        english.line_starts = Some(vec![0, 4]);
+        let mut wrapper = with_children(paragraph(5, ""), vec![english]);
+        wrapper.text = None;
+        let mut level_2 = with_children(paragraph(2, "ab"), vec![arabic, wrapper]);
+        level_2.line_starts = Some(vec![0, 1]);
+        let mut root = speaking(
+            with_children(paragraph(1, ""), vec![level_2]),
+            "en",
+            TextDirection::Ltr,
+        );
+        root.text = None;
+        let mut caret = Some(A11yCaret { node: 6, offset: 4 });
+        let mut selection = [A11ySelection {
+            anchor: TextPosition { node: 4, offset: 1 },
+            focus: TextPosition { node: 5, offset: 0 },
+        }];
+        let mut positions = Positions::of(&mut caret, &mut selection);
+        flatten_node(&mut root, 1, 2, &Context::default(), &mut positions);
+        let flat = &root.children.as_ref().unwrap()[0];
+        assert_eq!(flat.children, None);
+        // "ab", then the Arabic text on a new line at 3, then the English text at 11.
+        assert_eq!(flat.text.as_deref(), Some("ab\nسلام hi\none two"));
+        assert_eq!(flat.line_starts.as_deref(), Some(&[0, 1, 3, 11, 15][..]));
+        // The Arabic part differs from the node's English, left to right; its English run does not.
+        let runs: Vec<(u32, u32, Option<&str>, Option<TextDirection>)> = flat
+            .runs
+            .iter()
+            .flatten()
+            .map(|run| (run.start, run.end, run.lang.as_deref(), run.dir))
+            .collect();
+        assert_eq!(runs, [(3, 8, Some("ar"), Some(TextDirection::Rtl))]);
+        // The positions move with their text: the node without text gives the end of the text before it.
+        assert_eq!(
+            caret,
+            Some(A11yCaret {
+                node: 2,
+                offset: 15
+            })
+        );
+        assert_eq!(
+            selection,
+            [A11ySelection {
+                anchor: TextPosition { node: 2, offset: 4 },
+                focus: TextPosition {
+                    node: 2,
+                    offset: 10
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_flattened_node_keeps_its_own_lines_when_nothing_is_appended() {
+        let mut silent = paragraph(3, "");
+        silent.text = None;
+        let mut node = with_children(paragraph(2, "only"), vec![silent]);
+        node.line_starts = None;
+        let mut root = with_children(paragraph(1, ""), vec![node]);
+        root.text = None;
+        flatten_from(&mut root, 1, 2, &mut None);
+        let flat = &root.children.as_ref().unwrap()[0];
+        assert_eq!(
+            (flat.text.as_deref(), flat.line_starts.as_ref()),
+            (Some("only"), None)
         );
     }
 

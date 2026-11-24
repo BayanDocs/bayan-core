@@ -11,3 +11,4 @@ mod protocol_schema;
 mod record_replay;
 mod session;
 mod support;
+mod text_input;

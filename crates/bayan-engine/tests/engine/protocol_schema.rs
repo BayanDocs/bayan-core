@@ -116,6 +116,32 @@ fn session_requests(doc_id: u64, blob: u64) -> Vec<Value> {
             "input.pointer",
             json!({ "doc_id": doc_id, "kind": "down", "x": 120.5, "y": 210, "button": 0, "clicks": 1, "pointer_type": "mouse", "modifiers": { "shift": true } }),
         ),
+        // Protocol v1's text positions and clipboard (CORE-014): node 5 is the mock document's editable line, which holds "H" here.
+        request(
+            30,
+            "input.select",
+            json!({ "doc_id": doc_id, "anchor": { "node": 5, "offset": 0 }, "focus": { "node": 5, "offset": 1 } }),
+        ),
+        request(
+            31,
+            "query.hit",
+            json!({ "doc_id": doc_id, "x": 120.5, "y": 210 }),
+        ),
+        request(
+            32,
+            "clipboard.copy",
+            json!({ "doc_id": doc_id, "cut": true }),
+        ),
+        request(
+            33,
+            "input.paste",
+            json!({ "doc_id": doc_id, "items": [{ "mime": "image/png", "blob": blob }, { "mime": "text/plain", "blob": blob }] }),
+        ),
+        request(
+            34,
+            "input.text",
+            json!({ "doc_id": doc_id, "text": "x", "replace": { "node": 5, "start": 0, "end": 0 } }),
+        ),
         request(18, "query.a11y", json!({ "doc_id": doc_id })),
         request(19, "ui.manifest", json!({ "locale": "en-US" })),
         request(20, "diag.record.start", json!({})),
@@ -295,7 +321,13 @@ fn messages_the_schema_accepts_are_not_refused_for_their_shape() {
     let mut checked = 0;
     for entry in requests {
         let kind = entry["type"].as_str().unwrap();
-        let payload = minimal(&schema, &json!({ "$ref": entry["payload"] }));
+        let mut payload = minimal(&schema, &json!({ "$ref": entry["payload"] }));
+        // A text position names a node and an offset into its text (spec §14.4): the minimal one, node 1 at offset 1, lies beyond the text of the document node, which holds none, so the positions name the start of the mock document's editable line, node 5, instead.
+        for end in ["anchor", "focus"] {
+            if payload.get(end).is_some() {
+                payload[end] = json!({ "node": 5, "offset": 0 });
+            }
+        }
         let message = request(7, kind, payload);
         validator
             .validate(&message)
