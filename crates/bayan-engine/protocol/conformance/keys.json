@@ -1,0 +1,1935 @@
+{
+  "format": "bayan-engine-conformance",
+  "format_version": 1,
+  "protocol_version": 1,
+  "area": "keys",
+  "cases": [
+    {
+      "id": "manifest-windows-native",
+      "description": "The v1 stub manifest's resolved key data for platform windows and runtime native.",
+      "for": ["engine"],
+      "platform": "windows",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "Alt", "ctrl": false, "shift": false, "meta": false},
+            {"code": "KeyA", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyB", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyC", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyD", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyE", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyF", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyG", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyH", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyI", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyJ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyK", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyL", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyM", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyN", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyO", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyP", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyQ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyR", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyS", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyT", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyU", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyV", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyW", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyX", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyY", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyZ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit0", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit1", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit2", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit3", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit4", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit5", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit6", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit7", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit8", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit9", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-windows-browser",
+      "description": "The v1 stub manifest's resolved key data for platform windows and runtime browser.",
+      "for": ["engine"],
+      "platform": "windows",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "Alt", "ctrl": false, "shift": false, "meta": false},
+            {"code": "KeyA", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyB", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyC", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyD", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyE", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyF", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyG", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyH", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyI", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyJ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyK", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyL", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyM", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyN", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyO", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyP", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyQ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyR", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyS", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyT", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyU", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyV", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyW", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyX", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyY", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyZ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit0", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit1", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit2", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit3", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit4", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit5", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit6", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit7", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit8", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit9", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "=", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "+", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "-", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "0", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "i", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "j", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "c", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "d", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "n", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "1", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "2", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "3", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "4", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "5", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "6", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "7", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "8", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "9", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "ArrowLeft", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "ArrowRight", "ctrl": false, "shift": false, "alt": true, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-macos-native",
+      "description": "The v1 stub manifest's resolved key data for platform macos and runtime native.",
+      "for": ["engine"],
+      "platform": "macos",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "h", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "m", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "q", "ctrl": false, "shift": false, "alt": false, "meta": true}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-macos-browser",
+      "description": "The v1 stub manifest's resolved key data for platform macos and runtime browser.",
+      "for": ["engine"],
+      "platform": "macos",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "h", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "m", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "q", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "=", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "+", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "-", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "0", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "i", "ctrl": false, "shift": false, "alt": true, "meta": true},
+            {"key": "j", "ctrl": false, "shift": false, "alt": true, "meta": true},
+            {"key": "c", "ctrl": false, "shift": false, "alt": true, "meta": true},
+            {"key": "n", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "t", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "w", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "n", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "t", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "w", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "1", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "2", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "3", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "4", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "5", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "6", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "7", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "8", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "9", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-linux-native",
+      "description": "The v1 stub manifest's resolved key data for platform linux and runtime native.",
+      "for": ["engine"],
+      "platform": "linux",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "Alt", "ctrl": false, "shift": false, "meta": false},
+            {"code": "KeyA", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyB", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyC", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyD", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyE", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyF", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyG", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyH", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyI", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyJ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyK", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyL", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyM", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyN", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyO", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyP", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyQ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyR", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyS", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyT", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyU", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyV", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyW", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyX", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyY", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyZ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit0", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit1", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit2", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit3", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit4", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit5", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit6", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit7", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit8", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit9", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-linux-browser",
+      "description": "The v1 stub manifest's resolved key data for platform linux and runtime browser.",
+      "for": ["engine"],
+      "platform": "linux",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "Alt", "ctrl": false, "shift": false, "meta": false},
+            {"code": "KeyA", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyB", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyC", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyD", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyE", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyF", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyG", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyH", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyI", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyJ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyK", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyL", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyM", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyN", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyO", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyP", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyQ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyR", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyS", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyT", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyU", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyV", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyW", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyX", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyY", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "KeyZ", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit0", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit1", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit2", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit3", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit4", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit5", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit6", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit7", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit8", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"code": "Digit9", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Insert", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false},
+            {"key": "=", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "+", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "-", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "0", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "i", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "j", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "c", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "d", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "n", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "1", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "2", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "3", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "4", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "5", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "6", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "7", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "8", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "9", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "ArrowLeft", "ctrl": false, "shift": false, "alt": true, "meta": false},
+            {"key": "ArrowRight", "ctrl": false, "shift": false, "alt": true, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-ios-native",
+      "description": "The v1 stub manifest's resolved key data for platform ios and runtime native.",
+      "for": ["engine"],
+      "platform": "ios",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-ios-browser",
+      "description": "The v1 stub manifest's resolved key data for platform ios and runtime browser.",
+      "for": ["engine"],
+      "platform": "ios",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": false, "shift": false, "alt": false, "meta": true, "label": "⌘I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "x", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "v", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "=", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "+", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "-", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "0", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "t", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "w", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "n", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "t", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "w", "ctrl": false, "shift": true, "alt": false, "meta": true},
+            {"key": "1", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "2", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "3", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "4", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "5", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "6", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "7", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "8", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "9", "ctrl": false, "shift": false, "alt": false, "meta": true},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-android-native",
+      "description": "The v1 stub manifest's resolved key data for platform android and runtime native.",
+      "for": ["engine"],
+      "platform": "android",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-android-browser",
+      "description": "The v1 stub manifest's resolved key data for platform android and runtime browser.",
+      "for": ["engine"],
+      "platform": "android",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "=", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "+", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "-", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "0", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "1", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "2", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "3", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "4", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "5", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "6", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "7", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "8", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "9", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-chromeos-native",
+      "description": "The v1 stub manifest's resolved key data for platform chromeos and runtime native.",
+      "for": ["engine"],
+      "platform": "chromeos",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-chromeos-browser",
+      "description": "The v1 stub manifest's resolved key data for platform chromeos and runtime browser.",
+      "for": ["engine"],
+      "platform": "chromeos",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "=", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "+", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "-", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "0", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "1", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "2", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "3", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "4", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "5", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "6", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "7", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "8", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "9", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-other-native",
+      "description": "The v1 stub manifest's resolved key data for platform other and runtime native.",
+      "for": ["engine"],
+      "platform": "other",
+      "runtime": "native",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "manifest-other-browser",
+      "description": "The v1 stub manifest's resolved key data for platform other and runtime browser.",
+      "for": ["engine"],
+      "platform": "other",
+      "runtime": "browser",
+      "expect": {
+        "commands": [
+          {
+            "id": "file.open",
+            "label": "Open",
+            "bindings": [{"key": "o", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+O"}]
+          },
+          {
+            "id": "file.save",
+            "label": "Save",
+            "bindings": [{"key": "s", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+S"}]
+          },
+          {
+            "id": "edit.undo",
+            "label": "Undo",
+            "bindings": [{"key": "z", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Z"}]
+          },
+          {
+            "id": "edit.redo",
+            "label": "Redo",
+            "bindings": [{"key": "y", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+Y"}]
+          },
+          {
+            "id": "edit.cut",
+            "label": "Cut",
+            "bindings": [{"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+X"}],
+            "shell_action": "cut"
+          },
+          {
+            "id": "edit.copy",
+            "label": "Copy",
+            "bindings": [{"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+C"}],
+            "shell_action": "copy"
+          },
+          {
+            "id": "edit.paste",
+            "label": "Paste",
+            "bindings": [{"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+V"}],
+            "shell_action": "paste"
+          },
+          {
+            "id": "format.bold.toggle",
+            "label": "Bold",
+            "bindings": [{"key": "b", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+B"}]
+          },
+          {
+            "id": "format.italic.toggle",
+            "label": "Italic",
+            "bindings": [{"key": "i", "ctrl": true, "shift": false, "alt": false, "meta": false, "label": "Ctrl+I"}]
+          }
+        ],
+        "keys": {
+          "document": [
+            {"key": "Backspace"},
+            {"key": "Delete"},
+            {"key": "Enter"},
+            {"key": "Escape"},
+            {"key": "ArrowLeft"},
+            {"key": "ArrowRight"},
+            {"key": "ArrowUp"},
+            {"key": "ArrowDown"},
+            {"key": "Home"},
+            {"key": "End"},
+            {"key": "PageUp"},
+            {"key": "PageDown"}
+          ],
+          "reserved": [
+            {"key": "Tab", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F6", "ctrl": false, "alt": false, "meta": false},
+            {"key": "F10", "ctrl": false, "alt": false, "meta": false},
+            {"key": "ContextMenu"},
+            {"key": "c", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "x", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "v", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "=", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "+", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "-", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "0", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "F5", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F7", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F11", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "F12", "ctrl": false, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "n", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "t", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "w", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "1", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "2", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "3", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "4", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "5", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "6", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "7", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "8", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "9", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "Tab", "ctrl": true, "shift": true, "alt": false, "meta": false},
+            {"key": "PageUp", "ctrl": true, "shift": false, "alt": false, "meta": false},
+            {"key": "PageDown", "ctrl": true, "shift": false, "alt": false, "meta": false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "us-ctrl-b",
+      "description": "Ctrl+B on a US layout runs Bold.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "b", "code": "KeyB", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "format.bold.toggle"}}
+    },
+    {
+      "id": "us-ctrl-shift-b",
+      "description": "Ctrl+Shift+B matches no binding: a binding's four modifiers must all equal the press's.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "B", "code": "KeyB", "ctrl": true, "shift": true, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-b-types-text",
+      "description": "B without Ctrl types text, which reaches the engine as input.text, never as input.key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "b", "code": "KeyB", "ctrl": false, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-backspace",
+      "description": "Backspace is a document key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {
+        "key": "Backspace",
+        "code": "Backspace",
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": true, "runs": {"document_key": "Backspace"}}
+    },
+    {
+      "id": "us-shift-arrow-left",
+      "description": "Document keys match with any modifiers.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {
+        "key": "ArrowLeft",
+        "code": "ArrowLeft",
+        "ctrl": false,
+        "shift": true,
+        "alt": false,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": true, "runs": {"document_key": "ArrowLeft"}}
+    },
+    {
+      "id": "us-tab-is-kept",
+      "description": "Tab moves focus out of the document in every shell.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "Tab", "code": "Tab", "ctrl": false, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-ctrl-c-is-the-shells",
+      "description": "Ctrl+C is the platform's copy, which the shell carries out.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "c", "code": "KeyC", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-shift-delete-is-cut-on-windows",
+      "description": "Shift+Delete is the platform's cut on Windows and Linux, though Delete is a document key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {"key": "Delete", "code": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-shift-delete-on-macos",
+      "description": "macOS has no Shift+Delete cut, so the document key Delete matches.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-macos-native",
+      "layout": "us",
+      "press": {"key": "Delete", "code": "Delete", "ctrl": false, "shift": true, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"document_key": "Delete"}}
+    },
+    {
+      "id": "us-alt-f-is-a-keytip",
+      "description": "Alt with a letter belongs to the shell's KeyTips on Windows and Linux.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-native",
+      "layout": "us",
+      "press": {"key": "f", "code": "KeyF", "ctrl": false, "shift": false, "alt": true, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-ctrl-page-down-in-a-browser",
+      "description": "Ctrl+PageDown switches the browser's tab, though PageDown is a document key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-browser",
+      "layout": "us",
+      "press": {
+        "key": "PageDown",
+        "code": "PageDown",
+        "ctrl": true,
+        "shift": false,
+        "alt": false,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-ctrl-page-down-natively",
+      "description": "Natively, Ctrl+PageDown reaches the engine as the document key PageDown.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "us",
+      "press": {
+        "key": "PageDown",
+        "code": "PageDown",
+        "ctrl": true,
+        "shift": false,
+        "alt": false,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": true, "runs": {"document_key": "PageDown"}}
+    },
+    {
+      "id": "us-alt-arrow-left-in-a-browser",
+      "description": "Alt+ArrowLeft is the browser's back on Windows and Linux.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-browser",
+      "layout": "us",
+      "press": {
+        "key": "ArrowLeft",
+        "code": "ArrowLeft",
+        "ctrl": false,
+        "shift": false,
+        "alt": true,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "us-alt-arrow-left-on-macos-in-a-browser",
+      "description": "On macOS, Alt+ArrowLeft is not kept, so it is the document key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-macos-browser",
+      "layout": "us",
+      "press": {
+        "key": "ArrowLeft",
+        "code": "ArrowLeft",
+        "ctrl": false,
+        "shift": false,
+        "alt": true,
+        "meta": false,
+        "composing": false
+      },
+      "expect": {"send": true, "runs": {"document_key": "ArrowLeft"}}
+    },
+    {
+      "id": "us-ctrl-equals-in-a-browser",
+      "description": "Ctrl with = is the browser's page zoom; no binding matches it either.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-browser",
+      "layout": "us",
+      "press": {"key": "=", "code": "Equal", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "mac-command-b",
+      "description": "On macOS the manifest's Ctrl is Command.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-macos-browser",
+      "layout": "us",
+      "press": {"key": "b", "code": "KeyB", "ctrl": false, "shift": false, "alt": false, "meta": true, "composing": false},
+      "expect": {"send": true, "runs": {"command": "format.bold.toggle"}}
+    },
+    {
+      "id": "mac-ctrl-b",
+      "description": "On macOS, Ctrl+B is not Bold.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-macos-native",
+      "layout": "us",
+      "press": {"key": "b", "code": "KeyB", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "ios-command-i",
+      "description": "On iOS too, the manifest's Ctrl is Command.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-ios-native",
+      "layout": "us",
+      "press": {"key": "i", "code": "KeyI", "ctrl": false, "shift": false, "alt": false, "meta": true, "composing": false},
+      "expect": {"send": true, "runs": {"command": "format.italic.toggle"}}
+    },
+    {
+      "id": "android-ctrl-s",
+      "description": "Android keeps Ctrl.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-android-native",
+      "layout": "us",
+      "press": {"key": "s", "code": "KeyS", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "file.save"}}
+    },
+    {
+      "id": "chromeos-ctrl-z-in-a-browser",
+      "description": "ChromeOS keeps Ctrl.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-chromeos-browser",
+      "layout": "us",
+      "press": {"key": "z", "code": "KeyZ", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.undo"}}
+    },
+    {
+      "id": "an-unknown-platform-keeps-ctrl",
+      "description": "An unknown platform counts as other, where Ctrl stays Ctrl.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-other-native",
+      "layout": "us",
+      "press": {"key": "y", "code": "KeyY", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.redo"}}
+    },
+    {
+      "id": "french-ctrl-z-follows-the-character",
+      "description": "On French AZERTY, Z is where US keyboards have W: Ctrl with the key that types z runs Undo.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "fr",
+      "press": {"key": "z", "code": "KeyW", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.undo"}}
+    },
+    {
+      "id": "french-ctrl-w-is-not-undo",
+      "description": "On French AZERTY, the key in Z's US position types w: it does not run Undo.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "fr",
+      "press": {"key": "w", "code": "KeyZ", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "french-altgr-e-types-the-euro-sign",
+      "description": "AltGr+E types €; Windows reports AltGr as Ctrl and Alt together, which never falls back to the key's position.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "fr",
+      "press": {"key": "€", "code": "KeyE", "ctrl": true, "shift": false, "alt": true, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "german-ctrl-z",
+      "description": "On German QWERTZ, Z is where US keyboards have Y: Ctrl with the key that types z runs Undo.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-native",
+      "layout": "de",
+      "press": {"key": "z", "code": "KeyY", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.undo"}}
+    },
+    {
+      "id": "german-ctrl-y-is-redo",
+      "description": "On German QWERTZ, the key in Z's US position types y: Ctrl with it runs Redo.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-native",
+      "layout": "de",
+      "press": {"key": "y", "code": "KeyZ", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.redo"}}
+    },
+    {
+      "id": "german-altgr-q-types-at",
+      "description": "AltGr+Q types @ on German keyboards.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "de",
+      "press": {"key": "@", "code": "KeyQ", "ctrl": true, "shift": false, "alt": true, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "arabic-ctrl-b-falls-back-to-the-position",
+      "description": "On an Arabic layout, the key in B's position types لا: Ctrl with it runs Bold through its code.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "ar",
+      "press": {"key": "لا", "code": "KeyB", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "format.bold.toggle"}}
+    },
+    {
+      "id": "arabic-ctrl-z-falls-back-to-the-position",
+      "description": "On an Arabic layout, the key in Z's position types ئ: Ctrl with it runs Undo.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-browser",
+      "layout": "ar",
+      "press": {"key": "ئ", "code": "KeyZ", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "edit.undo"}}
+    },
+    {
+      "id": "arabic-letter-types-text",
+      "description": "An Arabic letter without Ctrl types text.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "ar",
+      "press": {"key": "ب", "code": "KeyF", "ctrl": false, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "russian-ctrl-i-falls-back-to-the-position",
+      "description": "On a Russian layout, the key in I's position types ш: Ctrl with it runs Italic.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-browser",
+      "layout": "ru",
+      "press": {"key": "ш", "code": "KeyI", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": true, "runs": {"command": "format.italic.toggle"}}
+    },
+    {
+      "id": "russian-ctrl-c-is-the-shells",
+      "description": "On a Russian layout, Ctrl with the key in C's position types с, and is the platform's copy.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-browser",
+      "layout": "ru",
+      "press": {"key": "с", "code": "KeyC", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "russian-ctrl-shift-i-is-the-browsers",
+      "description": "Ctrl+Shift+I opens the developer tools in a browser on Windows and Linux, also on a Russian layout.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-linux-browser",
+      "layout": "ru",
+      "press": {"key": "Ш", "code": "KeyI", "ctrl": true, "shift": true, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "an-unknown-code-does-not-fall-back",
+      "description": "Without a code that names a letter, a press that types another script matches nothing.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "ru",
+      "press": {"key": "и", "code": "", "ctrl": true, "shift": false, "alt": false, "meta": false, "composing": false},
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "composing-backspace-stays-with-the-input-method",
+      "description": "While an input method composes, it owns every key.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-windows-native",
+      "layout": "ja",
+      "press": {
+        "key": "Backspace",
+        "code": "Backspace",
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "meta": false,
+        "composing": true
+      },
+      "expect": {"send": false, "runs": null}
+    },
+    {
+      "id": "composing-enter-stays-with-the-input-method",
+      "description": "Enter commits the composition; the engine does not see it.",
+      "for": ["engine", "shell"],
+      "manifest": "manifest-macos-browser",
+      "layout": "zh",
+      "press": {"key": "Enter", "code": "Enter", "ctrl": false, "shift": false, "alt": false, "meta": false, "composing": true},
+      "expect": {"send": false, "runs": null}
+    }
+  ],
+  "removed": []
+}

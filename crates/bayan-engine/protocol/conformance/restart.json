@@ -1,0 +1,554 @@
+{
+  "format": "bayan-engine-conformance",
+  "format_version": 1,
+  "protocol_version": 1,
+  "area": "restart",
+  "cases": [
+    {
+      "id": "three-restarts-then-stop",
+      "description": "The engine discards its session four times within ten minutes: the first three engine.error events carry restarts 1 to 3 of 3, and the fourth carries null, after which the engine has stopped.",
+      "for": ["binding"],
+      "failures_ms": [0, 1000, 2000, 3000],
+      "expect": {"restarts": [{"number": 1, "limit": 3}, {"number": 2, "limit": 3}, {"number": 3, "limit": 3}, null]}
+    },
+    {
+      "id": "a-restart-599999-ms-old-still-counts",
+      "description": "The first restart is 599,999 ms old when the fourth failure happens, so it still counts: the allowance is used up.",
+      "for": ["binding"],
+      "failures_ms": [1000, 2000, 3000, 600999],
+      "expect": {"restarts": [{"number": 1, "limit": 3}, {"number": 2, "limit": 3}, {"number": 3, "limit": 3}, null]}
+    },
+    {
+      "id": "a-restart-600000-ms-old-no-longer-counts",
+      "description": "The first restart is exactly 600,000 ms old when the fourth failure happens, so it no longer counts: that failure is restart 3 of 3.",
+      "for": ["binding"],
+      "failures_ms": [1000, 2000, 3000, 601000],
+      "expect": {
+        "restarts": [{"number": 1, "limit": 3}, {"number": 2, "limit": 3}, {"number": 3, "limit": 3}, {"number": 3, "limit": 3}]
+      }
+    },
+    {
+      "id": "the-allowance-refills-as-restarts-leave-the-window",
+      "description": "Restarts older than ten minutes no longer count, so the numbering starts again from the restarts that remain.",
+      "for": ["binding"],
+      "failures_ms": [0, 300000, 900000, 1000000, 1200000],
+      "expect": {
+        "restarts": [
+          {"number": 1, "limit": 3},
+          {"number": 2, "limit": 3},
+          {"number": 1, "limit": 3},
+          {"number": 2, "limit": 3},
+          {"number": 3, "limit": 3}
+        ]
+      }
+    },
+    {
+      "id": "failures-ten-minutes-apart-are-always-restart-1",
+      "description": "Each failure comes when the restart before it is exactly ten minutes old, so each is restart 1 of 3.",
+      "for": ["binding"],
+      "failures_ms": [0, 600000, 1200000, 1800000],
+      "expect": {
+        "restarts": [{"number": 1, "limit": 3}, {"number": 1, "limit": 3}, {"number": 1, "limit": 3}, {"number": 1, "limit": 3}]
+      }
+    },
+    {
+      "id": "failures-at-the-same-time",
+      "description": "Four failures at the same moment: restarts 1 to 3, then the engine stops.",
+      "for": ["binding"],
+      "failures_ms": [5000, 5000, 5000, 5000],
+      "expect": {"restarts": [{"number": 1, "limit": 3}, {"number": 2, "limit": 3}, {"number": 3, "limit": 3}, null]}
+    },
+    {
+      "id": "a-desktop-recording-spans-a-restart",
+      "description": "Natively, a recording keeps running across a panic: its entry for the message that panicked holds the digest of the panic reply and of the engine.error without restart, and the entries from the new hello on belong to the new session. The recording replays with every digest equal, and the panics that the replays meet in their own sessions count nothing: after four replays, the engine still runs. On the web a panic ends a recording, so no web recording spans a restart.",
+      "for": ["binding"],
+      "runtime": "native",
+      "config": {"test": {"allow_panic": true}},
+      "messages": [
+        {"at_ms": 0, "message": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {"at_ms": 1, "message": {"v": 1, "id": 2, "type": "diag.record.start"}},
+        {"at_ms": 2, "message": {"v": 1, "id": 3, "type": "diag.panic"}},
+        {"at_ms": 3, "message": {"v": 1, "id": 4, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {"at_ms": 4, "message": {"v": 1, "id": 5, "type": "diag.panic"}},
+        {"at_ms": 5, "message": {"v": 1, "id": 6, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {"at_ms": 6, "message": {"v": 1, "id": 7, "type": "diag.record.stop"}}
+      ],
+      "replays": 4,
+      "expect": {
+        "restarts": [{"number": 1, "limit": 3}, {"number": 2, "limit": 3}],
+        "entries": 4,
+        "identical": true,
+        "stopped": false
+      }
+    },
+    {
+      "id": "a-panic-starts-restart-1",
+      "description": "The engine panics while handling a request. The panic reply that arrives just before the engine.error counts as no further error; the engine.error asks for restart 1 of 3, so the shell tells the user and starts a new session with hello, whose welcome it handles.",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {"shell_sends": {"v": 1, "id": 2, "type": "ui.manifest", "payload": {"locale": "en"}}},
+        {
+          "engine_sends": {"v": 1, "re": 2, "ok": false, "error": {"code": "panic", "message_id": "engine-error-panic", "args": {}}},
+          "expect": "ignore"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 1, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 1, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 3, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 3,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        }
+      ]
+    },
+    {
+      "id": "the-old-sessions-replies-and-events-are-ignored",
+      "description": "After the restart, replies to requests sent before the new hello, such as handshake_required for messages that reached the engine before the new session existed, the engine.error that refuses such a message without an identifier, and events about the old session's documents end nothing and count as no error.",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {"shell_sends": {"v": 1, "id": 2, "type": "doc.open", "payload": {"blob": 1}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 2,
+            "ok": true,
+            "type": "doc.opened",
+            "payload": {
+              "doc_id": 1,
+              "revision": 1,
+              "page_count_estimate": 3,
+              "warnings": [],
+              "fonts": {"missing": [], "machine_dependent": false}
+            }
+          },
+          "expect": "handle"
+        },
+        {"shell_sends": {"v": 1, "id": 3, "type": "query.a11y", "payload": {"doc_id": 1}}},
+        {
+          "shell_sends": {
+            "v": 1,
+            "id": 4,
+            "type": "view.set",
+            "payload": {
+              "doc_id": 1,
+              "viewport": {"x": 0, "y": 0, "width": 800, "height": 600},
+              "zoom": 1,
+              "device_scale": 1,
+              "mode": "print"
+            }
+          }
+        },
+        {
+          "shell_sends": {"v": 1, "type": "input.key", "payload": {"doc_id": 1, "key": "ArrowLeft", "code": "ArrowLeft"}}
+        },
+        {
+          "engine_sends": {"v": 1, "re": 3, "ok": false, "error": {"code": "panic", "message_id": "engine-error-panic", "args": {}}},
+          "expect": "ignore"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 1, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 1, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 5, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 4,
+            "ok": false,
+            "error": {"code": "handshake_required", "message_id": "engine-error-handshake-required", "args": {}}
+          },
+          "expect": "ignore"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 2,
+            "payload": {
+              "code": "handshake_required",
+              "message_id": "engine-error-handshake-required",
+              "recoverable": true,
+              "args": {}
+            }
+          },
+          "expect": "ignore"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 5,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {"v": 1, "type": "render.invalidate", "seq": 3, "payload": {"doc_id": 1, "revision": 2, "regions": []}},
+          "expect": "ignore"
+        }
+      ]
+    },
+    {
+      "id": "the-restart-number-comes-from-the-engine-and-null-stops",
+      "description": "Each engine.error says which restart follows; the shell counts nothing itself. After the third restart, the next engine.error carries null: the shell stops using the engine and tells the user how to start it again.",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 1, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 1, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 2, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 2,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 2,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 2, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 2, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 3, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 3,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 3,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 3, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 3, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 4, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 4,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 4,
+            "payload": {"code": "panic", "message_id": "engine-error-panic", "recoverable": false, "args": {}, "restart": null}
+          },
+          "expect": "stop"
+        }
+      ]
+    },
+    {
+      "id": "a-panic-while-handling-the-new-hello",
+      "description": "The engine panics while it handles the shell's new hello: the panic reply to that hello counts as no further error, and the engine.error asks for the next restart.",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 1, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 1, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 2, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {"v": 1, "re": 2, "ok": false, "error": {"code": "panic", "message_id": "engine-error-panic", "args": {}}},
+          "expect": "ignore"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 2,
+            "payload": {
+              "code": "panic",
+              "message_id": "engine-error-panic",
+              "recoverable": false,
+              "args": {},
+              "restart": {"number": 2, "limit": 3}
+            }
+          },
+          "expect": {"restart": {"number": 2, "limit": 3}}
+        },
+        {"shell_sends": {"v": 1, "id": 3, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 3,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        }
+      ]
+    },
+    {
+      "id": "an-error-the-engine-recovered-from-ends-nothing",
+      "description": "An engine.error with recoverable true, such as the refusal of a message without an identifier, belongs to the current session: the shell handles it and the session goes on.",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {"shell_sends": {"v": 1, "type": "input.text", "payload": {"doc_id": 9, "text": "a"}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {"code": "not_found", "message_id": "engine-error-not-found", "recoverable": true, "args": {}}
+          },
+          "expect": "handle"
+        }
+      ]
+    },
+    {
+      "id": "an-engine-error-without-restart-breaks-the-protocol",
+      "description": "Every engine.error with recoverable false carries restart (spec 14.2). One without it breaks the protocol, which ends the shell's use of the engine (spec 14.1 item 5).",
+      "for": ["shell"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {
+          "engine_sends": {
+            "v": 1,
+            "type": "engine.error",
+            "seq": 1,
+            "payload": {"code": "panic", "message_id": "engine-error-panic", "recoverable": false, "args": {}}
+          },
+          "expect": "stop"
+        }
+      ]
+    },
+    {
+      "id": "the-worker-host-failed",
+      "description": "On the web, the worker host reports failed when it cannot replace the engine after a panic: the engine cannot be restarted at all, and the shell stops.",
+      "for": ["web"],
+      "steps": [
+        {"shell_sends": {"v": 1, "id": 1, "type": "hello", "payload": {"protocol_versions": [1]}}},
+        {
+          "engine_sends": {
+            "v": 1,
+            "re": 1,
+            "ok": true,
+            "type": "welcome",
+            "payload": {
+              "protocol_version": 1,
+              "engine_version": "0.0.0",
+              "layout_epoch": 0,
+              "features": ["mock_document", "record_replay"]
+            }
+          },
+          "expect": "handle"
+        },
+        {"shell_sends": {"v": 1, "id": 2, "type": "ui.manifest", "payload": {}}},
+        {"worker_sends": {"worker": "failed", "reason": "restart_failed"}, "expect": "stop"}
+      ]
+    }
+  ],
+  "removed": []
+}

@@ -6,6 +6,8 @@
 //!
 //! The engine thread's stack has the fixed size [`ENGINE_THREAD_STACK_BYTES`], whatever the environment of the process says, so how deeply an input may nest before it exhausts the stack does not depend on the machine.
 //!
+//! **Restarts.** The engine thread is the native binding of spec §14.2: when the engine discards its session after a panic, the thread applies the restart allowance ([`crate::restart`]) at the time of the job that failed, which the host passed with it, and adds `restart` to the `engine.error` that reports it, after the engine has digested its messages for a recording. A replay runs in its own session inside the engine, so a panic there never reaches this thread and never counts. Once the allowance is used up, the thread delivers that last `engine.error`, with `restart: null`, and stops: from then on [`EngineThread::post`] fails with [`Stopped`] and [`EngineThread::render_tile`] with [`TileError::Internal`], and the jobs still queued are dropped unanswered.
+//!
 //! [spec]: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md
 
 use std::cell::Cell;
@@ -19,6 +21,7 @@ use std::thread::{JoinHandle, ThreadId};
 use crate::blobs::BlobStore;
 use crate::config::Config;
 use crate::engine::{Engine, TileError};
+use crate::restart::{RestartAllowance, add_restart};
 
 /// Receives the engine's messages, as JSON, on the engine thread.
 pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
@@ -46,9 +49,29 @@ pub fn on_engine_thread() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlreadyPosted;
 
-/// The engine thread has stopped or is stopping.
+/// The engine thread has stopped or is stopping, or the engine has used up its restarts (spec §14.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stopped;
+
+/// A rendered tile: its pixels, premultiplied RGBA8 without row padding, and the render revision that it shows (spec §14.6).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Tile {
+    /// The pixels.
+    pub pixels: Vec<u8>,
+    /// The render revision.
+    pub revision: u64,
+}
+
+/// Shows the size of the pixels, never the pixels, which show a document (AGENTS.md §6).
+impl std::fmt::Debug for Tile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Tile")
+            .field("pixels", &self.pixels.len())
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
 
 enum Job {
     Message {
@@ -60,16 +83,30 @@ enum Job {
         width: u32,
         height: u32,
         received_ms: u64,
-        answer: SyncSender<Result<Vec<u8>, TileError>>,
+        answer: SyncSender<Result<Tile, TileError>>,
     },
     /// Wakes the engine thread so it notices that it is stopping.
     Stop,
-    /// A panic outside the engine's own recovery, for tests; `answer` stands for a tile request waiting for the job. Host only, like the tests that send it.
+    /// A panic outside the engine's own recovery, for tests, at the time `received_ms`; `answer` stands for a tile request waiting for the job. Host only, like the tests that send it.
     #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
     Panic {
-        answer: SyncSender<Result<Vec<u8>, TileError>>,
+        received_ms: u64,
+        answer: SyncSender<Result<Tile, TileError>>,
     },
+}
+
+impl Job {
+    /// The time the host passed with the job: the time of a restart if the engine discards its session while doing it (spec §14.2).
+    const fn received_ms(&self) -> u64 {
+        match self {
+            Self::Message { received_ms, .. } | Self::Tile { received_ms, .. } => *received_ms,
+            #[cfg(test)]
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Panic { received_ms, .. } => *received_ms,
+            Self::Stop => 0,
+        }
+    }
 }
 
 /// What the shell's threads and the engine thread share.
@@ -77,6 +114,8 @@ struct Shared {
     sink: Mutex<Option<Sink>>,
     posted: AtomicBool,
     stopping: AtomicBool,
+    /// Set when the engine has used up its restarts (spec §14.2), before the `engine.error` that says so is delivered.
+    used_up: AtomicBool,
 }
 
 impl Shared {
@@ -119,14 +158,35 @@ impl std::fmt::Debug for EngineThread {
 
 fn run(mut engine: Engine, jobs: &Receiver<Job>, shared: &Shared) {
     ON_ENGINE_THREAD.with(|flag| flag.set(true));
+    let mut allowance = RestartAllowance::new();
     for job in jobs {
         if shared.stopping.load(Ordering::SeqCst) || matches!(job, Job::Stop) {
             return;
         }
+        let received_ms = job.received_ms();
         // The engine catches the panics of its message handlers and of rendering itself (spec §12); this catches any other, so that no panic ends the thread and leaves the shell with an engine that silently refuses everything. A tile request whose job panicked gets `TileError::Internal`, because its answer channel is dropped unanswered.
-        let messages = catch_unwind(AssertUnwindSafe(|| perform(&mut engine, job)))
+        let mut messages = catch_unwind(AssertUnwindSafe(|| perform(&mut engine, job)))
             .unwrap_or_else(|_| engine.recover_from_escaped_panic());
+        // The engine has digested its messages for a recording; the restart that follows is added now, outside the digest (spec §14.2). A panic outside a message counts at the time of the job that was running.
+        let mut used_up = false;
+        if engine.take_session_discarded() {
+            let restart = allowance.failure(received_ms);
+            let added = add_restart(&mut messages, restart);
+            debug_assert!(
+                added,
+                "the engine.error that reports a discarded session ends the messages of its call"
+            );
+            used_up = restart.is_none();
+            if used_up {
+                // Before the last engine.error is delivered, so that a post from inside the callback already fails.
+                shared.used_up.store(true, Ordering::SeqCst);
+            }
+        }
         shared.deliver(messages);
+        if used_up {
+            // The engine has stopped and answers nothing more; the jobs still queued are dropped with the queue.
+            return;
+        }
     }
 }
 
@@ -142,14 +202,17 @@ fn perform(engine: &mut Engine, job: Job) -> Vec<String> {
             answer,
         } => {
             let outcome = engine.render_tile(&request, width, height, received_ms);
+            let revision = outcome.revision;
             // The caller may have given up waiting; then nobody needs the pixels.
-            let _ignored = answer.send(outcome.pixels);
+            let _ignored = answer.send(outcome.pixels.map(|pixels| Tile { pixels, revision }));
             outcome.messages
         }
         Job::Stop => Vec::new(),
         #[cfg(test)]
         #[cfg(not(target_arch = "wasm32"))]
-        Job::Panic { answer: _answer } => {
+        Job::Panic {
+            answer: _answer, ..
+        } => {
             panic!("a panic outside the engine's own recovery, for a test")
         }
     }
@@ -166,6 +229,7 @@ impl EngineThread {
             sink: Mutex::new(None),
             posted: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            used_up: AtomicBool::new(false),
         });
         let (sender, receiver) = mpsc::channel();
         let engine = Engine::new(config, blobs);
@@ -201,13 +265,13 @@ impl EngineThread {
         Ok(())
     }
 
-    /// Queues a message for the engine and returns at once.
+    /// Queues a message for the engine and returns at once. `received_ms` is the time on the host's monotonic clock, which recordings and the restart allowance use (spec §10, §14.2).
     ///
     /// # Errors
     ///
-    /// Fails if the engine is stopping.
+    /// Fails if the engine is stopping, or has used up its restarts (spec §14.2).
     pub fn post(&self, bytes: Vec<u8>, received_ms: u64) -> Result<(), Stopped> {
-        if self.shared.stopping.load(Ordering::SeqCst) {
+        if self.has_stopped() {
             return Err(Stopped);
         }
         {
@@ -224,22 +288,22 @@ impl EngineThread {
             .map_err(|_| Stopped)
     }
 
-    /// Renders a tile on the engine thread, after the messages posted before, and waits for the pixels (premultiplied RGBA8 without row padding).
+    /// Renders a tile on the engine thread, after the messages posted before, and waits for its pixels and the render revision it shows.
     ///
     /// # Errors
     ///
-    /// [`TileError::WrongThread`] when called on an engine thread, this one's or another's (from inside a sink), where waiting could deadlock: on its own thread it would wait for itself, and two engines' sinks could wait for each other; otherwise the engine's error, or [`TileError::Internal`] if the engine is stopping.
+    /// [`TileError::WrongThread`] when called on an engine thread, this one's or another's (from inside a sink), where waiting could deadlock: on its own thread it would wait for itself, and two engines' sinks could wait for each other; otherwise the engine's error, or [`TileError::Internal`] if the engine is stopping or has used up its restarts (spec §14.2).
     pub fn render_tile(
         &self,
         request: Vec<u8>,
         width: u32,
         height: u32,
         received_ms: u64,
-    ) -> Result<Vec<u8>, TileError> {
+    ) -> Result<Tile, TileError> {
         if on_engine_thread() {
             return Err(TileError::WrongThread);
         }
-        if self.shared.stopping.load(Ordering::SeqCst) {
+        if self.has_stopped() {
             return Err(TileError::Internal);
         }
         {
@@ -263,6 +327,12 @@ impl EngineThread {
             })
             .map_err(|_| TileError::Internal)?;
         pixels.recv().unwrap_or(Err(TileError::Internal))
+    }
+
+    /// Whether the engine is stopping, or has used up its restarts and answers nothing more (spec §14.2).
+    #[must_use]
+    pub fn has_stopped(&self) -> bool {
+        self.shared.stopping.load(Ordering::SeqCst) || self.shared.used_up.load(Ordering::SeqCst)
     }
 
     /// Whether the calling thread is the engine thread, that is, whether the call comes from inside the sink.

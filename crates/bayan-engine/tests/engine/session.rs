@@ -1,4 +1,4 @@
-//! The v0 messages behave as the engine protocol specification says: handshake, documents, view, tiles, input on the mock document's editable line, accessibility, the UI manifest stub, errors and limits.
+//! The messages of protocol v1 behave as the engine protocol specification says: handshake, documents, view, tiles, input on the mock document's editable line, accessibility, the UI manifest stub, errors and limits.
 
 use crate::support::{
     engine, error_code, events, notice, ok_payload, open_document, reply_to, request, send, view,
@@ -8,7 +8,7 @@ use bayan_engine::limits::{MAX_BLOBS, MAX_DOCUMENTS, MAX_EDITABLE_TEXT_UNITS, MA
 use serde_json::{Value, json};
 
 #[test]
-fn the_handshake_comes_first_and_agrees_on_version_0() {
+fn the_handshake_comes_first_and_agrees_on_version_1() {
     let mut engine = engine();
     assert_eq!(
         error_code(&send(&mut engine, &request(1, "ui.manifest", json!({}))), 1),
@@ -16,20 +16,23 @@ fn the_handshake_comes_first_and_agrees_on_version_0() {
     );
     let refused = send(
         &mut engine,
-        &request(2, "hello", json!({ "protocol_versions": [1, 2] })),
+        &request(2, "hello", json!({ "protocol_versions": [0, 2] })),
     );
     assert_eq!(error_code(&refused, 2), "unsupported_protocol_version");
     assert_eq!(
         reply_to(&refused, 2)["error"]["args"]["supported"],
-        json!([0])
+        json!([1])
     );
+    // The refusal carries the engine's own version.
+    assert_eq!(reply_to(&refused, 2)["v"], json!(1));
     let welcome = send(
         &mut engine,
-        &request(3, "hello", json!({ "protocol_versions": [0, 1] })),
+        &request(3, "hello", json!({ "protocol_versions": [0, 1, 2] })),
     );
     let reply = reply_to(&welcome, 3);
+    assert_eq!(reply["v"], json!(1));
     assert_eq!(reply["type"], json!("welcome"));
-    assert_eq!(reply["payload"]["protocol_version"], json!(0));
+    assert_eq!(reply["payload"]["protocol_version"], json!(1));
     assert_eq!(reply["payload"]["layout_epoch"], json!(0));
     assert_eq!(
         reply["payload"]["features"],
@@ -42,12 +45,121 @@ fn the_handshake_comes_first_and_agrees_on_version_0() {
 }
 
 #[test]
+fn hello_is_read_whatever_its_v_and_every_other_message_needs_v_1() {
+    // A shell of another version still learns which versions the engine speaks (spec §14.1).
+    for v in [json!(0), json!(2), json!(null), json!("1")] {
+        let mut engine = engine();
+        let offers_1 =
+            json!({ "v": v, "id": 1, "type": "hello", "payload": { "protocol_versions": [1] } });
+        let welcome = send(&mut engine, &offers_1);
+        assert_eq!(ok_payload(&welcome, 1)["protocol_version"], json!(1), "{v}");
+        assert_eq!(reply_to(&welcome, 1)["v"], json!(1));
+        let offers_0 =
+            json!({ "v": v, "id": 2, "type": "hello", "payload": { "protocol_versions": [0] } });
+        let refused = send(&mut engine, &offers_0);
+        assert_eq!(error_code(&refused, 2), "unsupported_protocol_version");
+        assert_eq!(
+            reply_to(&refused, 2)["error"]["args"]["supported"],
+            json!([1])
+        );
+        // Every other message with another v is refused, whatever the session.
+        let other = json!({ "v": v, "id": 3, "type": "ui.manifest" });
+        assert_eq!(
+            error_code(&send(&mut engine, &other), 3),
+            "unsupported_protocol_version"
+        );
+    }
+    // A hello without v is read too, and every message of a session carries v: 1.
+    let mut engine = engine();
+    let answers = send(
+        &mut engine,
+        &json!({ "id": 1, "type": "hello", "payload": { "protocol_versions": [1] } }),
+    );
+    assert_eq!(ok_payload(&answers, 1)["protocol_version"], json!(1));
+    let doc_id = {
+        let blob = engine.blobs().put_shell(b"").unwrap();
+        let opened = send(
+            &mut engine,
+            &request(2, "doc.open", json!({ "blob": blob })),
+        );
+        ok_payload(&opened, 2)["doc_id"].as_u64().unwrap()
+    };
+    let answers = send(&mut engine, &request(3, "view.set", view(doc_id, 1.0)));
+    assert!(
+        answers.iter().all(|message| message["v"] == json!(1)),
+        "{answers:?}"
+    );
+}
+
+#[test]
+fn platform_and_runtime_change_only_the_manifests_key_data() {
+    // The same session under every platform and runtime, unknown ones included: everything but the manifest's key data is identical (spec §14.1 item 2, CORE-013 AC-2).
+    let session = |shell: Value| -> Vec<Value> {
+        let mut engine = engine();
+        let mut answers = send(
+            &mut engine,
+            &request(
+                1,
+                "hello",
+                json!({ "protocol_versions": [1], "shell": shell }),
+            ),
+        );
+        let blob = engine.blobs().put_shell(b"").unwrap();
+        answers.extend(send(
+            &mut engine,
+            &request(2, "doc.open", json!({ "blob": blob })),
+        ));
+        let doc_id = 1;
+        for (id, kind, payload) in [
+            (3, "view.set", view(doc_id, 1.25)),
+            (4, "input.text", json!({ "doc_id": doc_id, "text": "ab" })),
+            (
+                5,
+                "input.key",
+                json!({ "doc_id": doc_id, "key": "ArrowLeft", "code": "ArrowLeft", "modifiers": { "shift": true } }),
+            ),
+            (
+                6,
+                "input.key",
+                json!({ "doc_id": doc_id, "key": "Backspace", "code": "Backspace" }),
+            ),
+            (7, "render.tile", whole_page(doc_id, 0, 32, 41)),
+            (8, "query.a11y", json!({ "doc_id": doc_id })),
+            (9, "ui.manifest", json!({ "locale": "en" })),
+        ] {
+            answers.extend(send(&mut engine, &request(id, kind, payload)));
+        }
+        // The tile's blob identifier is the same in every session; its pixels are compared through the hash.
+        for answer in &mut answers {
+            if answer["re"] == json!(9) {
+                let manifest = &mut answer["payload"];
+                for command in manifest["commands"].as_array_mut().unwrap() {
+                    command["bindings"] = json!("resolved for the platform");
+                }
+                manifest["keys"]["reserved"] = json!("resolved for the platform and runtime");
+            }
+        }
+        answers
+    };
+    let reference = session(json!({}));
+    for platform in [
+        "windows", "macos", "linux", "ios", "android", "chromeos", "other", "beos", "",
+    ] {
+        for runtime in ["native", "browser", "toaster"] {
+            let shell =
+                json!({ "name": "test", "version": "1", "platform": platform, "runtime": runtime });
+            assert_eq!(session(shell), reference, "{platform} {runtime}");
+        }
+    }
+}
+
+#[test]
 fn a_new_hello_closes_every_document() {
     let mut engine = engine();
     let doc_id = open_document(&mut engine);
     send(
         &mut engine,
-        &request(3, "hello", json!({ "protocol_versions": [0] })),
+        &request(3, "hello", json!({ "protocol_versions": [1] })),
     );
     assert_eq!(
         error_code(
@@ -66,7 +178,7 @@ fn opens_the_mock_document_from_any_blob_and_closes_it() {
     let mut engine = engine();
     send(
         &mut engine,
-        &request(1, "hello", json!({ "protocol_versions": [0] })),
+        &request(1, "hello", json!({ "protocol_versions": [1] })),
     );
     assert_eq!(
         error_code(
@@ -125,7 +237,7 @@ fn opens_the_mock_document_from_any_blob_and_closes_it() {
 }
 
 #[test]
-fn view_set_reports_pages_invalidation_progress_and_the_caret() {
+fn view_set_reports_pages_progress_and_the_caret() {
     let mut engine = engine();
     let doc_id = open_document(&mut engine);
     let answers = send(&mut engine, &request(3, "view.set", view(doc_id, 1.5)));
@@ -135,14 +247,10 @@ fn view_set_reports_pages_invalidation_progress_and_the_caret() {
         .skip(1)
         .map(|message| message["type"].as_str().unwrap())
         .collect();
+    // The document opened in print layout without formatting marks, so this view.set changes no tile (spec §14.6).
     assert_eq!(
         kinds,
-        [
-            "view.pages",
-            "render.invalidate",
-            "view.layout.progress",
-            "overlay.update"
-        ]
+        ["view.pages", "view.layout.progress", "overlay.update"]
     );
     let pages = &answers[1]["payload"]["pages"];
     assert_eq!(pages.as_array().unwrap().len(), 3);
@@ -151,20 +259,143 @@ fn view_set_reports_pages_invalidation_progress_and_the_caret() {
         json!({ "index": 0, "width": 15_544_800, "height": 20_116_800, "section": 0, "x": 0, "y": 0 })
     );
     assert_eq!(pages[2]["y"], json!(2 * (20_116_800 + 457_200)));
-    assert_eq!(answers[3]["payload"]["complete"], json!(true));
-    let caret = &answers[4]["payload"]["caret"];
-    assert_eq!(caret["page"], json!(0));
-    assert_eq!(caret["visible"], json!(true));
+    assert_eq!(answers[2]["payload"]["complete"], json!(true));
+    let overlay = &answers[3]["payload"];
+    assert_eq!(overlay["revision"], json!(1));
+    assert_eq!(overlay["caret"]["page"], json!(0));
+    assert_eq!(overlay["caret"]["visible"], json!(true));
     // Events carry increasing sequence numbers.
     let sequence: Vec<u64> = answers
         .iter()
         .filter_map(|message| message["seq"].as_u64())
         .collect();
-    assert_eq!(sequence, [1, 2, 3, 4]);
+    assert_eq!(sequence, [1, 2, 3]);
     for bad in [0.0, 100.0, -1.0] {
         let refused = send(&mut engine, &request(4, "view.set", view(doc_id, bad)));
         assert_eq!(error_code(&refused, 4), "invalid_request", "zoom {bad}");
     }
+}
+
+/// The revisions of the `render.invalidate` events among `answers`, and how many regions each names.
+fn invalidations(answers: &[Value]) -> Vec<(u64, usize)> {
+    events(answers, "render.invalidate")
+        .iter()
+        .map(|event| {
+            (
+                event["payload"]["revision"].as_u64().unwrap(),
+                event["payload"]["regions"].as_array().unwrap().len(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn view_set_invalidates_only_what_its_change_alters_mode_by_mode() {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    let mut id = 10;
+    let mut set =
+        |engine: &mut bayan_engine::Engine, zoom: f64, width: f64, mode: &str, marks: bool| {
+            id += 1;
+            let payload = json!({
+                "doc_id": doc_id,
+                "viewport": { "x": 0, "y": 0, "width": width, "height": 768 },
+                "zoom": zoom,
+                "device_scale": 2,
+                "mode": mode,
+                "show_formatting_marks": marks,
+            });
+            let answers = send(engine, &request(id, "view.set", payload));
+            assert_eq!(ok_payload(&answers, id), &json!({}));
+            invalidations(&answers)
+        };
+    // Modes whose layout does not follow the window: a new viewport, zoom or device scale invalidates nothing.
+    for mode in ["print", "draft", "focus"] {
+        let first = set(&mut engine, 1.0, 1024.0, mode, false);
+        assert!(first.len() <= 1, "{mode}: {first:?}");
+        assert_eq!(set(&mut engine, 2.0, 1024.0, mode, false), [], "{mode}");
+        assert_eq!(set(&mut engine, 2.0, 640.0, mode, false), [], "{mode}");
+    }
+    // A new mode invalidates every page, and raises the revision.
+    let to_web = set(&mut engine, 2.0, 640.0, "web", false);
+    assert_eq!(to_web.len(), 1);
+    assert_eq!(to_web[0].1, 3);
+    let revision = to_web[0].0;
+    // In web, whose layout follows the window, a new width or zoom invalidates what the new layout changes: the mock document lays web out like print, so nothing.
+    assert_eq!(set(&mut engine, 2.0, 800.0, "web", false), []);
+    assert_eq!(set(&mut engine, 0.5, 800.0, "web", false), []);
+    // Formatting marks invalidate every page, both ways.
+    assert_eq!(
+        set(&mut engine, 0.5, 800.0, "web", true),
+        [(revision + 1, 3)]
+    );
+    assert_eq!(
+        set(&mut engine, 0.5, 800.0, "web", false),
+        [(revision + 2, 3)]
+    );
+    assert_eq!(
+        set(&mut engine, 0.5, 800.0, "print", false),
+        [(revision + 3, 3)]
+    );
+}
+
+#[test]
+fn revisions_tell_the_shell_which_tiles_are_current() {
+    let mut engine = engine();
+    let blob = {
+        send(
+            &mut engine,
+            &request(1, "hello", json!({ "protocol_versions": [1] })),
+        );
+        engine.blobs().put_shell(b"").unwrap()
+    };
+    let opened = send(
+        &mut engine,
+        &request(2, "doc.open", json!({ "blob": blob })),
+    );
+    let doc_id = ok_payload(&opened, 2)["doc_id"].as_u64().unwrap();
+    assert_eq!(ok_payload(&opened, 2)["revision"], json!(1));
+    let tile = |engine: &mut bayan_engine::Engine, id: u64| {
+        let answers = send(
+            engine,
+            &request(id, "render.tile", whole_page(doc_id, 0, 32, 41)),
+        );
+        ok_payload(&answers, id)["revision"].as_u64().unwrap()
+    };
+    let direct = |engine: &mut bayan_engine::Engine| {
+        let request = serde_json::to_vec(&whole_page(doc_id, 0, 32, 41)).unwrap();
+        let outcome = engine.render_tile(&request, 32, 41, 0);
+        assert!(outcome.pixels.is_ok());
+        outcome.revision
+    };
+    assert_eq!((tile(&mut engine, 3), direct(&mut engine)), (1, 1));
+    // Typing changes the tiles: the invalidation carries the new revision, and so does the overlay.
+    let typed = send(
+        &mut engine,
+        &request(4, "input.text", json!({ "doc_id": doc_id, "text": "a" })),
+    );
+    assert_eq!(invalidations(&typed), [(2, 1)]);
+    assert_eq!(
+        events(&typed, "overlay.update")[0]["payload"]["revision"],
+        json!(2)
+    );
+    // A tile rendered before the change shows revision 1, lower than the invalidation that covers it: the shell knows it is stale, whichever arrived first. Tiles rendered now show revision 2.
+    assert_eq!((tile(&mut engine, 5), direct(&mut engine)), (2, 2));
+    // Moving the caret changes no tile: no invalidation, and the overlay keeps the revision.
+    let moved = send(
+        &mut engine,
+        &request(
+            6,
+            "input.key",
+            json!({ "doc_id": doc_id, "key": "ArrowLeft", "code": "ArrowLeft" }),
+        ),
+    );
+    assert_eq!(invalidations(&moved), []);
+    assert_eq!(
+        events(&moved, "overlay.update")[0]["payload"]["revision"],
+        json!(2)
+    );
+    assert_eq!(events(&moved, "a11y.update").len(), 1);
 }
 
 #[test]
@@ -674,4 +905,152 @@ fn a_tile_too_large_is_over_a_limit_and_a_rectangle_out_of_range_is_invalid() {
     let tile = json!({ "doc_id": doc_id, "page": 0, "rect": { "x": -edge, "y": edge, "width": edge, "height": edge }, "width": 1, "height": 1 });
     let answers = send(&mut engine, &request(5, "render.tile", tile));
     assert!(ok_payload(&answers, 5)["blob"].is_u64());
+}
+
+/// Whether a text is a version as Semantic Versioning 2.0.0 writes it (semver.org, the grammar of its §2, §9 and §10): `MAJOR.MINOR.PATCH`, numbers without leading zeros, then optionally `-` and dot-separated pre-release identifiers (numeric ones without leading zeros) and `+` and dot-separated build identifiers.
+fn is_semantic_version(text: &str) -> bool {
+    let number = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    let identifier = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    };
+    let (rest, build) = match text.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (text, None),
+    };
+    let (core, pre_release) = match rest.split_once('-') {
+        Some((core, pre_release)) => (core, Some(pre_release)),
+        None => (rest, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| number(part))
+        && pre_release.is_none_or(|identifiers| {
+            identifiers.split('.').all(|part| {
+                identifier(part)
+                    && (!part.bytes().all(|byte| byte.is_ascii_digit()) || number(part))
+            })
+        })
+        && build.is_none_or(|identifiers| identifiers.split('.').all(identifier))
+}
+
+#[test]
+fn the_engine_version_is_semantic_versioning_of_at_most_64_ascii_characters() {
+    // Spec §14.1 item 6: what welcome and the worker host's ready carry.
+    let version = bayan_engine::ENGINE_VERSION;
+    assert!(version.len() <= 64 && version.is_ascii(), "{version}");
+    assert!(is_semantic_version(version), "{version}");
+    let mut engine = engine();
+    let welcome = send(
+        &mut engine,
+        &request(1, "hello", json!({ "protocol_versions": [1] })),
+    );
+    assert_eq!(ok_payload(&welcome, 1)["engine_version"], json!(version));
+    // The validator itself.
+    for valid in [
+        "0.0.0",
+        "1.2.3",
+        "10.20.30",
+        "1.0.0-alpha.1",
+        "1.0.0-0.3.7",
+        "1.0.0+20130313144700",
+        "1.0.0-beta+exp.sha.5114f85",
+    ] {
+        assert!(is_semantic_version(valid), "{valid}");
+    }
+    for invalid in [
+        "1.2",
+        "1.2.3.4",
+        "01.2.3",
+        "1.2.3-",
+        "1.2.3-01",
+        "1.2.3+",
+        "1.2.3-a..b",
+        "v1.2.3",
+        "1.2.3 ",
+    ] {
+        assert!(!is_semantic_version(invalid), "{invalid}");
+    }
+}
+
+#[test]
+fn query_a11y_loads_a_range_of_a_nodes_children() {
+    let mut engine = engine();
+    let doc_id = open_document(&mut engine);
+    let whole = send(
+        &mut engine,
+        &request(3, "query.a11y", json!({ "doc_id": doc_id })),
+    );
+    let children = ok_payload(&whole, 3)["root"]["children"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(children.len() > 4);
+    // The mock document fits one message, so a plain query has no child_count.
+    assert!(ok_payload(&whole, 3)["root"].get("child_count").is_none());
+    let part = send(
+        &mut engine,
+        &request(
+            4,
+            "query.a11y",
+            json!({ "doc_id": doc_id, "node": 1, "children": { "start": 2, "count": 2 } }),
+        ),
+    );
+    let root = &ok_payload(&part, 4)["root"];
+    assert_eq!(root["child_count"], json!(children.len()));
+    assert_eq!(root["children_start"], json!(2));
+    assert_eq!(root["children"], json!(children[2..4]));
+    // From the start, with room for all of them: the node holds them all and carries no child_count.
+    let all = send(
+        &mut engine,
+        &request(
+            5,
+            "query.a11y",
+            json!({ "doc_id": doc_id, "children": { "start": 0, "count": 1000 } }),
+        ),
+    );
+    assert_eq!(ok_payload(&all, 5)["root"]["children"], json!(children));
+    assert!(ok_payload(&all, 5)["root"].get("child_count").is_none());
+    // A count of 0 asks for nothing and is refused; a node that does not exist is not found.
+    let none = send(
+        &mut engine,
+        &request(
+            6,
+            "query.a11y",
+            json!({ "doc_id": doc_id, "children": { "start": 0, "count": 0 } }),
+        ),
+    );
+    assert_eq!(error_code(&none, 6), "invalid_request");
+    let unknown = send(
+        &mut engine,
+        &request(
+            7,
+            "query.a11y",
+            json!({ "doc_id": doc_id, "node": 999_999, "children": { "start": 0, "count": 1 } }),
+        ),
+    );
+    assert_eq!(error_code(&unknown, 7), "not_found");
+}
+
+#[test]
+fn a_platform_of_the_wrong_type_is_an_invalid_request() {
+    // An unknown name counts as other (spec §14.1), but a value that is not a name breaks the payload's shape.
+    let mut engine = engine();
+    for shell in [json!({ "platform": 7 }), json!({ "runtime": ["browser"] })] {
+        let answers = send(
+            &mut engine,
+            &request(
+                1,
+                "hello",
+                json!({ "protocol_versions": [1], "shell": shell }),
+            ),
+        );
+        assert_eq!(error_code(&answers, 1), "invalid_request", "{shell}");
+    }
 }

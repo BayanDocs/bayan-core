@@ -1,5 +1,5 @@
 /*
- * bayan_ffi.h: the C interface between a BayanDocs shell and the engine (engine protocol v0, docs repository: specs/engine-protocol.md section 3.1).
+ * bayan_ffi.h: the C interface between a BayanDocs shell and the engine (engine protocol v1, docs repository: specs/engine-protocol.md section 3.1).
  *
  * Rules for callers:
  * - All JSON is UTF-8 and is passed with an explicit length; it is not NUL-terminated.
@@ -18,6 +18,10 @@
  *   engine: freeing another one waits for that engine's thread, which may be waiting for this one.
  * - No function lets a Rust panic escape; failures are reported through return values and engine.error messages.
  *   The callback must not let a C++ exception escape either.
+ * - After a panic the engine discards its session and continues with a fresh one, at most three times in any ten
+ *   minutes (spec section 14.2): the engine.error with recoverable false carries restart, { number, limit } while
+ *   restarts remain and null once they are used up. Then the engine has stopped: bayan_engine_post and
+ *   bayan_render_tile return BAYAN_STATUS_INTERNAL_ERROR, and the callback is not called again.
  * - Panics inside the engine are not printed, because their messages could quote document content: the first
  *   bayan_engine_new installs a Rust panic hook that stays silent for the engine's threads and calls, and hands
  *   every other panic in the process to the hook installed before.
@@ -124,7 +128,7 @@ BayanStatus bayan_engine_set_callback(BayanEngine *engine,
                                       void *user_data);
 
 /*
- Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
+ Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping or has stopped after using up its restarts (spec section 14.2).
 
  # Safety
 
@@ -174,12 +178,13 @@ BayanStatus bayan_blob_release(BayanEngine *engine, BayanBlobId blob);
  - `width`, `height`: the tile's size in pixels, 1 to 4,096 each.
  - `stride`: the distance between the starts of two rows, in bytes; at least 4 * `width`. The bytes between rows are left untouched.
  - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` * (`height` - 1) + 4 * `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
+ - `revision_out`: NULL, or where to write the render revision that the tile shows (spec section 14.6), when the function returns `BAYAN_STATUS_OK`. Keep a tile while no `render.invalidate` with a higher revision covers it; tiles and messages arrive in no particular order.
 
- The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock.
+ The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock. Once the engine has stopped after using up its restarts (spec section 14.2), it returns `BAYAN_STATUS_INTERNAL_ERROR`.
 
  # Safety
 
- `engine` must be a live engine, `request_json` must point to `request_len` initialized, readable bytes, and `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call.
+ `engine` must be a live engine, `request_json` must point to `request_len` initialized, readable bytes, `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call, and `revision_out` must be NULL or point to a writable `uint64_t`.
  */
 BayanStatus bayan_render_tile(BayanEngine *engine,
                               const uint8_t *request_json,
@@ -188,7 +193,8 @@ BayanStatus bayan_render_tile(BayanEngine *engine,
                               size_t out_capacity,
                               uint32_t width,
                               uint32_t height,
-                              size_t stride);
+                              size_t stride,
+                              uint64_t *revision_out);
 
 #ifdef __cplusplus
 }  // extern "C"

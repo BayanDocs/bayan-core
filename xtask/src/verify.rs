@@ -48,7 +48,22 @@ pub const BUILD_SCRIPTS: [(&str, &str); 0] = [];
 pub const PROC_MACROS: [(&str, &str); 0] = [];
 
 /// Files that workspace members read as data, with `include_str!` or `include_bytes!`, although the source check does not read them, with the members that read them and the reason. After each Clippy run, the Clippy step compares the files that the compiler read for every unit of a workspace member, as the dependency file it wrote for the unit lists them, with the files that the source check read (`dep_info.rs`). Any other file fails the step, unless it is one of Clippy's own two (the root clippy.toml and Cargo.toml, named as Clippy names them) or listed here for the unit's member. A dependency file does not say whether a file was read as data or compiled as code, so reviewers check that every file listed here is data, never Rust code. A file that a member it is listed for read in none of the runs, a file that the source check reads anyway, and a member that does not exist fail the step too, so the list cannot go stale.
-pub const DATA_FILES: [DataFiles; 9] = [
+pub const DATA_FILES: [DataFiles; 11] = [
+    DataFiles {
+        files: &[
+            "crates/bayan-engine/protocol/conformance/a11y-limits.json",
+            "crates/bayan-engine/protocol/conformance/conformance.schema.json",
+            "crates/bayan-engine/protocol/conformance/keys.json",
+            "crates/bayan-engine/protocol/conformance/tile-grid.json",
+        ],
+        members: &["bayan-engine"],
+        reason: "the conformance vectors of engine protocol §15 and their JSON Schema (CORE-013), test cases with their expected results that both shells read too, which bayan-engine's tests validate against the schema and check, every engine case against the code and every shell case against reference implementations of their own; compiled in, so that those tests read no files and also run in WebAssembly",
+    },
+    DataFiles {
+        files: &["crates/bayan-engine/protocol/conformance/restart.json"],
+        members: &["bayan-engine", "bayan-wasm"],
+        reason: "the restart cases of the conformance vectors (engine protocol §15, CORE-013), which bayan-engine's tests check against the native binding and a reference shell, and bayan-wasm's tests against the web binding's restart allowance; compiled in, so that those tests read no files and also run in WebAssembly",
+    },
     DataFiles {
         files: &[
             "crates/bayan-opc/tests/fixtures/python-docx/default.docx",

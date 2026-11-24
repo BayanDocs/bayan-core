@@ -65,7 +65,7 @@ fn a_forced_panic_becomes_an_error_and_a_fresh_session() {
 fn a_panic_without_a_request_identifier_is_still_reported() {
     let mut engine = engine_with(panicking());
     open_document(&mut engine);
-    let answers = send(&mut engine, &json!({ "v": 0, "type": "diag.panic" }));
+    let answers = send(&mut engine, &json!({ "v": 1, "type": "diag.panic" }));
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0]["type"], json!("engine.error"));
     assert_eq!(answers[0]["payload"]["recoverable"], json!(false));
@@ -117,14 +117,14 @@ fn event_numbers_keep_increasing_across_a_panic() {
     let doc_id = open_document(&mut engine);
     let before = send(
         &mut engine,
-        &json!({ "v": 0, "type": "input.text", "payload": { "doc_id": doc_id, "text": "a" } }),
+        &json!({ "v": 1, "type": "input.text", "payload": { "doc_id": doc_id, "text": "a" } }),
     );
     let last_before = before
         .iter()
         .filter_map(|message| message["seq"].as_u64())
         .max()
         .unwrap();
-    let panic = send(&mut engine, &json!({ "v": 0, "type": "diag.panic" }));
+    let panic = send(&mut engine, &json!({ "v": 1, "type": "diag.panic" }));
     assert_eq!(panic[0]["seq"].as_u64(), Some(last_before + 1));
 }
 
@@ -143,9 +143,9 @@ fn a_recording_reproduces_a_panic() {
     // The recording kept running across the panic.
     let answers = send(
         &mut engine,
-        &request(1, "hello", json!({ "protocol_versions": [0] })),
+        &request(1, "hello", json!({ "protocol_versions": [1] })),
     );
-    assert_eq!(ok_payload(&answers, 1)["protocol_version"], json!(0));
+    assert_eq!(ok_payload(&answers, 1)["protocol_version"], json!(1));
     let stopped = send(&mut engine, &request(6, "diag.record.stop", json!({})));
     let stopped = ok_payload(&stopped, 6);
     assert_eq!(stopped["entries"], json!(3));
@@ -186,12 +186,12 @@ fn the_engine_thread_survives_a_panic() {
     let next = || -> Value {
         serde_json::from_str(&receiver.recv_timeout(Duration::from_secs(10)).unwrap()).unwrap()
     };
-    post(request(1, "hello", json!({ "protocol_versions": [0] })));
+    post(request(1, "hello", json!({ "protocol_versions": [1] })));
     assert_eq!(next()["re"], json!(1));
     post(request(2, "diag.panic", json!({})));
     assert_eq!(next()["error"]["code"], json!("panic"));
     assert_eq!(next()["payload"]["recoverable"], json!(false));
-    post(request(3, "hello", json!({ "protocol_versions": [0] })));
+    post(request(3, "hello", json!({ "protocol_versions": [1] })));
     assert_eq!(next()["ok"], json!(true));
     post(request(4, "doc.open", json!({ "blob": blob })));
     assert_eq!(next()["type"], json!("doc.opened"));

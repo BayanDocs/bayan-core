@@ -250,7 +250,7 @@ fn a_recording_keeps_the_blobs_it_used() {
     let mut engine = engine_with(Config::default());
     send(
         &mut engine,
-        &request(1, "hello", json!({ "protocol_versions": [0] })),
+        &request(1, "hello", json!({ "protocol_versions": [1] })),
     );
     send(&mut engine, &request(2, "diag.record.start", json!({})));
     let blob = engine.blobs().put_shell(b"document bytes").unwrap();

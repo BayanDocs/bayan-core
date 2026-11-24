@@ -1,5 +1,6 @@
-// The Node.js test driver of the WebAssembly package (CORE-007): it runs bayan-worker.js the way the web shell does,
-// in a worker of its own, and goes through handshake → open → render a tile → record → replay, then the panic path and
+// The Node.js test driver of the WebAssembly package (CORE-007, CORE-013): it runs bayan-worker.js the way the web shell
+// does, in a worker of its own, and goes through handshake → open → render a tile → record → replay, then the panic path,
+// the restart allowance with every failure case of the package's conformance/restart.json, the module's integrity, and
 // the worker host's edge cases. It uses only Node.js itself: no npm packages.
 //
 // Usage: node node-driver.mjs <directory of the WebAssembly package>
@@ -10,6 +11,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -89,8 +92,13 @@ class Shell {
   }
 
   request(id, type, payload, transfer = []) {
-    this.send({ v: 0, id, type, ...(payload === undefined ? {} : { payload }) }, transfer);
+    this.send({ v: 1, id, type, ...(payload === undefined ? {} : { payload }) }, transfer);
     return this.reply(id);
+  }
+
+  /** Sets the time that the worker's performance.now() gives, in milliseconds (worker-scope.mjs). */
+  setClock(ms) {
+    this.send({ "bayan-test": "clock", ms });
   }
 
   /** The size of the engine's WebAssembly memory in bytes, as the fake scope reports it. */
@@ -174,13 +182,19 @@ async function main() {
       shell.send({ worker: "init", config: { test: { allow_panic: true } } });
       const ready = await shell.status();
       assert.equal(ready.worker, "ready");
-      assert.match(ready.engine_version, /^\d+\.\d+\.\d+/);
+      // Semantic Versioning 2.0, at most 64 ASCII characters (§14.1 item 6).
+      assert.match(
+        ready.engine_version,
+        /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/,
+      );
+      assert.ok(ready.engine_version.length <= 64);
     });
 
     await check("handshake → open → render → record → replay gives identical tile hashes", async () => {
-      const welcome = await shell.request(1, "hello", { protocol_versions: [0] });
+      const welcome = await shell.request(1, "hello", { protocol_versions: [1] });
       assert.equal(welcome.type, "welcome");
-      assert.equal(ok(welcome).protocol_version, 0);
+      assert.equal(welcome.v, 1);
+      assert.equal(ok(welcome).protocol_version, 1);
       ok(await shell.request(2, "diag.record.start"));
       const file = bytesOf("any bytes: protocol v0 opens the mock document");
       const opened = await shell.request(3, "doc.open", { blob: file }, [file]);
@@ -218,11 +232,12 @@ async function main() {
       const event = await shell.event("engine.error");
       assert.equal(event.payload.code, "panic");
       assert.equal(event.payload.recoverable, false);
+      assert.deepEqual(event.payload.restart, { number: 1, limit: 3 });
       // The replacement instance numbers its events from 1 again (§4).
       assert.equal(event.seq, 1);
       // The session is gone; a new handshake starts a working one.
       assert.equal(errorOf(await shell.request(8, "query.a11y", { doc_id: 1 })).code, "handshake_required");
-      ok(await shell.request(9, "hello", { protocol_versions: [0] }));
+      ok(await shell.request(9, "hello", { protocol_versions: [1] }));
       const file = bytesOf("again");
       const docId = ok(await shell.request(10, "doc.open", { blob: file }, [file])).doc_id;
       assert.equal(ok(await shell.request(11, "render.tile", tileRequest(docId))).hash, tileHash);
@@ -293,9 +308,9 @@ async function main() {
 
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
       // With a request identifier, the refusal is the reply.
-      shell.send({ v: 0, id: 15, type: "hello", payload: { protocol_versions: [0n] } });
+      shell.send({ v: 1, id: 15, type: "hello", payload: { protocol_versions: [1n] } });
       assert.equal(errorOf(await shell.reply(15)).code, "invalid_message");
-      shell.send({ v: 0, type: "hello", payload: { protocol_versions: [0n] } });
+      shell.send({ v: 1, type: "hello", payload: { protocol_versions: [1n] } });
       const event = await shell.event("engine.error");
       assert.equal(event.payload.code, "invalid_message");
       assert.equal(event.payload.recoverable, true);
@@ -309,9 +324,9 @@ async function main() {
       // Tiles whose bitmaps take a while, between quick queries: no answer may overtake an earlier one.
       for (let id = 20; id < 30; id += 1) {
         if (id % 2 === 0) {
-          shell.send({ v: 0, id, type: "render.tile", payload: tileRequest(1, SLOW_BITMAP_WIDTH) });
+          shell.send({ v: 1, id, type: "render.tile", payload: tileRequest(1, SLOW_BITMAP_WIDTH) });
         } else {
-          shell.send({ v: 0, id, type: "query.a11y", payload: { doc_id: 1 } });
+          shell.send({ v: 1, id, type: "query.a11y", payload: { doc_id: 1 } });
         }
       }
       for (let id = 20; id < 30; id += 1) {
@@ -333,7 +348,7 @@ async function main() {
       // Only the very first message may be init: this one comes after another control message and is ignored.
       plain.send({ worker: "ping" });
       plain.send({ worker: "init", config: { test: { allow_panic: true } } });
-      plain.send({ v: 0, id: 1, type: "hello", payload: { protocol_versions: [0] } });
+      plain.send({ v: 1, id: 1, type: "hello", payload: { protocol_versions: [1] } });
       assert.equal((await plain.take(() => true, "any message")).worker, "ready");
       ok(await plain.reply(1));
       // The default configuration refuses diag.panic.
@@ -346,7 +361,7 @@ async function main() {
   await check("a large unknown field costs the engine about the size of its message, once", async () => {
     const fresh = new Shell();
     try {
-      fresh.send({ v: 0, id: 1, type: "hello", payload: { protocol_versions: [0] } });
+      fresh.send({ v: 1, id: 1, type: "hello", payload: { protocol_versions: [1] } });
       assert.equal((await fresh.status()).worker, "ready");
       ok(await fresh.reply(1));
       const before = await fresh.memory();
@@ -371,6 +386,8 @@ async function main() {
       [{ worker: "init", wasm_url: "missing.wasm" }, "load_failed"],
       // Another origin serves the same module in this test, but the worker host loads the engine only from its own.
       [{ worker: "init", wasm_url: "https://cdn.example/bayan_wasm_bg.wasm" }, "load_failed"],
+      // Nor by a redirect from its own origin to another (see worker-scope.mjs).
+      [{ worker: "init", wasm_url: "redirect-to-elsewhere.wasm" }, "load_failed"],
     ]) {
       const failing = new Shell();
       try {
@@ -378,7 +395,7 @@ async function main() {
         const status = await failing.status();
         assert.deepEqual(status, { worker: "failed", reason });
         // After failing, the worker ignores protocol messages.
-        failing.send({ v: 0, id: 1, type: "hello", payload: { protocol_versions: [0] } });
+        failing.send({ v: 1, id: 1, type: "hello", payload: { protocol_versions: [1] } });
         await new Promise((resolve) => setTimeout(resolve, 200));
         assert.deepEqual(failing.inbox, []);
       } finally {
@@ -387,8 +404,135 @@ async function main() {
     }
   });
 
+  await check("the package ships the conformance vectors and their schema", async () => {
+    const files = (await readdir(path.join(packageDir, "conformance"))).sort();
+    assert.deepEqual(files, ["a11y-limits.json", "conformance.schema.json", "keys.json", "restart.json", "tile-grid.json"]);
+  });
+
+  await check("the worker host applies the restart allowance with its own clock and stops after the third", async () => {
+    // The restart at 1,000 ms is 599,999 ms old at the fourth failure, so it still counts.
+    const restarts = await failuresAt([1_000, 2_000, 3_000, 600_999]);
+    assert.deepEqual(restarts.values, [{ number: 1, limit: 3 }, { number: 2, limit: 3 }, { number: 3, limit: 3 }, null]);
+    assert.equal(restarts.ignoredAfterwards, true);
+  });
+
+  await check("every failure case of conformance/restart.json passes against the worker host", async () => {
+    const vectors = JSON.parse(await readFile(path.join(packageDir, "conformance", "restart.json"), "utf8"));
+    let run = 0;
+    for (const vector of vectors.cases) {
+      if (!vector.for.includes("binding") || vector.failures_ms === undefined) {
+        continue;
+      }
+      assert.ok(vector.runtime === undefined || vector.runtime === "web", vector.id);
+      const restarts = await failuresAt(vector.failures_ms);
+      assert.deepEqual(restarts.values, vector.expect.restarts, vector.id);
+      if (vector.expect.restarts.at(-1) === null) {
+        assert.equal(restarts.ignoredAfterwards, true, vector.id);
+      }
+      run += 1;
+    }
+    assert.ok(run >= 5);
+  });
+
+  await check("on the web, a panic during a replay replaces the instance and counts like any other", async () => {
+    // A recording made on the web ends at a panic, so this one is made without one, and its only entry then becomes
+    // diag.panic: the replay runs in the instance that holds the shell's session, and the panic stops it (§14.2 item 4).
+    const replaying = new Shell();
+    try {
+      replaying.send({ worker: "init", config: { test: { allow_panic: true } } });
+      assert.equal((await replaying.status()).worker, "ready");
+      replaying.setClock(5_000);
+      ok(await replaying.request(1, "hello", { protocol_versions: [1] }));
+      ok(await replaying.request(2, "diag.record.start"));
+      ok(await replaying.request(3, "ui.manifest", {}));
+      const stopped = ok(await replaying.request(4, "diag.record.stop"));
+      const recording = JSON.parse(new TextDecoder().decode(stopped.blob));
+      assert.equal(recording.entries.length, 1);
+      recording.entries[0].text = JSON.stringify({ v: 1, id: 9, type: "diag.panic" });
+      const restarts = [];
+      for (let round = 0; round < 4; round += 1) {
+        replaying.setClock(5_000 + round);
+        const id = 10 + 2 * round;
+        if (round > 0) {
+          ok(await replaying.request(id - 1, "hello", { protocol_versions: [1] }));
+        }
+        const blob = new TextEncoder().encode(JSON.stringify(recording)).buffer;
+        assert.equal(errorOf(await replaying.request(id, "diag.replay", { blob }, [blob])).code, "panic");
+        restarts.push((await replaying.event("engine.error")).payload.restart);
+      }
+      assert.deepEqual(restarts, [{ number: 1, limit: 3 }, { number: 2, limit: 3 }, { number: 3, limit: 3 }, null]);
+    } finally {
+      await replaying.close();
+    }
+  });
+
+  await check("with wasm_integrity, the engine starts only from the module with that hash", async () => {
+    const module = await readFile(path.join(packageDir, "bayan_wasm_bg.wasm"));
+    const sha384 = `sha384-${createHash("sha384").update(module).digest("base64")}`;
+    const wrong = `sha384-${createHash("sha384").update("another module").digest("base64")}`;
+    const sha256 = `sha256-${createHash("sha256").update(module).digest("base64")}`;
+    for (const [integrity, worker] of [
+      [sha384, "ready"],
+      [`${sha256} ${sha384}`, "ready"],
+      [wrong, "failed"],
+      [`${sha384.slice(0, -4)}AAA=`, "failed"],
+      // Metadata without a hash the browser knows would make it accept any bytes, so the worker host refuses it.
+      ["sha384-", "failed"],
+      ["md5-AAAA", "failed"],
+      ["", "failed"],
+      [42, "failed"],
+    ]) {
+      const checked = new Shell();
+      try {
+        checked.send({ worker: "init", wasm_integrity: integrity });
+        const status = await checked.status();
+        assert.equal(status.worker, worker, String(integrity));
+        if (worker === "failed") {
+          assert.deepEqual(status, { worker: "failed", reason: "load_failed" });
+        } else {
+          ok(await checked.request(1, "hello", { protocol_versions: [1] }));
+        }
+      } finally {
+        await checked.close();
+      }
+    }
+  });
+
   console.log(`${checks.length} checks passed`);
   console.log(`tile ${tileHash}`);
+}
+
+/**
+ * Makes a fresh worker's engine fail at each of the given times on its clock, after a new hello each time, and returns
+ * the restart of each engine.error, and whether the worker then ignores messages, as after the allowance is used up.
+ */
+async function failuresAt(times) {
+  const shell = new Shell();
+  try {
+    shell.send({ worker: "init", config: { test: { allow_panic: true } } });
+    assert.equal((await shell.status()).worker, "ready");
+    const values = [];
+    let id = 1;
+    for (const time of times) {
+      shell.setClock(time);
+      ok(await shell.request(id, "hello", { protocol_versions: [1] }));
+      assert.equal(errorOf(await shell.request(id + 1, "diag.panic")).code, "panic");
+      const event = await shell.event("engine.error");
+      assert.equal(event.payload.recoverable, false);
+      values.push(event.payload.restart);
+      id += 2;
+      if (event.payload.restart === null) {
+        break;
+      }
+    }
+    // Once stopped, the worker host ignores every message.
+    shell.send({ v: 1, id: 999, type: "hello", payload: { protocol_versions: [1] } });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const ignoredAfterwards = shell.inbox.length === 0;
+    return { values, ignoredAfterwards };
+  } finally {
+    await shell.close();
+  }
 }
 
 main().catch((error) => {

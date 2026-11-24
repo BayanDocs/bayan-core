@@ -74,6 +74,15 @@
             "null"
           ]
         },
+        "child_count": {
+          "description": "The number of the node's children, on a node that holds fewer than all of them (spec §14.7): the shell loads the rest with `query.a11y` and a `children` range.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "children": {
           "description": "The node's children, in reading order.",
           "items": {
@@ -81,6 +90,15 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "children_start": {
+          "description": "The index of the first child that the node holds, on a node that holds some but not all of its children; they are always one unbroken run.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -355,6 +373,28 @@
       ],
       "type": "object"
     },
+    "ChildRange": {
+      "description": "A range of a node's children: at most `count` of them, from index `start` on.",
+      "properties": {
+        "count": {
+          "description": "The most children to return; at least 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "The index of the first child, counting from 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "count"
+      ],
+      "type": "object"
+    },
     "CompositionPhase": {
       "description": "The phase of an input method composition.",
       "oneOf": [
@@ -408,7 +448,7 @@
       "properties": {
         "blob": {
           "$ref": "#/$defs/BlobRef",
-          "description": "The document's bytes. The v0 skeleton opens the mock document whatever they contain."
+          "description": "The document's bytes. Until real documents can be opened, the engine opens the mock document whatever they contain."
         },
         "file_name_hint": {
           "default": null,
@@ -451,6 +491,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "revision": {
+          "description": "The document's render revision (spec §14.6): a positive integer below 2⁵³ that grows with every change to what any of the document's tiles shows.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "warnings": {
           "description": "Problems found while opening, as Fluent messages.",
           "items": {
@@ -461,9 +507,23 @@
       },
       "required": [
         "doc_id",
+        "revision",
         "page_count_estimate",
         "warnings",
         "fonts"
+      ],
+      "type": "object"
+    },
+    "DocumentKey": {
+      "description": "A key that the engine handles in the document area, with any modifiers.",
+      "properties": {
+        "key": {
+          "description": "The key, as the DOM's `KeyboardEvent.key` names it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
       ],
       "type": "object"
     },
@@ -490,8 +550,19 @@
           "type": "string"
         },
         "recoverable": {
-          "description": "`true`: the engine kept its state. `false`: it discarded its session, and the shell starts a new one with `hello`.",
+          "description": "`true`: the engine kept its state. `false`: it discarded its session; `restart` says what follows.",
           "type": "boolean"
+        },
+        "restart": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Restart"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "On every `engine.error` with `recoverable: false`, added by the engine's binding (spec §14.2): `{ number, limit }` while the restart allowance lasts, and the shell starts restart `number` of `limit` with `hello`; `null` when it is used up, and the engine has stopped and answers nothing more. Absent on errors the engine recovered from."
         }
       },
       "required": [
@@ -512,7 +583,7 @@
         },
         {
           "const": "unsupported_protocol_version",
-          "description": "`v` is not 0, or `hello` offers no common version.",
+          "description": "A message other than `hello` whose `v` is not the protocol version, or a `hello` that offers no common version.",
           "type": "string"
         },
         {
@@ -522,7 +593,7 @@
         },
         {
           "const": "unsupported_message",
-          "description": "An unknown message type, or one v0 does not implement.",
+          "description": "An unknown message type, or one this engine does not implement.",
           "type": "string"
         },
         {
@@ -681,7 +752,7 @@
           "type": "string"
         },
         "v": {
-          "const": 0,
+          "const": 1,
           "description": "The protocol version."
         }
       },
@@ -715,7 +786,7 @@
       "type": "object"
     },
     "Hello": {
-      "description": "`hello`: the shell starts a session (spec §5).",
+      "description": "`hello`: the shell starts a session (spec §5, §14.1). The engine reads it whatever its envelope's `v`.",
       "properties": {
         "capabilities": {
           "anyOf": [
@@ -738,7 +809,7 @@
           ]
         },
         "protocol_versions": {
-          "description": "The protocol versions the shell speaks; must contain 0.",
+          "description": "The protocol versions the shell speaks; must contain 1, the only version this engine speaks.",
           "items": {
             "format": "uint32",
             "minimum": 0,
@@ -946,6 +1017,53 @@
       ],
       "type": "object"
     },
+    "KeyBinding": {
+      "description": "A key binding of a command (spec §14.3): a key, named by `key` or by `code`, with all four modifiers.",
+      "properties": {
+        "alt": {
+          "description": "Alt (Option on macOS).",
+          "type": "boolean"
+        },
+        "code": {
+          "description": "The physical key as the DOM's `KeyboardEvent.code` names it, such as `KeyA`, for a binding that follows a key's position rather than its character.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ctrl": {
+          "description": "Control.",
+          "type": "boolean"
+        },
+        "key": {
+          "description": "The key as the DOM's `KeyboardEvent.key` names it: a lower-case letter, a digit, a punctuation character, or a name such as `F7`. Exactly one of `key` and `code` is given.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "The binding as the platform writes it, such as `Ctrl+B` or `⌘B`.",
+          "type": "string"
+        },
+        "meta": {
+          "description": "Meta (Command on macOS and iOS).",
+          "type": "boolean"
+        },
+        "shift": {
+          "description": "Shift.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ctrl",
+        "shift",
+        "alt",
+        "meta",
+        "label"
+      ],
+      "type": "object"
+    },
     "Modifiers": {
       "description": "The modifier keys held during an input event.",
       "properties": {
@@ -993,14 +1111,20 @@
           "type": "integer"
         },
         "highlights": {
-          "description": "Find highlights (Phase 2); always empty in v0.",
+          "description": "Find highlights (Phase 2); always empty so far.",
           "items": true,
           "type": "array"
         },
         "remote": {
-          "description": "Other people's cursors (Phase 3); always empty in v0.",
+          "description": "Other people's cursors (Phase 3); always empty so far.",
           "items": true,
           "type": "array"
+        },
+        "revision": {
+          "description": "The render revision that the rectangles belong to (spec §14.6).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "selection": {
           "description": "The selection's rectangles, per page.",
@@ -1012,6 +1136,7 @@
       },
       "required": [
         "doc_id",
+        "revision",
         "caret",
         "selection",
         "remote",
@@ -1085,6 +1210,46 @@
       ],
       "type": "object"
     },
+    "Platform": {
+      "description": "The operating system whose keyboard conventions apply (spec §14.1). The engine uses it only to resolve the UI manifest's key bindings (spec §14.3); nothing that affects layout or rendering depends on it (ADR-0004).",
+      "oneOf": [
+        {
+          "const": "windows",
+          "description": "Windows.",
+          "type": "string"
+        },
+        {
+          "const": "macos",
+          "description": "macOS.",
+          "type": "string"
+        },
+        {
+          "const": "linux",
+          "description": "Linux.",
+          "type": "string"
+        },
+        {
+          "const": "ios",
+          "description": "iOS and iPadOS.",
+          "type": "string"
+        },
+        {
+          "const": "android",
+          "description": "Android.",
+          "type": "string"
+        },
+        {
+          "const": "chromeos",
+          "description": "ChromeOS.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Any other system, and any value the engine does not know; Ctrl stays Ctrl.",
+          "type": "string"
+        }
+      ]
+    },
     "PointerKind": {
       "description": "What a pointer did.",
       "oneOf": [
@@ -1131,8 +1296,20 @@
       ]
     },
     "QueryA11y": {
-      "description": "`query.a11y`: asks for the accessibility tree.",
+      "description": "`query.a11y`: asks for the accessibility tree (spec §6.6, §14.7).",
       "properties": {
+        "children": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChildRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A range of the node's children to load, for a node that a tree gave with `child_count` (spec §14.7). The answer holds the node with as many of these children as fit, each with as much of its own subtree as fits, and at least one whenever the node has a child at `start`."
+        },
         "doc_id": {
           "description": "The document.",
           "format": "uint64",
@@ -1213,7 +1390,7 @@
       "type": "object"
     },
     "RenderInvalidate": {
-      "description": "`render.invalidate`: parts of pages whose tiles the shell must request again.",
+      "description": "`render.invalidate`: parts of pages whose tiles the shell must request again (spec §14.6). A shell keeps a tile while no invalidation with a higher revision covers it.",
       "properties": {
         "doc_id": {
           "description": "The document.",
@@ -1222,15 +1399,22 @@
           "type": "integer"
         },
         "regions": {
-          "description": "The changed regions, in page coordinates.",
+          "description": "The regions changed since the previous revision, in page coordinates.",
           "items": {
             "$ref": "#/$defs/PageRect"
           },
           "type": "array"
+        },
+        "revision": {
+          "description": "The document's render revision after the change.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "doc_id",
+        "revision",
         "regions"
       ],
       "type": "object"
@@ -1284,7 +1468,7 @@
             }
           ],
           "default": null,
-          "description": "The rasterizer to use (ADR-0011 §3); both give the same pixels in v0."
+          "description": "The rasterizer to use (ADR-0011 §3); both give the same pixels until the real rasterizers exist."
         },
         "page": {
           "description": "The page's index.",
@@ -1338,6 +1522,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "revision": {
+          "description": "The render revision that the tile shows (spec §14.6).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "stride": {
           "description": "Bytes from the start of one row to the next: 4 × width.",
           "format": "uint32",
@@ -1356,6 +1546,7 @@
         "height",
         "stride",
         "hash",
+        "revision",
         "blob"
       ],
       "type": "object"
@@ -1377,6 +1568,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "revision": {
+          "description": "The render revision that the tile shows (spec §14.6).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "width": {
           "description": "The tile's width in pixels.",
           "format": "uint32",
@@ -1388,6 +1585,7 @@
         "width",
         "height",
         "hash",
+        "revision",
         "bitmap"
       ],
       "type": "object"
@@ -1498,7 +1696,7 @@
           "type": "integer"
         },
         "v": {
-          "const": 0,
+          "const": 1,
           "description": "The protocol version."
         }
       },
@@ -1530,7 +1728,7 @@
           "type": "string"
         },
         "v": {
-          "const": 0,
+          "const": 1,
           "description": "The protocol version."
         }
       },
@@ -1743,7 +1941,7 @@
           "type": "string"
         },
         "v": {
-          "const": 0,
+          "const": 1,
           "description": "The protocol version."
         }
       },
@@ -1752,6 +1950,91 @@
         "type"
       ],
       "type": "object"
+    },
+    "ReservedKey": {
+      "description": "A press that the shell keeps (spec §14.3): a key, named by `key` or by `code`, with only the modifiers that matter; one that it leaves out matches either state.",
+      "properties": {
+        "alt": {
+          "description": "Alt, if it matters.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "code": {
+          "description": "The physical key as the DOM's `KeyboardEvent.code` names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ctrl": {
+          "description": "Control, if it matters.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "The key as the DOM's `KeyboardEvent.key` names it. Exactly one of `key` and `code` is given.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "meta": {
+          "description": "Meta, if it matters.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "shift": {
+          "description": "Shift, if it matters.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Restart": {
+      "description": "A restart that the restart allowance grants (spec §14.2).",
+      "properties": {
+        "limit": {
+          "description": "How many restarts the allowance grants within ten minutes: 3.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "number": {
+          "description": "Which restart this is within the last ten minutes, from 1 to `limit`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "number",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "Runtime": {
+      "description": "Whether the shell runs natively or in a browser (spec §14.1), which keeps keys that a native app does not (spec §14.3).",
+      "oneOf": [
+        {
+          "const": "browser",
+          "description": "A web page in a browser.",
+          "type": "string"
+        },
+        {
+          "const": "native",
+          "description": "A native application, and any value the engine does not know.",
+          "type": "string"
+        }
+      ]
     },
     "SelectionRects": {
       "description": "Selection rectangles on one page.",
@@ -1785,9 +2068,14 @@
           "type": "string"
         },
         "platform": {
-          "default": "",
-          "description": "The operating system or browser it runs on.",
-          "type": "string"
+          "$ref": "#/$defs/Platform",
+          "default": "other",
+          "description": "The operating system whose keyboard conventions apply (spec §14.1); a browser shell names the system it runs on, as far as the browser tells it. A missing or unknown value counts as `other`."
+        },
+        "runtime": {
+          "$ref": "#/$defs/Runtime",
+          "default": "native",
+          "description": "Whether the shell runs natively or in a browser (spec §14.1). A missing or unknown value counts as `native`."
         },
         "version": {
           "default": "",
@@ -1822,6 +2110,13 @@
     "UiCommand": {
       "description": "A command of the UI manifest.",
       "properties": {
+        "bindings": {
+          "description": "Its key bindings, resolved for the session's platform and runtime (spec §14.3).",
+          "items": {
+            "$ref": "#/$defs/KeyBinding"
+          },
+          "type": "array"
+        },
         "id": {
           "description": "The command's identifier, such as `format.bold.toggle`.",
           "type": "string"
@@ -1830,8 +2125,8 @@
           "description": "Its label, formatted.",
           "type": "string"
         },
-        "shortcut": {
-          "description": "Its default shortcut, such as `Ctrl+B`.",
+        "shell_action": {
+          "description": "For a command that the shell carries out itself through the platform, such as the clipboard's: `copy`, `cut` or `paste` in v1. A shell that meets a value it does not know neither sends the command's keys nor offers the command (spec §14.3).",
           "type": [
             "string",
             "null"
@@ -1840,7 +2135,8 @@
       },
       "required": [
         "id",
-        "label"
+        "label",
+        "bindings"
       ],
       "type": "object"
     },
@@ -1870,8 +2166,32 @@
       ],
       "type": "object"
     },
+    "UiKeys": {
+      "description": "The key data of the UI manifest (spec §14.3).",
+      "properties": {
+        "document": {
+          "description": "The keys that the engine handles in the document area with any modifiers.",
+          "items": {
+            "$ref": "#/$defs/DocumentKey"
+          },
+          "type": "array"
+        },
+        "reserved": {
+          "description": "The presses that the shell keeps for itself, the operating system or the browser, even where a binding or a document key matches them.",
+          "items": {
+            "$ref": "#/$defs/ReservedKey"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "document",
+        "reserved"
+      ],
+      "type": "object"
+    },
     "UiManifest": {
-      "description": "The UI manifest: a stub in v0 (spec §6.8).",
+      "description": "The UI manifest: a stub until ADR-0019's manifest (spec §6.8), with its key data resolved for the session's platform and runtime (spec §14.3).",
       "properties": {
         "commands": {
           "description": "The commands.",
@@ -1880,12 +2200,16 @@
           },
           "type": "array"
         },
+        "keys": {
+          "$ref": "#/$defs/UiKeys",
+          "description": "The keys that the engine handles in the document area, and those that the shell keeps (spec §14.3)."
+        },
         "locale": {
           "description": "The language of the strings.",
           "type": "string"
         },
         "manifest_version": {
-          "description": "The manifest format's version: 0.",
+          "description": "The stub manifest's format version: 0, until ADR-0019's manifest.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -1899,6 +2223,7 @@
         "manifest_version",
         "locale",
         "commands",
+        "keys",
         "ribbon"
       ],
       "type": "object"
@@ -2140,7 +2465,7 @@
       "description": "`welcome`: the reply to `hello`.",
       "properties": {
         "engine_version": {
-          "description": "The core's semantic version.",
+          "description": "The core's version as Semantic Versioning 2.0 writes it, at most 64 ASCII characters (spec §14.1).",
           "type": "string"
         },
         "features": {
@@ -2157,7 +2482,7 @@
           "type": "integer"
         },
         "protocol_version": {
-          "description": "The protocol version of the session: 0.",
+          "description": "The protocol version of the session: 1.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -2172,9 +2497,9 @@
       "type": "object"
     }
   },
-  "$id": "urn:bayandocs:engine-protocol:v0",
+  "$id": "urn:bayandocs:engine-protocol:v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Every message of engine protocol v0 (BayanDocs docs repository, specs/engine-protocol.md), generated from the engine's Rust types. A message is a request, a reply or an event.",
+  "description": "Every message of engine protocol v1 (BayanDocs docs repository, specs/engine-protocol.md), generated from the engine's Rust types. A message is a request, a reply or an event.",
   "oneOf": [
     {
       "$ref": "#/$defs/Request"
@@ -2186,7 +2511,7 @@
       "$ref": "#/$defs/Event"
     }
   ],
-  "title": "BayanDocs engine protocol, version 0",
+  "title": "BayanDocs engine protocol, version 1",
   "x-bayan-messages": [
     {
       "direction": "to_engine",
@@ -2312,5 +2637,5 @@
       "type": "engine.error"
     }
   ],
-  "x-bayan-protocol-version": 0
+  "x-bayan-protocol-version": 1
 }

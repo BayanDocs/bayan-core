@@ -4,11 +4,14 @@
 // slowBitmapWidth: <a tile width whose bitmap takes a while> }.
 //
 // For the driver's checks, and never seen by the worker host, the message { "bayan-test": "memory" } is answered with
-// the size of the engine's WebAssembly memory: { "bayan-test": "memory", bytes }.
+// the size of the engine's WebAssembly memory: { "bayan-test": "memory", bytes }; and { "bayan-test": "clock", ms } sets
+// the time that performance.now() gives from then on, so the driver can show the restart allowance over ten minutes
+// without waiting them (ms null lets the real clock run again).
 //
 // SPDX-FileCopyrightText: 2026 BayanDocs contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
 
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { parentPort, workerData } from "node:worker_threads";
@@ -37,10 +40,39 @@ globalThis.postMessage = (message, transfer = []) => {
     transfer.map((item) => (item instanceof FakeImageBitmap ? item.data.buffer : item)),
   );
 };
+/**
+ * Whether bytes match Subresource Integrity metadata as a browser decides it: the strongest algorithm the metadata
+ * names must have a matching hash among its tokens.
+ */
+function integrityMatches(bytes, metadata) {
+  const strength = { sha256: 1, sha384: 2, sha512: 3 };
+  const tokens = metadata
+    .split(/\s+/)
+    .map((token) => token.match(/^(sha256|sha384|sha512)-([A-Za-z0-9+/]+={0,2})$/))
+    .filter((match) => match !== null);
+  if (tokens.length === 0) {
+    return true;
+  }
+  const strongest = Math.max(...tokens.map((match) => strength[match[1]]));
+  return tokens
+    .filter((match) => strength[match[1]] === strongest)
+    .some((match) => createHash(match[1]).update(bytes).digest("base64") === match[2]);
+}
+
 // Node.js's fetch does not read files; serve the engine module the way a web server would. Any http: or https: address
-// serves the same module, so the driver can check that the worker host refuses one from another origin.
-globalThis.fetch = async (url) => {
-  const address = new URL(url);
+// serves the same module, so the driver can check that the worker host refuses one from another origin. A file named
+// REDIRECTING_FILE, next to the worker host, answers with a redirect to another origin that serves the module, which a
+// fetch with redirect "error" refuses, as a browser's does. Like a browser, it refuses bytes that do not match the
+// request's integrity metadata.
+const REDIRECTING_FILE = "redirect-to-elsewhere.wasm";
+globalThis.fetch = async (url, init = {}) => {
+  let address = new URL(url);
+  if (address.protocol === "file:" && address.pathname.endsWith(`/${REDIRECTING_FILE}`)) {
+    if (init.redirect === "error") {
+      throw new TypeError("Failed to fetch: the response is a redirect");
+    }
+    address = new URL("https://elsewhere.example/bayan_wasm_bg.wasm");
+  }
   let file;
   if (address.protocol === "file:") {
     file = fileURLToPath(address);
@@ -50,8 +82,16 @@ globalThis.fetch = async (url) => {
     throw new TypeError("only file:, http: and https: addresses in this test");
   }
   const bytes = await readFile(file);
+  if (typeof init.integrity === "string" && init.integrity !== "" && !integrityMatches(bytes, init.integrity)) {
+    throw new TypeError("Failed to fetch: the response does not match its integrity metadata");
+  }
   return new Response(bytes, { headers: { "Content-Type": "application/wasm" } });
 };
+
+// The worker host's clock, which the driver can set (see the top of this file).
+let fixedClock = null;
+const realNow = performance.now.bind(performance);
+performance.now = () => fixedClock ?? realNow();
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) {
     if (!(data instanceof Uint8ClampedArray) || data.length !== width * height * 4) {
@@ -100,6 +140,10 @@ function dispatch(data) {
 parentPort.on("message", (data) => {
   if (data?.["bayan-test"] === "memory") {
     parentPort.postMessage({ "bayan-test": "memory", bytes: memory?.buffer.byteLength ?? null });
+    return;
+  }
+  if (data?.["bayan-test"] === "clock") {
+    fixedClock = data.ms;
     return;
   }
   if (loaded) {

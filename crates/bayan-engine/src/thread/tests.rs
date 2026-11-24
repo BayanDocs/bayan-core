@@ -107,12 +107,12 @@ fn handles_messages_in_order_and_answers_through_the_sink() {
     let (thread, messages) = started();
     thread
         .post(
-            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#.to_vec(),
+            br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#.to_vec(),
             0,
         )
         .unwrap();
     thread
-        .post(br#"{"v":0,"id":2,"type":"nope"}"#.to_vec(), 0)
+        .post(br#"{"v":1,"id":2,"type":"nope"}"#.to_vec(), 0)
         .unwrap();
     let first = messages.recv_timeout(WAIT).unwrap();
     let second = messages.recv_timeout(WAIT).unwrap();
@@ -168,13 +168,19 @@ fn rendering_from_any_engine_s_sink_is_refused() {
 fn a_panic_outside_the_engine_s_own_recovery_does_not_end_the_thread() {
     let (thread, messages) = started();
     let hello = |id: u64| {
-        format!(r#"{{"v":0,"id":{id},"type":"hello","payload":{{"protocol_versions":[0]}}}}"#)
+        format!(r#"{{"v":1,"id":{id},"type":"hello","payload":{{"protocol_versions":[1]}}}}"#)
             .into_bytes()
     };
     thread.post(hello(1), 0).unwrap();
     assert!(messages.recv_timeout(WAIT).unwrap().contains(r#""re":1"#));
     let (answer, waiting) = mpsc::sync_channel(1);
-    thread.jobs.send(Job::Panic { answer }).unwrap();
+    thread
+        .jobs
+        .send(Job::Panic {
+            received_ms: 0,
+            answer,
+        })
+        .unwrap();
     // The shell learns that the session is gone, and a waiting tile request fails instead of waiting forever.
     let error = messages.recv_timeout(WAIT).unwrap();
     assert!(
@@ -259,13 +265,13 @@ fn renders_tiles_in_order_with_messages() {
     let (thread, messages) = started_with(blobs);
     thread
         .post(
-            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#.to_vec(),
+            br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#.to_vec(),
             0,
         )
         .unwrap();
     thread
         .post(
-            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#)
+            format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#)
                 .into_bytes(),
             0,
         )
@@ -273,11 +279,158 @@ fn renders_tiles_in_order_with_messages() {
     // The tile request waits for the document opened by the message before it.
     let request =
         br#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":15544800,"height":20116800}}"#;
-    let pixels = thread.render_tile(request.to_vec(), 17, 22, 0).unwrap();
-    assert_eq!(pixels.len(), 17 * 22 * 4);
+    let tile = thread.render_tile(request.to_vec(), 17, 22, 0).unwrap();
+    assert_eq!(tile.pixels.len(), 17 * 22 * 4);
+    assert_eq!(tile.revision, 1);
     assert_eq!(
         messages.recv_timeout(WAIT).map(|m| m.contains("welcome")),
         Ok(true)
     );
+    thread.stop();
+}
+
+/// An engine thread whose configuration allows `diag.panic`, and the messages it sends.
+fn panicking() -> (EngineThread, Receiver<String>) {
+    let config = Config::from_json(br#"{"test":{"allow_panic":true}}"#).unwrap();
+    let thread = EngineThread::spawn(config, Arc::new(BlobStore::new())).unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    thread
+        .set_sink(Arc::new(move |message: &str| {
+            let _ignored = sender.lock().unwrap().send(message.to_owned());
+        }))
+        .unwrap();
+    (thread, receiver)
+}
+
+/// A `hello` with the request identifier `id`.
+fn hello(id: u64) -> Vec<u8> {
+    format!(r#"{{"v":1,"id":{id},"type":"hello","payload":{{"protocol_versions":[1]}}}}"#)
+        .into_bytes()
+}
+
+/// The `restart` of the next `engine.error` among the messages, after the reply to the panic.
+fn next_restart(messages: &Receiver<String>) -> serde_json::Value {
+    loop {
+        let message: serde_json::Value =
+            serde_json::from_str(&messages.recv_timeout(WAIT).unwrap()).unwrap();
+        if message["type"] == "engine.error" {
+            assert_eq!(message["payload"]["recoverable"], false, "{message}");
+            return message["payload"]["restart"].clone();
+        }
+    }
+}
+
+#[test]
+fn the_native_binding_applies_the_restart_allowance_with_the_hosts_times() {
+    let (thread, messages) = panicking();
+    let mut restarts = Vec::new();
+    for (id, time) in [(1_u64, 0_u64), (2, 1_000), (3, 2_000), (4, 3_000)] {
+        thread.post(hello(100 + id), time).unwrap();
+        thread
+            .post(
+                format!(r#"{{"v":1,"id":{id},"type":"diag.panic"}}"#).into_bytes(),
+                time,
+            )
+            .unwrap();
+        restarts.push(next_restart(&messages));
+    }
+    assert_eq!(
+        restarts,
+        [
+            serde_json::json!({ "number": 1, "limit": 3 }),
+            serde_json::json!({ "number": 2, "limit": 3 }),
+            serde_json::json!({ "number": 3, "limit": 3 }),
+            serde_json::Value::Null,
+        ]
+    );
+    // The engine has stopped and answers nothing more.
+    assert!(thread.has_stopped());
+    assert_eq!(thread.post(b"{}".to_vec(), 4_000), Err(Stopped));
+    assert_eq!(
+        thread.render_tile(b"{}".to_vec(), 1, 1, 4_000),
+        Err(TileError::Internal)
+    );
+    assert_eq!(
+        messages.recv_timeout(Duration::from_millis(50)),
+        Err(RecvTimeoutError::Timeout)
+    );
+}
+
+#[test]
+fn a_panic_outside_a_message_counts_at_the_time_of_its_job() {
+    let (thread, messages) = panicking();
+    for time in [0, 10, 599_999] {
+        thread.post(hello(2), time).unwrap();
+        thread
+            .post(br#"{"v":1,"id":1,"type":"diag.panic"}"#.to_vec(), time)
+            .unwrap();
+        assert!(next_restart(&messages).is_object());
+    }
+    // At 600,000 ms the first restart no longer counts, so this is restart 3 of 3 again.
+    let (answer, _waiting) = mpsc::sync_channel(1);
+    thread
+        .jobs
+        .send(Job::Panic {
+            received_ms: 600_000,
+            answer,
+        })
+        .unwrap();
+    assert_eq!(
+        next_restart(&messages),
+        serde_json::json!({ "number": 3, "limit": 3 })
+    );
+    thread.stop();
+}
+
+#[test]
+fn a_recording_that_spans_a_restart_replays_identically_and_a_replay_counts_nothing() {
+    let (thread, messages) = panicking();
+    thread.post(hello(1), 0).unwrap();
+    thread
+        .post(br#"{"v":1,"id":2,"type":"diag.record.start"}"#.to_vec(), 1)
+        .unwrap();
+    // Three panics while recording: each restarts the session, which the shell starts again with hello.
+    for (round, time) in [(0_u64, 10_u64), (1, 20), (2, 30)] {
+        thread
+            .post(
+                format!(r#"{{"v":1,"id":{},"type":"diag.panic"}}"#, 10 + round).into_bytes(),
+                time,
+            )
+            .unwrap();
+        thread.post(hello(20 + round), time + 1).unwrap();
+    }
+    thread
+        .post(br#"{"v":1,"id":30,"type":"diag.record.stop"}"#.to_vec(), 40)
+        .unwrap();
+    let mut recording = None;
+    while recording.is_none() {
+        let message: serde_json::Value =
+            serde_json::from_str(&messages.recv_timeout(WAIT).unwrap()).unwrap();
+        if message["re"] == 30 {
+            recording = message["payload"]["blob"].as_u64();
+        }
+    }
+    let blob = recording.unwrap();
+    // Every restart was used; replaying the recording meets the same three panics in its own session, with equal digests, and none of them counts: the engine goes on.
+    for id in [31, 32] {
+        thread
+            .post(
+                format!(r#"{{"v":1,"id":{id},"type":"diag.replay","payload":{{"blob":{blob}}}}}"#)
+                    .into_bytes(),
+                50,
+            )
+            .unwrap();
+        loop {
+            let message: serde_json::Value =
+                serde_json::from_str(&messages.recv_timeout(WAIT).unwrap()).unwrap();
+            if message["re"] == id {
+                assert_eq!(message["payload"]["identical"], true, "{message}");
+                assert_eq!(message["payload"]["entries"], 6, "{message}");
+                break;
+            }
+        }
+    }
+    assert!(!thread.has_stopped());
     thread.stop();
 }

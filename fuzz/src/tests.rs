@@ -19,7 +19,7 @@ use crate::{crdt, engine};
 const SIGABRT: i32 = 6;
 
 /// A message that makes an engine panic when its test switch allows it, and is refused otherwise.
-const DIAG_PANIC: &[u8] = br#"{"v":0,"id":2,"type":"diag.panic"}"#;
+const DIAG_PANIC: &[u8] = br#"{"v":1,"id":2,"type":"diag.panic"}"#;
 
 /// The hook that libfuzzer-sys 0.4.13 installs in `initialize` before a target's own `init` runs (its `src/lib.rs`).
 fn libfuzzer_hook() {

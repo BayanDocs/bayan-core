@@ -1,0 +1,393 @@
+{
+  "format": "bayan-engine-conformance",
+  "format_version": 1,
+  "protocol_version": 1,
+  "area": "tile-grid",
+  "cases": [
+    {
+      "id": "letter-at-zoom-1",
+      "description": "A US Letter page (8.5 by 11 inches) at zoom 1 and device scale 1: 816 by 1,056 pixels.",
+      "for": ["shell"],
+      "page": {"width": 15544800, "height": 20116800},
+      "zoom": 1.0,
+      "device_scale": 1.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 816, "height": 1056},
+        "columns": 2,
+        "rows": 3,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9753600, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 512, "y": 512, "width": 304, "height": 512},
+            "blu": {"x": 9753600, "y": 9753600, "width": 5791200, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 2,
+            "pixels": {"x": 512, "y": 1024, "width": 304, "height": 32},
+            "blu": {"x": 9753600, "y": 19507200, "width": 5791200, "height": 609600}
+          }
+        ]
+      }
+    },
+    {
+      "id": "letter-at-zoom-1-5-on-a-retina-screen",
+      "description": "US Letter at zoom 1.5 and device scale 2.",
+      "for": ["shell"],
+      "page": {"width": 15544800, "height": 20116800},
+      "zoom": 1.5,
+      "device_scale": 2.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 2448, "height": 3168},
+        "columns": 5,
+        "rows": 7,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 3251200, "height": 3251200}
+          },
+          {
+            "column": 2,
+            "row": 3,
+            "pixels": {"x": 1024, "y": 1536, "width": 512, "height": 512},
+            "blu": {"x": 6502400, "y": 9753600, "width": 3251200, "height": 3251200}
+          },
+          {
+            "column": 4,
+            "row": 6,
+            "pixels": {"x": 2048, "y": 3072, "width": 400, "height": 96},
+            "blu": {"x": 13004800, "y": 19507200, "width": 2540000, "height": 609600}
+          }
+        ]
+      }
+    },
+    {
+      "id": "a4-at-zoom-1",
+      "description": "An A4 page (210 by 297 mm) at zoom 1: 793.70 by 1,122.52 pixels round up to 794 by 1,123.",
+      "for": ["shell"],
+      "page": {"width": 15120000, "height": 21384000},
+      "zoom": 1.0,
+      "device_scale": 1.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 794, "height": 1123},
+        "columns": 2,
+        "rows": 3,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9753600, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 512, "y": 512, "width": 282, "height": 512},
+            "blu": {"x": 9753600, "y": 9753600, "width": 5372100, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 2,
+            "pixels": {"x": 512, "y": 1024, "width": 282, "height": 99},
+            "blu": {"x": 9753600, "y": 19507200, "width": 5372100, "height": 1885950}
+          }
+        ]
+      }
+    },
+    {
+      "id": "a4-at-zoom-1-1-and-device-scale-1-25",
+      "description": "A4 at zoom 1.1 and device scale 1.25, whose product is not exactly 1.375 in double precision.",
+      "for": ["shell"],
+      "page": {"width": 15120000, "height": 21384000},
+      "zoom": 1.1,
+      "device_scale": 1.25,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 1092, "height": 1544},
+        "columns": 3,
+        "rows": 4,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 7093527, "height": 7093527}
+          },
+          {
+            "column": 1,
+            "row": 2,
+            "pixels": {"x": 512, "y": 1024, "width": 512, "height": 512},
+            "blu": {"x": 7093527, "y": 14187055, "width": 7093528, "height": 7093527}
+          },
+          {
+            "column": 2,
+            "row": 3,
+            "pixels": {"x": 1024, "y": 1536, "width": 68, "height": 8},
+            "blu": {"x": 14187055, "y": 21280582, "width": 942109, "height": 110836}
+          }
+        ]
+      }
+    },
+    {
+      "id": "letter-at-zoom-0-3-and-device-scale-3",
+      "description": "US Letter at zoom 0.3 and device scale 3, whose product is 0.8999999999999999 in double precision.",
+      "for": ["shell"],
+      "page": {"width": 15544800, "height": 20116800},
+      "zoom": 0.3,
+      "device_scale": 3.0,
+      "tile_size": 256,
+      "expect": {
+        "pixels": {"width": 735, "height": 951},
+        "columns": 3,
+        "rows": 4,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 256, "height": 256},
+            "blu": {"x": 0, "y": 0, "width": 5418667, "height": 5418667}
+          },
+          {
+            "column": 1,
+            "row": 2,
+            "pixels": {"x": 256, "y": 512, "width": 256, "height": 256},
+            "blu": {"x": 5418667, "y": 10837333, "width": 5418666, "height": 5418667}
+          },
+          {
+            "column": 2,
+            "row": 3,
+            "pixels": {"x": 512, "y": 768, "width": 223, "height": 183},
+            "blu": {"x": 10837333, "y": 16256000, "width": 4720167, "height": 3873500}
+          }
+        ]
+      }
+    },
+    {
+      "id": "halves-round-away-from-zero",
+      "description": "At a scale of 4 a pixel is 4,762.5 BLU, so tiles of 255 pixels start on halves, which round away from zero.",
+      "for": ["shell"],
+      "page": {"width": 15544800, "height": 20116800},
+      "zoom": 2.0,
+      "device_scale": 2.0,
+      "tile_size": 255,
+      "expect": {
+        "pixels": {"width": 3264, "height": 4224},
+        "columns": 13,
+        "rows": 17,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 255, "height": 255},
+            "blu": {"x": 0, "y": 0, "width": 1214438, "height": 1214438}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 255, "y": 255, "width": 255, "height": 255},
+            "blu": {"x": 1214438, "y": 1214438, "width": 1214437, "height": 1214437}
+          },
+          {
+            "column": 3,
+            "row": 5,
+            "pixels": {"x": 765, "y": 1275, "width": 255, "height": 255},
+            "blu": {"x": 3643313, "y": 6072188, "width": 1214437, "height": 1214437}
+          },
+          {
+            "column": 12,
+            "row": 16,
+            "pixels": {"x": 3060, "y": 4080, "width": 204, "height": 144},
+            "blu": {"x": 14573250, "y": 19431000, "width": 971550, "height": 685800}
+          }
+        ]
+      }
+    },
+    {
+      "id": "a-sliver-below-a-millionth-of-a-pixel-is-dropped",
+      "description": "A page 1,000 pixels wide and high at zoom 1 is larger than 1,000 pixels by 5e-7 pixels at this zoom: less than the tolerance of 1e-6, so it keeps 1,000 pixels.",
+      "for": ["shell"],
+      "page": {"width": 19050000, "height": 19050000},
+      "zoom": 1.0000000005,
+      "device_scale": 1.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 1000, "height": 1000},
+        "columns": 2,
+        "rows": 2,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9753600, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 512, "y": 512, "width": 488, "height": 488},
+            "blu": {"x": 9753600, "y": 9753600, "width": 9296400, "height": 9296400}
+          }
+        ]
+      }
+    },
+    {
+      "id": "more-than-a-millionth-of-a-pixel-adds-one",
+      "description": "The same page larger than 1,000 pixels by 2e-6 pixels: beyond the tolerance, so it is 1,001 pixels.",
+      "for": ["shell"],
+      "page": {"width": 19050000, "height": 19050000},
+      "zoom": 1.000000002,
+      "device_scale": 1.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 1001, "height": 1001},
+        "columns": 2,
+        "rows": 2,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9753600, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 512, "y": 512, "width": 489, "height": 489},
+            "blu": {"x": 9753600, "y": 9753600, "width": 9315450, "height": 9315450}
+          }
+        ]
+      }
+    },
+    {
+      "id": "just-below-a-whole-pixel",
+      "description": "The same page smaller than 1,000 pixels by 5e-7 pixels rounds up to 1,000.",
+      "for": ["shell"],
+      "page": {"width": 19050000, "height": 19050000},
+      "zoom": 0.9999999995,
+      "device_scale": 1.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 1000, "height": 1000},
+        "columns": 2,
+        "rows": 2,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9753600, "height": 9753600}
+          },
+          {
+            "column": 1,
+            "row": 1,
+            "pixels": {"x": 512, "y": 512, "width": 488, "height": 488},
+            "blu": {"x": 9753600, "y": 9753600, "width": 9296400, "height": 9296400}
+          }
+        ]
+      }
+    },
+    {
+      "id": "exactly-whole-pixels",
+      "description": "A page of exactly 1,000 by 500 pixels keeps its size.",
+      "for": ["shell"],
+      "page": {"width": 19050000, "height": 9525000},
+      "zoom": 1.0,
+      "device_scale": 1.0,
+      "tile_size": 300,
+      "expect": {
+        "pixels": {"width": 1000, "height": 500},
+        "columns": 4,
+        "rows": 2,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 300, "height": 300},
+            "blu": {"x": 0, "y": 0, "width": 5715000, "height": 5715000}
+          },
+          {
+            "column": 2,
+            "row": 1,
+            "pixels": {"x": 600, "y": 300, "width": 300, "height": 200},
+            "blu": {"x": 11430000, "y": 5715000, "width": 5715000, "height": 3810000}
+          },
+          {
+            "column": 3,
+            "row": 1,
+            "pixels": {"x": 900, "y": 300, "width": 100, "height": 200},
+            "blu": {"x": 17145000, "y": 5715000, "width": 1905000, "height": 3810000}
+          }
+        ]
+      }
+    },
+    {
+      "id": "the-largest-page-at-the-largest-scale",
+      "description": "A page of 22 by 22 inches, the largest that Word allows, at zoom 64 and device scale 16: 2,162,688 pixels a side.",
+      "for": ["shell"],
+      "page": {"width": 40233600, "height": 40233600},
+      "zoom": 64.0,
+      "device_scale": 16.0,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 2162688, "height": 2162688},
+        "columns": 4224,
+        "rows": 4224,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "blu": {"x": 0, "y": 0, "width": 9525, "height": 9525}
+          },
+          {
+            "column": 2112,
+            "row": 2112,
+            "pixels": {"x": 1081344, "y": 1081344, "width": 512, "height": 512},
+            "blu": {"x": 20116800, "y": 20116800, "width": 9525, "height": 9525}
+          },
+          {
+            "column": 4223,
+            "row": 4223,
+            "pixels": {"x": 2162176, "y": 2162176, "width": 512, "height": 512},
+            "blu": {"x": 40224075, "y": 40224075, "width": 9525, "height": 9525}
+          }
+        ]
+      }
+    },
+    {
+      "id": "a-tiny-page-is-at-least-one-pixel",
+      "description": "A page 1 BLU wide and high at zoom 0.05 and device scale 0.2 is far less than a pixel, and still 1 pixel, whose tile covers at least 1 BLU.",
+      "for": ["shell"],
+      "page": {"width": 1, "height": 1},
+      "zoom": 0.05,
+      "device_scale": 0.2,
+      "tile_size": 512,
+      "expect": {
+        "pixels": {"width": 1, "height": 1},
+        "columns": 1,
+        "rows": 1,
+        "tiles": [
+          {
+            "column": 0,
+            "row": 0,
+            "pixels": {"x": 0, "y": 0, "width": 1, "height": 1},
+            "blu": {"x": 0, "y": 0, "width": 1905000, "height": 1905000}
+          }
+        ]
+      }
+    }
+  ],
+  "removed": []
+}
