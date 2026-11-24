@@ -306,6 +306,38 @@ async function main() {
       ok(await shell.request(33, "doc.close", { doc_id: ok(opened).doc_id }));
     });
 
+    await check("input.paste and clipboard.copy carry raw bytes in their items, both ways (§14.5)", async () => {
+      const file = bytesOf("document");
+      const docId = ok(await shell.request(34, "doc.open", { blob: file }, [file])).doc_id;
+      // Two formats, one as an ArrayBuffer and one as a view of one; the engine reads text/plain and ignores the image.
+      const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer;
+      const text = bytesOf("--pasted 😀--");
+      const view = new Uint8Array(text, 2, text.byteLength - 4);
+      const items = [
+        { mime: "image/png", blob: image },
+        { mime: "text/plain", blob: view },
+      ];
+      ok(await shell.request(35, "input.paste", { doc_id: docId, items }, [image, text]));
+      await shell.event("render.invalidate");
+      await shell.event("overlay.update");
+      assert.equal((await shell.event("a11y.update")).payload.changes[0].node.text, "pasted 😀");
+      // "pasted " and the emoji: nine UTF-16 code units.
+      const select = { doc_id: docId, anchor: { node: 5, offset: 0 }, focus: { node: 5, offset: 9 } };
+      ok(await shell.request(36, "input.select", select));
+      await shell.event("overlay.update");
+      assert.deepEqual((await shell.event("a11y.update")).payload.selection, [{ anchor: select.anchor, focus: select.focus }]);
+      const copied = ok(await shell.request(37, "clipboard.copy", { doc_id: docId, cut: true }));
+      assert.equal(copied.items.length, 1);
+      assert.equal(copied.items[0].mime, "text/plain");
+      assert.ok(copied.items[0].blob instanceof ArrayBuffer, "the item's bytes arrive as an ArrayBuffer");
+      assert.equal(new TextDecoder().decode(copied.items[0].blob), "pasted 😀");
+      // The cut emptied the line.
+      await shell.event("render.invalidate");
+      await shell.event("overlay.update");
+      assert.equal((await shell.event("a11y.update")).payload.changes[0].node.text, "");
+      ok(await shell.request(38, "doc.close", { doc_id: docId }));
+    });
+
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
       // With a request identifier, the refusal is the reply.
       shell.send({ v: 1, id: 15, type: "hello", payload: { protocol_versions: [1n] } });
@@ -406,7 +438,14 @@ async function main() {
 
   await check("the package ships the conformance vectors and their schema", async () => {
     const files = (await readdir(path.join(packageDir, "conformance"))).sort();
-    assert.deepEqual(files, ["a11y-limits.json", "conformance.schema.json", "keys.json", "restart.json", "tile-grid.json"]);
+    assert.deepEqual(files, [
+      "a11y-limits.json",
+      "conformance.schema.json",
+      "keys.json",
+      "restart.json",
+      "text-input.json",
+      "tile-grid.json",
+    ]);
   });
 
   await check("the worker host applies the restart allowance with its own clock and stops after the third", async () => {

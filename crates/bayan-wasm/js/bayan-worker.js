@@ -138,7 +138,7 @@ async function relay(message, receivedMs) {
   }
   const id = requestId(message);
   try {
-    const bytes = takeBlob(message);
+    const taken = takeBlobs(message);
     let text = toJson(message);
     // A message JSON cannot hold, such as one with a BigInt, is answered without the engine (§3.2).
     if (text === null) {
@@ -151,15 +151,19 @@ async function relay(message, receivedMs) {
       deliverAll(engine.refuseOversized(id));
       return;
     }
-    let blob = null;
-    if (bytes !== null) {
-      // A blob over the limit is refused before it is copied into the engine's memory, as blob 0 (§3.1).
-      blob = bytes.byteLength > maxBlobBytes() ? 0 : engine.blobPut(bytes);
-      message.payload.blob = blob;
+    const blobs = [];
+    if (taken.length > 0) {
+      for (const { holder, bytes } of taken) {
+        // A blob over the limit is refused before it is copied into the engine's memory, as blob 0 (§3.1).
+        holder.blob = bytes.byteLength > maxBlobBytes() ? 0 : engine.blobPut(bytes);
+        if (holder.blob) {
+          blobs.push(holder.blob);
+        }
+      }
       text = toJson(message);
     }
     const answers = JSON.parse(engine.post(text, receivedMs));
-    if (blob) {
+    for (const blob of blobs) {
       engine.blobRelease(blob);
     }
     const tileRequest = isObject(message) && message.type === "render.tile" && !Number.isNaN(id);
@@ -187,26 +191,38 @@ function toJson(message) {
 }
 
 /**
- * Takes the bytes of a blob that a message carries in `payload.blob` (an ArrayBuffer, a SharedArrayBuffer, or a view
- * of one such as a Uint8Array) and puts the largest identifier in its place, so the message's size can be checked
- * before the bytes are copied into the engine. Returns the bytes, or null if the message carries no blob.
+ * The objects of a payload that may hold a blob in their `blob` field (§3.2): the payload itself, and each item of its
+ * `items`, as input.paste and the reply to clipboard.copy carry them (§14.5).
  */
-function takeBlob(message) {
-  const payload = isObject(message) ? message.payload : undefined;
+function blobHolders(payload) {
   if (!isObject(payload)) {
-    return null;
+    return [];
   }
-  const value = payload.blob;
-  let bytes = null;
-  if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
-    bytes = new Uint8Array(value);
-  } else if (ArrayBuffer.isView(value)) {
-    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  const items = Array.isArray(payload.items) ? payload.items.filter(isObject) : [];
+  return [payload, ...items];
+}
+
+/**
+ * Takes the bytes of every blob that a message carries (an ArrayBuffer, a SharedArrayBuffer, or a view of one such
+ * as a Uint8Array) and puts the largest identifier in its place, so the message's size can be checked before the
+ * bytes are copied into the engine. Returns each object that held a blob, with the blob's bytes.
+ */
+function takeBlobs(message) {
+  const taken = [];
+  for (const holder of blobHolders(isObject(message) ? message.payload : undefined)) {
+    const value = holder.blob;
+    let bytes = null;
+    if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
+      bytes = new Uint8Array(value);
+    } else if (ArrayBuffer.isView(value)) {
+      bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (bytes !== null) {
+      holder.blob = MAX_ID;
+      taken.push({ holder, bytes });
+    }
   }
-  if (bytes !== null) {
-    payload.blob = MAX_ID;
-  }
-  return bytes;
+  return taken;
 }
 
 /**
@@ -250,18 +266,19 @@ function deliverAll(answersJson) {
   }
 }
 
-/** Sends one of the engine's messages to the main thread; a blob it names travels as a transferred ArrayBuffer. */
+/** Sends one of the engine's messages to the main thread; every blob it names travels as a transferred ArrayBuffer. */
 function deliver(answer) {
-  const payload = answer.payload;
-  if (isObject(payload) && typeof payload.blob === "number") {
-    const bytes = engine.blobTake(payload.blob);
-    if (bytes !== undefined) {
-      payload.blob = bytes.buffer;
-      self.postMessage(answer, [bytes.buffer]);
-      return;
+  const transfer = [];
+  for (const holder of blobHolders(answer.payload)) {
+    if (typeof holder.blob === "number") {
+      const bytes = engine.blobTake(holder.blob);
+      if (bytes !== undefined) {
+        holder.blob = bytes.buffer;
+        transfer.push(bytes.buffer);
+      }
     }
   }
-  self.postMessage(answer);
+  self.postMessage(answer, transfer);
 }
 
 /**

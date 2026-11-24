@@ -36,9 +36,13 @@ fn last_tile(doc_id: u64) -> String {
 /// The most messages of one input that `engine_messages` hands to the engine; the rest is ignored. Each message's work is small or counted against [`PIXEL_BUDGET`], but the largest answer, the accessibility tree of the whole mock document (about 180 KB), takes about 30 ms under AddressSanitizer to answer and check, so 64 of them stay well within the timeout of 10 seconds.
 pub const MAX_MESSAGES: usize = 64;
 
-/// The shell's blobs that `engine_messages` puts before each input, with odd identifiers as the shell's blobs get them: blob 1, empty, for `doc.open`, and blob 3, the recording that the engine's tests commit as `session.json`, for `diag.replay`.
+/// The shell's blobs that `engine_messages` puts before each input, with odd identifiers as the shell's blobs get them: blob 1, empty, for `doc.open`, blob 3, the recording that the engine's tests commit as `session.json`, for `diag.replay`, and blob 5, text to paste with `input.paste` (CORE-014).
 pub const EMPTY_BLOB: BlobId = 1;
 pub const RECORDING_BLOB: BlobId = 3;
+pub const TEXT_BLOB: BlobId = 5;
+
+/// The bytes of [`TEXT_BLOB`]: clipboard text with a byte that is not UTF-8, a line feed and a character outside the Basic Multilingual Plane, which the engine reads as UTF-8 and cleans as typed text (spec §14.5).
+pub const PASTED_TEXT: &[u8] = b"pasted \xff text\n\xf0\x9f\x98\x80";
 
 /// The recording of [`RECORDING_BLOB`]: a session recorded by the engine's tests (`crates/bayan-engine/tests/engine/record_replay.rs`), committed and kept current by them.
 pub const SESSION_RECORDING: &[u8] =
@@ -239,6 +243,7 @@ fn engine_after_hello(config: Config) -> Engine {
     let blobs = Arc::new(BlobStore::new());
     assert_eq!(blobs.put_shell(b""), Ok(EMPTY_BLOB));
     assert_eq!(blobs.put_shell(SESSION_RECORDING), Ok(RECORDING_BLOB));
+    assert_eq!(blobs.put_shell(PASTED_TEXT), Ok(TEXT_BLOB));
     let mut engine = Engine::new(config, blobs);
     let welcome = send(
         &mut engine,
@@ -256,10 +261,17 @@ fn send_at(engine: &mut Engine, message: &[u8], received_ms: u64) -> Vec<Value> 
         .map(|answer| check_answer(answer))
         .collect();
     for answer in &answers {
-        // Engine blobs have even identifiers; only those are released.
-        if let Some(blob) = answer.pointer("/payload/blob").and_then(Value::as_u64)
-            && blob % 2 == 0
-        {
+        // Engine blobs have even identifiers; only those are released: in a payload's `blob`, and in the `blob` of each of its `items`, as the reply to clipboard.copy carries them (CORE-014).
+        let items = answer
+            .pointer("/payload/items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        let blobs = items
+            .filter_map(|item| item.get("blob"))
+            .chain(answer.pointer("/payload/blob"))
+            .filter_map(Value::as_u64);
+        for blob in blobs.filter(|blob| blob % 2 == 0) {
             engine.blobs().release(blob);
         }
     }
@@ -668,6 +680,32 @@ mod tests {
         assert_eq!(lenient_base64("aGVsbG8"), Some(b"hello".to_vec()));
         assert_eq!(lenient_base64("aGVsbG9="), Some(b"hello".to_vec()));
         assert_eq!(lenient_base64("a GVs"), None);
+    }
+
+    #[test]
+    fn releases_the_engine_blobs_of_clipboard_items() {
+        let mut engine = engine_after_hello(config());
+        send(&mut engine, br#"{"v":1,"id":2,"type":"doc.open","payload":{"blob":1}}"#);
+        let pasted = send(
+            &mut engine,
+            br#"{"v":1,"id":3,"type":"input.paste","payload":{"doc_id":1,"items":[{"mime":"text/plain","blob":5}]}}"#,
+        );
+        assert_eq!(pasted[0].pointer("/ok"), Some(&json!(true)));
+        send(
+            &mut engine,
+            br#"{"v":1,"id":4,"type":"input.select","payload":{"doc_id":1,"anchor":{"node":5,"offset":0},"focus":{"node":5,"offset":4}}}"#,
+        );
+        let blobs = engine.blobs().len();
+        let copied = send(
+            &mut engine,
+            br#"{"v":1,"id":5,"type":"clipboard.copy","payload":{"doc_id":1}}"#,
+        );
+        assert_eq!(
+            copied[0].pointer("/payload/items/0/mime"),
+            Some(&json!("text/plain"))
+        );
+        // The engine created a blob for the copy, which the harness released, as a shell would.
+        assert_eq!(engine.blobs().len(), blobs);
     }
 
     #[test]

@@ -264,7 +264,7 @@ PAGE = {"x": 0, "y": 0, "width": 15_544_800, "height": 20_116_800}
 
 
 def engine_sessions() -> List[bytes]:
-    """Inputs of engine_messages, each a session of messages, one per line: every message a shell sends, a recording and its replay, the refusals of the envelope and of the handshake, and the limits of the engine and of the mock document. Blob 1 is empty and blob 3 is a recording (fuzz/src/engine.rs); document 1 is the first that doc.open opens."""
+    """Inputs of engine_messages, each a session of messages, one per line: every message a shell sends, a recording and its replay, the refusals of the envelope and of the handshake, and the limits of the engine and of the mock document. Blob 1 is empty, blob 3 is a recording and blob 5 is text to paste (fuzz/src/engine.rs); document 1 is the first that doc.open opens."""
     tile = {"doc_id": 1, "page": 0, "rect": PAGE, "width": 64, "height": 83, "zoom": 1.5, "device_scale": 2, "mode": "interactive"}
     document = jsonl(
         request(2, "doc.open", {"blob": 1}),
@@ -339,7 +339,28 @@ def engine_sessions() -> List[bytes]:
         request(16, "render.tile", tile),
         request(17, "hello", {"protocol_versions": [1], "shell": {"platform": "windows", "runtime": "native"}}),
     )
-    return [document, recording, refusals, limits, version_1]
+    # Protocol v1, part 2 (CORE-014): ranges of text to replace, the selection, hit-testing, the clipboard, and the Arabic paragraph's node. Blob 5 holds text to paste with a byte that is not UTF-8 (fuzz/src/engine.rs); node 5 is the editable line, node 2 a heading, node 35 the Arabic paragraph.
+    version_1_text = jsonl(
+        request(2, "doc.open", {"blob": 1}),
+        request(3, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 816, "height": 1056}, "zoom": 1, "device_scale": 1, "mode": "print"}),
+        request(4, "input.text", {"doc_id": 1, "text": "a😀b"}),
+        request(5, "input.text", {"doc_id": 1, "text": "x", "replace": {"node": 5, "start": 1, "end": 3}}),
+        request(6, "input.text", {"doc_id": 1, "text": "y", "replace": {"node": 5, "start": 2, "end": 1}}),
+        request(7, "input.text", {"doc_id": 1, "text": "z", "replace": {"node": 2, "start": 0, "end": 0}}),
+        request(8, "input.select", {"doc_id": 1, "anchor": {"node": 5, "offset": 3}, "focus": {"node": 5, "offset": 0}}),
+        request(9, "input.key", {"doc_id": 1, "key": "End", "code": "End", "modifiers": {"shift": True}}),
+        request(10, "clipboard.copy", {"doc_id": 1}),
+        request(11, "clipboard.copy", {"doc_id": 1, "cut": True}),
+        request(12, "input.paste", {"doc_id": 1, "items": [{"mime": "image/png", "blob": 3}, {"mime": "text/plain", "blob": 5}]}),
+        request(13, "input.paste", {"doc_id": 1, "items": [{"mime": "text/plain", "blob": 3}]}),
+        request(14, "query.hit", {"doc_id": 1, "x": 100.5, "y": 100}),
+        request(15, "query.hit", {"doc_id": 1, "x": 600, "y": 2300}),
+        request(16, "query.hit", {"doc_id": 1, "x": -1e9, "y": 1e9}),
+        request(17, "query.a11y", {"doc_id": 1, "node": 35}),
+        request(18, "input.composition", {"doc_id": 1, "phase": "update", "text": "かな"}),
+        request(19, "input.select", {"doc_id": 1, "anchor": {"node": 5, "offset": 0}, "focus": {"node": 999, "offset": 0}}),
+    )
+    return [document, recording, refusals, limits, version_1, version_1_text]
 
 
 def tile_requests() -> List[bytes]:
