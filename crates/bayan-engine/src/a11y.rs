@@ -31,8 +31,11 @@ const SEPARATOR: usize = 1;
 /// The most bytes that `,"child_count":4294967295` takes, which a node with children may carry.
 const CHILD_COUNT_FIELD: usize = 26;
 
+/// The bytes that `,"children":[]` takes: the list of a node's children, without the children.
+const CHILDREN_FIELD: usize = 14;
+
 /// The most bytes that `,"children_start":4294967295` and `,"children":[]` take together, which a node carries once it holds a child.
-const CHILDREN_FIELDS: usize = 29 + 14;
+const CHILDREN_FIELDS: usize = 29 + CHILDREN_FIELD;
 
 /// The limits that a tree is kept within.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +155,7 @@ impl std::io::Write for Counter {
     }
 }
 
-/// An upper bound of the bytes that a node takes in a tree's JSON, its children and the fields that list them not counted, but its `child_count` if it has children: whether it holds them all is known only at the end. [`CHILDREN_FIELDS`] is added when it gets its first child.
+/// An upper bound of the bytes that a node takes in a tree's JSON, its children and the fields that list them not counted, but its `child_count` if it has children: whether it holds them all is known only at the end. [`CHILDREN_FIELDS`] is added when it gets its first child. A node without children whose list of children is empty rather than absent keeps that empty list in the message, so its cost counts the list.
 fn cost(node: &A11yNode) -> usize {
     let fields = OwnFields {
         id: node.id,
@@ -165,13 +168,13 @@ fn cost(node: &A11yNode) -> usize {
         chars: node.chars.as_deref(),
     };
     let mut counter = Counter(0);
-    let count_field = if children_of(node).is_empty() {
-        0
-    } else {
-        CHILD_COUNT_FIELD
+    let list_fields = match node.children.as_deref() {
+        None => 0,
+        Some([]) => CHILDREN_FIELD,
+        Some(_) => CHILD_COUNT_FIELD,
     };
     match serde_json::to_writer(&mut counter, &fields) {
-        Ok(()) => counter.0.saturating_add(SEPARATOR + count_field),
+        Ok(()) => counter.0.saturating_add(SEPARATOR + list_fields),
         Err(_) => usize::MAX,
     }
 }
@@ -516,11 +519,40 @@ mod tests {
         let json = serde_json::to_string(&node).unwrap();
         // The node with all its fields, a separator before it, and its child.
         assert!(json.len() + SEPARATOR <= own_cost + child_cost, "{json}");
-        // A leaf costs exactly its JSON and a separator.
+        // A leaf costs exactly its JSON and a separator, also when its list of children is empty rather than absent.
         let leaf = paragraph(3, "leaf");
         assert_eq!(
             cost(&leaf),
             serde_json::to_string(&leaf).unwrap().len() + SEPARATOR
         );
+        let mut empty = paragraph(4, "empty");
+        empty.children = Some(Vec::new());
+        assert_eq!(
+            cost(&empty),
+            serde_json::to_string(&empty).unwrap().len() + SEPARATOR
+        );
+    }
+
+    #[test]
+    fn empty_lists_of_children_count_towards_the_byte_limit() {
+        // Children whose lists of children are empty rather than absent keep those lists in the message.
+        let leaves = (2..1_002)
+            .map(|id| {
+                let mut leaf = paragraph(id, "x");
+                leaf.children = Some(Vec::new());
+                leaf
+            })
+            .collect();
+        let root = with_children(paragraph(1, "root"), leaves);
+        let whole = serde_json::to_string(&root).unwrap().len();
+        for bytes in [whole, whole - 1, whole / 2, 100] {
+            let limits = Limits {
+                nodes: MAX_NODES,
+                bytes,
+            };
+            let part = fill(&root, None, None, &limits);
+            let json = serde_json::to_string(&part).unwrap();
+            assert!(json.len() <= bytes, "{} > {bytes}", json.len());
+        }
     }
 }

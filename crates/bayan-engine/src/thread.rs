@@ -171,7 +171,11 @@ fn run(mut engine: Engine, jobs: &Receiver<Job>, shared: &Shared) {
         let mut used_up = false;
         if engine.take_session_discarded() {
             let restart = allowance.failure(received_ms);
-            add_restart(&mut messages, restart);
+            let added = add_restart(&mut messages, restart);
+            debug_assert!(
+                added,
+                "the engine.error that reports a discarded session ends the messages of its call"
+            );
             used_up = restart.is_none();
             if used_up {
                 // Before the last engine.error is delivered, so that a post from inside the callback already fails.

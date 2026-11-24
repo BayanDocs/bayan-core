@@ -107,7 +107,11 @@ impl WasmEngine {
         let times: Vec<u64> = restart_times.into_iter().map(milliseconds).collect();
         let mut allowance = RestartAllowance::with_times(&times);
         let restart = allowance.failure(milliseconds(now_ms));
-        add_restart(&mut messages, restart);
+        let added = add_restart(&mut messages, restart);
+        debug_assert!(
+            added,
+            "the engine.error that reports the panic ends the messages of the report"
+        );
         let kept: Vec<String> = allowance.times().iter().map(u64::to_string).collect();
         format!(
             r#"{{"messages":{},"restart_times":[{}],"stopped":{}}}"#,

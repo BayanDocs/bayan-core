@@ -4,7 +4,7 @@
 // reply to render.tile carries an ImageBitmap (specification §3.2). Within version 1, changes are additive only (§9).
 
 /** The protocol version these declarations describe. */
-export type ProtocolVersion = 0;
+export type ProtocolVersion = 1;
 
 /** The payloads of the messages the shell sends, by message type. */
 export interface Requests {
@@ -110,6 +110,12 @@ export interface WorkerInit {
   config?: EngineConfig;
   /** The address of bayan_wasm_bg.wasm, resolved against the worker script's address. */
   wasm_url?: string;
+  /**
+   * Subresource Integrity metadata for bayan_wasm_bg.wasm, one or more SHA-256, SHA-384 or SHA-512 hash expressions such
+   * as `sha384-…` (spec §14.8). The worker host fetches the module with it, so the engine starts only from a module with
+   * that hash; anything else fails with `load_failed`.
+   */
+  wasm_integrity?: string;
 }
 
 /** The worker host is ready. */
