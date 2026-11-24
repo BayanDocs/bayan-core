@@ -10,23 +10,25 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::a11y::{self, Limits};
 use crate::blobs::{BlobError, BlobId, BlobStore};
 use crate::config::Config;
 use crate::digest;
 use crate::envelope::{Envelope, EnvelopeError, invalid_request, with_type};
+use crate::keys::{self, Meaning, Press};
 use crate::limits::{
     MAX_DEVICE_SCALE, MAX_DOCUMENTS, MAX_ID, MAX_MESSAGE_BYTES, MAX_TILE_COORDINATE, MAX_TILE_SIDE,
     MAX_VIEW_COORDINATE, MAX_ZOOM, MIN_ZOOM,
 };
 use crate::manifest;
-use crate::mock::{MockDocument, View};
+use crate::mock::MockDocument;
 use crate::protocol::{
     A11yChange, A11yChangeKind, A11yTree, A11yUpdate, BlobRef, CompositionPhase, DiagReplay,
     DocClose, DocOpen, DocOpened, Empty, EngineError, ErrorCode, ErrorInfo, FEATURES, FontReport,
     Hello, InputComposition, InputKey, InputPointer, InputText, LAYOUT_EPOCH, OverlayUpdate,
-    PROTOCOL_VERSION, PointerKind, QueryA11y, RecordStopped, RenderInvalidate, RenderTile,
-    RenderTileReply, ReplayTile, TileRequest, UiManifestRequest, ViewLayoutProgress, ViewPages,
-    ViewSet, Welcome,
+    PROTOCOL_VERSION, Platform, PointerKind, QueryA11y, RecordStopped, RenderInvalidate,
+    RenderTile, RenderTileReply, ReplayTile, Runtime, TileRequest, UiManifestRequest,
+    ViewLayoutProgress, ViewPages, ViewSet, Welcome,
 };
 use crate::raster::TileGeometry;
 use crate::recording::{self, Recorder};
@@ -65,6 +67,8 @@ impl TileError {
 pub struct TileOutcome {
     /// The pixels, premultiplied RGBA8 without row padding, or why there are none.
     pub pixels: Result<Vec<u8>, TileError>,
+    /// The render revision that the tile shows (spec §14.6); 0 if it was not rendered.
+    pub revision: u64,
     /// The digest of the pixels (spec §10), if a recording or a replay needed it; it is computed only then, because it takes a pass over up to 64 MiB.
     pub digest: Option<String>,
     /// Messages to deliver to the shell: an `engine.error` if rendering panicked (spec §12).
@@ -77,16 +81,21 @@ impl std::fmt::Debug for TileOutcome {
         formatter
             .debug_struct("TileOutcome")
             .field("pixels", &self.pixels.as_ref().map(Vec::len))
+            .field("revision", &self.revision)
             .field("digest", &self.digest)
             .field("messages", &self.messages.len())
             .finish()
     }
 }
 
-/// The state of one session: the handshake and the open documents.
+/// The state of one session: the handshake, the platform and runtime it named, and the open documents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Session {
     handshake: bool,
+    /// The operating system whose keyboard conventions apply, from `hello` (spec §14.1); only the UI manifest's key data depend on it.
+    platform: Platform,
+    /// Whether the shell runs in a browser, from `hello`; only the UI manifest's key data depend on it.
+    runtime: Runtime,
     next_doc_id: u64,
     documents: BTreeMap<u64, MockDocument>,
 }
@@ -95,6 +104,8 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             handshake: false,
+            platform: Platform::Other,
+            runtime: Runtime::Native,
             next_doc_id: 1,
             documents: BTreeMap::new(),
         }
@@ -215,6 +226,8 @@ impl Outbox {
             message_id: error.message_id,
             recoverable,
             args: error.args,
+            // The binding adds it to an error that discards the session, after the engine has digested its messages (spec §14.2).
+            restart: None,
         };
         self.event("engine.error", &payload);
     }
@@ -328,6 +341,8 @@ pub struct Engine {
     config: Config,
     blobs: Arc<BlobStore>,
     session: Session,
+    /// Whether the engine discarded its session after a panic since [`Engine::take_session_discarded`] last asked.
+    discarded: bool,
     next_seq: u64,
     recorder: Option<Recorder>,
     /// Blobs read while handling the current message, for the recording (spec §10).
@@ -369,6 +384,7 @@ impl Engine {
             config,
             blobs,
             session: Session::default(),
+            discarded: false,
             next_seq: 1,
             recorder: None,
             blob_reads: Vec::new(),
@@ -380,6 +396,11 @@ impl Engine {
     #[must_use]
     pub fn blobs(&self) -> &Arc<BlobStore> {
         &self.blobs
+    }
+
+    /// Whether the engine discarded its session after a panic since this was last asked: then the last of the messages that the call returned is an `engine.error` with `recoverable: false`, to which the binding adds `restart` ([`crate::restart`], spec §14.2). Every binding asks after each call of [`Engine::handle`], [`Engine::render_tile`], [`Engine::recover_from_escaped_panic`] and [`Engine::report_panic`], after the engine has digested what it sent for a recording.
+    pub fn take_session_discarded(&mut self) -> bool {
+        std::mem::take(&mut self.discarded)
     }
 
     /// Handles one message (a protocol envelope, spec §4) that arrived `received_ms` milliseconds after some fixed moment the host chooses, and returns the messages the engine sends in answer, in order, as JSON. A panic while handling it is caught: the engine then discards its session and reports the panic (spec §12).
@@ -457,18 +478,21 @@ impl Engine {
             self.render_direct(request, width, height)
         }));
         let outcome = match attempt {
-            Ok(Ok((pixels, digest))) => TileOutcome {
+            Ok(Ok((pixels, revision, digest))) => TileOutcome {
                 pixels: Ok(pixels),
+                revision,
                 digest,
                 messages: Vec::new(),
             },
             Ok(Err(error)) => TileOutcome {
                 pixels: Err(error),
+                revision: 0,
                 digest: None,
                 messages: Vec::new(),
             },
             Err(_) => TileOutcome {
                 pixels: Err(TileError::Internal),
+                revision: 0,
                 digest: None,
                 messages: self.recover_from_panic(None),
             },
@@ -486,13 +510,13 @@ impl Engine {
         outcome
     }
 
-    /// Renders a tile for [`Engine::render_tile`], and computes its digest if a recording or a replay needs it.
+    /// Renders a tile for [`Engine::render_tile`], with the render revision it shows, and computes its digest if a recording or a replay needs it.
     fn render_direct(
         &mut self,
         request: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<(Vec<u8>, Option<String>), TileError> {
+    ) -> Result<(Vec<u8>, u64, Option<String>), TileError> {
         if request.len() > MAX_MESSAGE_BYTES {
             return Err(TileError::InvalidArgument);
         }
@@ -501,7 +525,7 @@ impl Engine {
         let request = request
             .with_size(width, height)
             .ok_or(TileError::InvalidArgument)?;
-        let pixels = self
+        let (pixels, revision) = self
             .render(&request)
             .map_err(|failure| failure.as_tile_error())?;
         let digest =
@@ -509,10 +533,11 @@ impl Engine {
         if let Some(digest) = &digest {
             self.log_tile(request.page, width, height, digest.clone());
         }
-        Ok((pixels, digest))
+        Ok((pixels, revision, digest))
     }
 
-    fn render(&mut self, request: &RenderTile) -> Result<Vec<u8>, TileFailure> {
+    /// Renders a tile, with the render revision it shows.
+    fn render(&mut self, request: &RenderTile) -> Result<(Vec<u8>, u64), TileFailure> {
         #[cfg(test)]
         assert!(
             !tests::PANIC_WHILE_RENDERING.with(std::cell::Cell::get),
@@ -536,9 +561,10 @@ impl Engine {
         if request.page >= MockDocument::page_count() {
             return Err(TileFailure::NoPage);
         }
-        document
+        let pixels = document
             .render(request.page, &geometry)
-            .ok_or(TileFailure::Memory)
+            .ok_or(TileFailure::Memory)?;
+        Ok((pixels, document.revision()))
     }
 
     /// Records a tile in the replay's list of tiles, when replaying.
@@ -583,6 +609,7 @@ impl Engine {
     /// Discards the session after a panic and reports it: as the reply to the message that caused it, if it had an identifier, and as `engine.error` with `recoverable: false` (spec §12). A recording keeps running, so it can reproduce the panic.
     fn recover_from_panic(&mut self, id: Option<u64>) -> Vec<String> {
         self.session = Session::default();
+        self.discarded = true;
         let mut outbox = Outbox::new(self.next_seq);
         if let Some(re) = id {
             outbox.fail(Some(re), ErrorInfo::new(ErrorCode::Panic));
@@ -605,7 +632,7 @@ impl Engine {
             "input.text" => self.input_text(envelope, outbox),
             "input.composition" => self.input_composition(envelope, outbox),
             "query.a11y" => self.query_a11y(envelope, outbox),
-            "ui.manifest" => Self::ui_manifest(envelope, outbox),
+            "ui.manifest" => self.ui_manifest(envelope, outbox),
             "diag.record.start" => self.record_start(envelope, outbox),
             "diag.record.stop" => self.record_stop(envelope, outbox),
             "diag.replay" => self.replay_message(envelope, outbox),
@@ -644,9 +671,12 @@ impl Engine {
         if !hello.protocol_versions.contains(&PROTOCOL_VERSION) {
             return Err(unsupported_version());
         }
-        // A new session starts without documents (spec §5).
+        // A new session starts without documents (spec §5). A missing or unknown platform and runtime count as `other` and `native` (spec §14.1).
+        let shell = hello.shell.unwrap_or_default();
         self.session = Session {
             handshake: true,
+            platform: shell.platform,
+            runtime: shell.runtime,
             ..Session::default()
         };
         let welcome = Welcome {
@@ -661,7 +691,7 @@ impl Engine {
 
     fn doc_open(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let open: DocOpen = envelope.payload()?;
-        // The v0 skeleton opens the mock document whatever the blob holds, but the blob must exist.
+        // Until real documents can be opened, the engine opens the mock document whatever the blob holds, but the blob must exist.
         self.read_blob(open.blob)?;
         if self.session.documents.len() >= MAX_DOCUMENTS {
             return Err(limit_exceeded("documents"));
@@ -671,11 +701,12 @@ impl Engine {
             return Err(limit_exceeded("documents"));
         }
         self.session.next_doc_id += 1;
-        self.session
-            .documents
-            .insert(doc_id, MockDocument::default());
+        let document = MockDocument::default();
+        let revision = document.revision();
+        self.session.documents.insert(doc_id, document);
         let opened = DocOpened {
             doc_id,
+            revision,
             page_count_estimate: MockDocument::page_count(),
             warnings: Vec::new(),
             fonts: FontReport::default(),
@@ -707,7 +738,9 @@ impl Engine {
             return Err(invalid_request(&envelope.kind));
         }
         let document = self.document(view.doc_id)?;
-        document.view = Some(View { zoom: view.zoom });
+        // Only a new mode or a change of formatting marks changes what the tiles show; a new viewport, zoom or device scale changes nothing that tiles requested for a scale show (spec §14.6 item 2).
+        let every_page = document.set_view(view.zoom, view.mode, view.show_formatting_marks);
+        let revision = document.revision();
         let overlay = overlay(view.doc_id, document);
         let doc_id = view.doc_id;
         let pages = MockDocument::page_count();
@@ -719,13 +752,16 @@ impl Engine {
                 pages: MockDocument::pages(),
             },
         );
-        outbox.event(
-            "render.invalidate",
-            &RenderInvalidate {
-                doc_id,
-                regions: MockDocument::page_regions(),
-            },
-        );
+        if every_page {
+            outbox.event(
+                "render.invalidate",
+                &RenderInvalidate {
+                    doc_id,
+                    revision,
+                    regions: MockDocument::page_regions(),
+                },
+            );
+        }
         outbox.event(
             "view.layout.progress",
             &ViewLayoutProgress {
@@ -746,7 +782,7 @@ impl Engine {
     ) -> Result<(), ErrorInfo> {
         let request: RenderTile = envelope.payload()?;
         let (width, height) = (request.width, request.height);
-        let pixels = self
+        let (pixels, revision) = self
             .render(&request)
             .map_err(|failure| failure.as_message_error(&envelope.kind))?;
         let hash = digest::of_bytes(&pixels);
@@ -761,6 +797,7 @@ impl Engine {
             height,
             stride: width * 4,
             hash,
+            revision,
             blob: BlobRef(blob),
         };
         outbox.reply(envelope.id, None, &reply);
@@ -774,22 +811,37 @@ impl Engine {
     ) -> Result<(), ErrorInfo> {
         let pointer: InputPointer = envelope.payload()?;
         let document = self.document(pointer.doc_id)?;
+        let revision = document.revision();
         let pressed = pointer.kind == PointerKind::Down && pointer.button == 0;
         let changed = pressed && document.press(pointer.x, pointer.y);
         outbox.reply(envelope.id, None, &Empty {});
         if changed {
-            line_changed(pointer.doc_id, document, outbox);
+            line_changed(pointer.doc_id, document, revision, outbox);
         }
         Ok(())
     }
 
     fn input_key(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
         let key: InputKey = envelope.payload()?;
+        let (platform, runtime) = (self.session.platform, self.session.runtime);
         let document = self.document(key.doc_id)?;
-        let changed = !key.composing && document.key(&key.key);
+        let revision = document.revision();
+        let press = Press {
+            key: &key.key,
+            code: &key.code,
+            ctrl: key.modifiers.ctrl,
+            shift: key.modifiers.shift,
+            alt: key.modifiers.alt,
+            meta: key.modifiers.meta,
+        };
+        // The press means what the session's bindings and document keys say, matched as a shell matches them (spec §14.3). The mock document has no formatting, files or history yet, so a binding's command changes nothing; it acts on the document keys it handles.
+        let changed = match keys::meaning(&press, key.composing, platform, runtime) {
+            Meaning::DocumentKey(name) => document.key(name),
+            Meaning::Command(_) | Meaning::Nothing => false,
+        };
         outbox.reply(envelope.id, None, &Empty {});
         if changed {
-            line_changed(key.doc_id, document, outbox);
+            line_changed(key.doc_id, document, revision, outbox);
         }
         Ok(())
     }
@@ -801,12 +853,13 @@ impl Engine {
     ) -> Result<(), ErrorInfo> {
         let input: InputText = envelope.payload()?;
         let document = self.document(input.doc_id)?;
+        let revision = document.revision();
         let changed = document
             .insert_text(&input.text)
             .map_err(|_| limit_exceeded("text_length"))?;
         outbox.reply(envelope.id, None, &Empty {});
         if changed {
-            line_changed(input.doc_id, document, outbox);
+            line_changed(input.doc_id, document, revision, outbox);
         }
         Ok(())
     }
@@ -818,6 +871,7 @@ impl Engine {
     ) -> Result<(), ErrorInfo> {
         let input: InputComposition = envelope.payload()?;
         let document = self.document(input.doc_id)?;
+        let revision = document.revision();
         let changed = match input.phase {
             CompositionPhase::Start => document.start_composition(),
             CompositionPhase::Update => document
@@ -827,7 +881,7 @@ impl Engine {
         };
         outbox.reply(envelope.id, None, &Empty {});
         if changed {
-            line_changed(input.doc_id, document, outbox);
+            line_changed(input.doc_id, document, revision, outbox);
         }
         Ok(())
     }
@@ -838,24 +892,30 @@ impl Engine {
         outbox: &mut Outbox,
     ) -> Result<(), ErrorInfo> {
         let query: QueryA11y = envelope.payload()?;
+        if query.children.is_some_and(|range| range.count == 0) {
+            return Err(invalid_request(&envelope.kind));
+        }
         let document = self.document(query.doc_id)?;
+        // The tree within the limits of spec §14.7: flattened below level 64, and split where one message cannot hold it.
+        let (tree, caret) = document.a11y_tree_and_caret();
         let root = match query.node {
-            Some(id) => document.a11y_subtree(id).ok_or_else(|| not_found("node"))?,
-            None => document.a11y_tree(),
+            Some(id) => a11y::find(&tree, id).ok_or_else(|| not_found("node"))?,
+            None => &tree,
         };
         let tree = A11yTree {
             doc_id: query.doc_id,
-            root,
-            caret: Some(document.a11y_caret()),
+            root: a11y::fill(root, caret, query.children, &Limits::PROTOCOL),
+            caret,
         };
         outbox.reply(envelope.id, None, &tree);
         Ok(())
     }
 
-    fn ui_manifest(envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
-        // The stub is in English whatever locale is asked for (spec §6.8).
+    fn ui_manifest(&self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+        // The stub is in English whatever locale is asked for (spec §6.8); its key data are resolved for the session's platform and runtime (spec §14.3).
         let _request: UiManifestRequest = envelope.payload()?;
-        outbox.reply(envelope.id, None, &manifest::stub());
+        let manifest = manifest::stub(self.session.platform, self.session.runtime);
+        outbox.reply(envelope.id, None, &manifest);
         Ok(())
     }
 
@@ -992,6 +1052,7 @@ impl Engine {
 fn overlay(doc_id: u64, document: &MockDocument) -> OverlayUpdate {
     OverlayUpdate {
         doc_id,
+        revision: document.revision(),
         caret: Some(document.caret()),
         selection: Vec::new(),
         remote: Vec::new(),
@@ -999,25 +1060,34 @@ fn overlay(doc_id: u64, document: &MockDocument) -> OverlayUpdate {
     }
 }
 
-/// The events after the editable line changed: the region to draw again, the caret, and the accessibility node.
-fn line_changed(doc_id: u64, document: &MockDocument, outbox: &mut Outbox) {
-    outbox.event(
-        "render.invalidate",
-        &RenderInvalidate {
-            doc_id,
-            regions: vec![MockDocument::editable_region()],
-        },
-    );
+/// The events after the editable line changed: the region to draw again if what the tiles show changed since the render revision `before` (a caret that only moved changes no tile, spec §14.6), the caret, and the accessibility node, within the limits of spec §14.7.
+fn line_changed(doc_id: u64, document: &MockDocument, before: u64, outbox: &mut Outbox) {
+    let revision = document.revision();
+    if revision != before {
+        outbox.event(
+            "render.invalidate",
+            &RenderInvalidate {
+                doc_id,
+                revision,
+                regions: vec![MockDocument::editable_region()],
+            },
+        );
+    }
     outbox.event("overlay.update", &overlay(doc_id, document));
+    let (tree, caret) = document.a11y_tree_and_caret();
+    let changes = a11y::find(&tree, document.editable_id())
+        .map(|node| A11yChange {
+            kind: A11yChangeKind::Replace,
+            node: a11y::fill(node, caret, None, &Limits::PROTOCOL),
+        })
+        .into_iter()
+        .collect();
     outbox.event(
         "a11y.update",
         &A11yUpdate {
             doc_id,
-            changes: vec![A11yChange {
-                kind: A11yChangeKind::Replace,
-                node: document.editable_node(),
-            }],
-            caret: Some(document.a11y_caret()),
+            changes,
+            caret,
         },
     );
 }
@@ -1037,12 +1107,12 @@ mod tests {
     fn engine_with_document() -> (Engine, u64) {
         let mut engine = Engine::new(Config::default(), Arc::new(BlobStore::new()));
         engine.handle(
-            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+            br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#,
             0,
         );
         let blob = engine.blobs().put_shell(b"").unwrap();
         let opened = engine.handle(
-            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
+            format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
             0,
         );
         let opened: serde_json::Value = serde_json::from_str(&opened[0]).unwrap();
@@ -1092,7 +1162,7 @@ mod tests {
         let request = tile_request(doc_id);
         let plain = engine.render_tile(request.as_bytes(), 4, 4, 0);
         assert_eq!(plain.digest, None);
-        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        engine.handle(br#"{"v":1,"id":3,"type":"diag.record.start"}"#, 0);
         let recorded = engine.render_tile(request.as_bytes(), 4, 4, 0);
         assert_eq!(
             recorded.digest,
@@ -1103,9 +1173,9 @@ mod tests {
     #[test]
     fn debug_output_shows_no_document_content() {
         let (mut engine, doc_id) = engine_with_document();
-        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        engine.handle(br#"{"v":1,"id":3,"type":"diag.record.start"}"#, 0);
         engine.handle(
-            format!(r#"{{"v":0,"id":4,"type":"input.text","payload":{{"doc_id":{doc_id},"text":"Confidential"}}}}"#).as_bytes(),
+            format!(r#"{{"v":1,"id":4,"type":"input.text","payload":{{"doc_id":{doc_id},"text":"Confidential"}}}}"#).as_bytes(),
             0,
         );
         let shown = format!("{engine:?}");
@@ -1115,7 +1185,7 @@ mod tests {
         assert_eq!(
             format!("{outcome:?}"),
             format!(
-                "TileOutcome {{ pixels: Ok(16), digest: {:?}, messages: 0 }}",
+                "TileOutcome {{ pixels: Ok(16), revision: 2, digest: {:?}, messages: 0 }}",
                 outcome.digest
             )
         );

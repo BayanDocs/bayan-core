@@ -413,14 +413,14 @@ mod tests {
     fn recording_of(messages: &[&str]) -> Vec<u8> {
         let mut engine = engine();
         engine.handle(
-            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+            br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#,
             0,
         );
-        engine.handle(br#"{"v":0,"id":2,"type":"diag.record.start"}"#, 0);
+        engine.handle(br#"{"v":1,"id":2,"type":"diag.record.start"}"#, 0);
         for (index, message) in messages.iter().enumerate() {
             engine.handle(message.as_bytes(), u64::try_from(index).unwrap() * 10);
         }
-        let reply = engine.handle(br#"{"v":0,"id":99,"type":"diag.record.stop"}"#, 0);
+        let reply = engine.handle(br#"{"v":1,"id":99,"type":"diag.record.stop"}"#, 0);
         let reply: serde_json::Value = serde_json::from_str(&reply[0]).unwrap();
         let blob = reply["payload"]["blob"].as_u64().unwrap();
         engine.blobs().take(blob).unwrap().to_vec()
@@ -429,8 +429,8 @@ mod tests {
     #[test]
     fn a_recording_replays_identically() {
         let recording = recording_of(&[
-            r#"{"v":0,"id":3,"type":"ui.manifest"}"#,
-            r#"{"v":0,"type":"no.such.message"}"#,
+            r#"{"v":1,"id":3,"type":"ui.manifest"}"#,
+            r#"{"v":1,"type":"no.such.message"}"#,
         ]);
         let report = replay(Config::default(), &recording).unwrap();
         assert_eq!(report.entries, 2);
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn records_times_relative_to_the_first_entry() {
-        let recording = recording_of(&[r#"{"v":0,"type":"a"}"#, r#"{"v":0,"type":"b"}"#]);
+        let recording = recording_of(&[r#"{"v":1,"type":"a"}"#, r#"{"v":1,"type":"b"}"#]);
         let file: RecordingFile = serde_json::from_slice(&recording).unwrap();
         let times: Vec<u64> = file.entries.iter().map(|entry| entry.t_ms).collect();
         assert_eq!(times, [0, 10]);
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_changed_recording_is_reported_where_it_first_differs() {
-        let recording = recording_of(&[r#"{"v":0,"type":"a"}"#, r#"{"v":0,"type":"b"}"#]);
+        let recording = recording_of(&[r#"{"v":1,"type":"a"}"#, r#"{"v":1,"type":"b"}"#]);
         let mut file: RecordingFile = serde_json::from_slice(&recording).unwrap();
         file.entries[1].digest = "fnv1a64:0000000000000000".to_owned();
         let changed = serde_json::to_vec(&file).unwrap();
@@ -502,19 +502,19 @@ mod tests {
     fn a_replay_renders_no_more_pixels_than_its_budget() {
         let mut engine = engine();
         engine.handle(
-            br#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#,
+            br#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#,
             0,
         );
         let blob = engine.blobs().put_shell(b"").unwrap();
         engine.handle(
-            format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
+            format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#).as_bytes(),
             0,
         );
-        engine.handle(br#"{"v":0,"id":3,"type":"diag.record.start"}"#, 0);
+        engine.handle(br#"{"v":1,"id":3,"type":"diag.record.start"}"#, 0);
         // Three tiles of 10 × 10 pixels: one through each path, and one more through messages.
         let tile = r#"{"doc_id":1,"page":0,"rect":{"x":0,"y":0,"width":100000,"height":100000},"width":10,"height":10}"#;
         engine.handle(
-            format!(r#"{{"v":0,"id":4,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
+            format!(r#"{{"v":1,"id":4,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
             0,
         );
         assert!(
@@ -524,10 +524,10 @@ mod tests {
                 .is_ok()
         );
         engine.handle(
-            format!(r#"{{"v":0,"id":5,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
+            format!(r#"{{"v":1,"id":5,"type":"render.tile","payload":{tile}}}"#).as_bytes(),
             0,
         );
-        let reply = engine.handle(br#"{"v":0,"id":6,"type":"diag.record.stop"}"#, 0);
+        let reply = engine.handle(br#"{"v":1,"id":6,"type":"diag.record.stop"}"#, 0);
         let reply: serde_json::Value = serde_json::from_str(&reply[0]).unwrap();
         let recording = engine
             .blobs()

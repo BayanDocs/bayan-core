@@ -31,12 +31,12 @@ pub fn send(engine: &mut Engine, message: &Value) -> Vec<Value> {
 
 /// A request envelope.
 pub fn request(id: u64, kind: &str, payload: Value) -> Value {
-    json!({ "v": 0, "id": id, "type": kind, "payload": payload })
+    json!({ "v": 1, "id": id, "type": kind, "payload": payload })
 }
 
 /// A fire-and-forget envelope.
 pub fn notice(kind: &str, payload: Value) -> Value {
-    json!({ "v": 0, "type": kind, "payload": payload })
+    json!({ "v": 1, "type": kind, "payload": payload })
 }
 
 /// The reply among `messages` to request `id`.
@@ -73,9 +73,9 @@ pub fn events<'a>(messages: &'a [Value], kind: &str) -> Vec<&'a Value> {
 pub fn open_document(engine: &mut Engine) -> u64 {
     let hello = send(
         engine,
-        &request(1, "hello", json!({ "protocol_versions": [0] })),
+        &request(1, "hello", json!({ "protocol_versions": [1] })),
     );
-    assert_eq!(ok_payload(&hello, 1)["protocol_version"], json!(0));
+    assert_eq!(ok_payload(&hello, 1)["protocol_version"], json!(1));
     let blob = engine.blobs().put_shell(b"").unwrap();
     let opened = send(engine, &request(2, "doc.open", json!({ "blob": blob })));
     ok_payload(&opened, 2)["doc_id"].as_u64().unwrap()

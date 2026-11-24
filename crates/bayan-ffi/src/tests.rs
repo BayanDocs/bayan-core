@@ -114,7 +114,19 @@ fn render(
     stride: usize,
     out: &mut [u8],
 ) -> BayanStatus {
-    // SAFETY: `engine` is live, `request` is readable, and `out` is writable for the whole call.
+    render_with_revision(engine, request, width, height, stride, out, ptr::null_mut())
+}
+
+fn render_with_revision(
+    engine: *mut BayanEngine,
+    request: &str,
+    width: u32,
+    height: u32,
+    stride: usize,
+    out: &mut [u8],
+    revision: *mut u64,
+) -> BayanStatus {
+    // SAFETY: `engine` is live, `request` is readable, `out` is writable for the whole call, and `revision` is null or writable.
     unsafe {
         bayan_render_tile(
             engine,
@@ -125,6 +137,7 @@ fn render(
             width,
             height,
             stride,
+            revision,
         )
     }
 }
@@ -139,14 +152,14 @@ fn open(engine: *mut BayanEngine, collector: &Collector) -> u64 {
     assert_eq!(
         post(
             engine,
-            r#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#
+            r#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#
         ),
         BAYAN_STATUS_OK
     );
     assert_eq!(collector.reply(1)["type"], "welcome");
     let blob = put(engine, b"");
     assert_ne!(blob, 0);
-    let message = format!(r#"{{"v":0,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#);
+    let message = format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{blob}}}}}"#);
     assert_eq!(post(engine, &message), BAYAN_STATUS_OK);
     collector.reply(2)["payload"]["doc_id"].as_u64().unwrap()
 }
@@ -183,7 +196,7 @@ fn handshake_open_render_record_and_replay() {
     let engine = start("{}", &collector);
     let doc_id = open(engine, &collector);
     assert_eq!(
-        post(engine, r#"{"v":0,"id":3,"type":"diag.record.start"}"#),
+        post(engine, r#"{"v":1,"id":3,"type":"diag.record.start"}"#),
         BAYAN_STATUS_OK
     );
     collector.reply(3);
@@ -209,13 +222,13 @@ fn handshake_open_render_record_and_replay() {
     // The padding between rows is left alone.
     assert_eq!(buffer[34 * 4], 0xEE);
     let first_hash = bayan_engine::digest::of_bytes(&tight);
-    let stop = r#"{"v":0,"id":4,"type":"diag.record.stop"}"#;
+    let stop = r#"{"v":1,"id":4,"type":"diag.record.stop"}"#;
     assert_eq!(post(engine, stop), BAYAN_STATUS_OK);
     let recording = collector.reply(4)["payload"]["blob"].as_u64().unwrap();
     let bytes = get(engine, recording).unwrap();
     assert!(bytes.starts_with(b"{\"format\":\"bayan-engine-recording\""));
     let replay =
-        format!(r#"{{"v":0,"id":5,"type":"diag.replay","payload":{{"blob":{recording}}}}}"#);
+        format!(r#"{{"v":1,"id":5,"type":"diag.replay","payload":{{"blob":{recording}}}}}"#);
     assert_eq!(post(engine, &replay), BAYAN_STATUS_OK);
     let report = collector.reply(5);
     assert_eq!(report["payload"]["identical"], true);
@@ -319,6 +332,7 @@ fn checks_every_argument() {
             4,
             4,
             16,
+            ptr::null_mut(),
         )
     };
     assert_eq!(null_out, BAYAN_STATUS_INVALID_ARGUMENT);
@@ -331,7 +345,7 @@ fn a_panic_in_a_handler_becomes_engine_error_and_the_engine_stays_usable() {
     let engine = start(r#"{"test":{"allow_panic":true}}"#, &collector);
     open(engine, &collector);
     assert_eq!(
-        post(engine, r#"{"v":0,"id":3,"type":"diag.panic"}"#),
+        post(engine, r#"{"v":1,"id":3,"type":"diag.panic"}"#),
         BAYAN_STATUS_OK
     );
     assert_eq!(collector.reply(3)["error"]["code"], "panic");
@@ -341,7 +355,7 @@ fn a_panic_in_a_handler_becomes_engine_error_and_the_engine_stays_usable() {
     assert_eq!(
         post(
             engine,
-            r#"{"v":0,"id":4,"type":"hello","payload":{"protocol_versions":[0]}}"#
+            r#"{"v":1,"id":4,"type":"hello","payload":{"protocol_versions":[1]}}"#
         ),
         BAYAN_STATUS_OK
     );
@@ -600,7 +614,7 @@ fn empty_blobs_and_callback_registration_behave_as_the_header_says() {
     assert_eq!(
         post(
             engine,
-            r#"{"v":0,"id":1,"type":"hello","payload":{"protocol_versions":[0]}}"#
+            r#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#
         ),
         BAYAN_STATUS_OK
     );
@@ -682,6 +696,7 @@ fn blobs_and_tiles_are_written_into_buffers_that_were_never_initialized() {
             width,
             height,
             stride,
+            ptr::null_mut(),
         )
     };
     assert_eq!(status, BAYAN_STATUS_OK);
@@ -694,5 +709,118 @@ fn blobs_and_tiles_are_written_into_buffers_that_were_never_initialized() {
         // Every pixel lies on the page, so it is opaque.
         assert!(pixels.chunks(4).all(|pixel| pixel[3] == 255), "{pixels:?}");
     }
+    free(engine);
+}
+
+/// Moves the engine's clock forward, as if `ms` milliseconds had passed.
+fn advance_clock(engine: *mut BayanEngine, ms: u64) {
+    // SAFETY: `engine` is live; the offset is an atomic that the engine only reads.
+    let engine = unsafe { &*engine };
+    engine.clock_offset_ms.fetch_add(ms, Ordering::SeqCst);
+}
+
+/// Says hello as request `id`, makes the engine panic as request `id + 1`, and returns the `restart` of the `engine.error` that follows its reply, the `failures`-th that discards a session.
+fn panic_and_restart(
+    engine: *mut BayanEngine,
+    collector: &Collector,
+    id: u64,
+    failures: usize,
+) -> serde_json::Value {
+    let hello =
+        format!(r#"{{"v":1,"id":{id},"type":"hello","payload":{{"protocol_versions":[1]}}}}"#);
+    assert_eq!(post(engine, &hello), BAYAN_STATUS_OK);
+    let panic = format!(r#"{{"v":1,"id":{},"type":"diag.panic"}}"#, id + 1);
+    assert_eq!(post(engine, &panic), BAYAN_STATUS_OK);
+    assert_eq!(collector.reply(id + 1)["error"]["code"], "panic");
+    // Wait until the engine.error that follows has arrived too, then take it.
+    collector.wait_for(|message| {
+        message["type"] == "engine.error" && message["seq"] == serde_json::json!(failures)
+    });
+    let messages = collector
+        .messages
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let errors: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|text| serde_json::from_str::<serde_json::Value>(text).unwrap())
+        .filter(|message| {
+            message["type"] == "engine.error" && message["payload"]["recoverable"] == false
+        })
+        .collect();
+    assert_eq!(errors.len(), failures);
+    errors[failures - 1]["payload"]["restart"].clone()
+}
+
+#[test]
+fn restarts_are_counted_by_the_engine_s_clock_and_the_engine_stops_after_three() {
+    let collector = Collector::default();
+    let engine = start(r#"{"test":{"allow_panic":true}}"#, &collector);
+    let restart = |number: u32| serde_json::json!({ "number": number, "limit": 3 });
+    assert_eq!(panic_and_restart(engine, &collector, 10, 1), restart(1));
+    advance_clock(engine, 60_000);
+    assert_eq!(panic_and_restart(engine, &collector, 20, 2), restart(2));
+    advance_clock(engine, 60_000);
+    assert_eq!(panic_and_restart(engine, &collector, 30, 3), restart(3));
+    // Ten minutes after the first restart, it no longer counts: the allowance has refilled by one.
+    advance_clock(engine, 480_001);
+    assert_eq!(panic_and_restart(engine, &collector, 40, 4), restart(3));
+    // The fourth failure within ten minutes stops the engine.
+    assert_eq!(
+        panic_and_restart(engine, &collector, 50, 5),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        post(
+            engine,
+            r#"{"v":1,"id":60,"type":"hello","payload":{"protocol_versions":[1]}}"#
+        ),
+        BAYAN_STATUS_INTERNAL_ERROR
+    );
+    let mut buffer = vec![0_u8; 64];
+    assert_eq!(
+        render(engine, &page_request(1), 4, 4, 16, &mut buffer),
+        BAYAN_STATUS_INTERNAL_ERROR
+    );
+    // Blobs still work, so the shell can release what it holds.
+    let blob = put(engine, b"x");
+    assert_ne!(blob, 0);
+    free(engine);
+}
+
+#[test]
+fn a_tile_and_an_invalidation_that_cross_carry_revisions_that_say_which_is_current() {
+    let collector = Collector::default();
+    let engine = start("", &collector);
+    let doc_id = open(engine, &collector);
+    assert_eq!(collector.reply(2)["payload"]["revision"], 1);
+    let request = page_request(doc_id);
+    let mut buffer = vec![0_u8; 4 * 4 * 4];
+    let mut revision = 0_u64;
+    assert_eq!(
+        render_with_revision(engine, &request, 4, 4, 16, &mut buffer, &raw mut revision),
+        BAYAN_STATUS_OK
+    );
+    assert_eq!(revision, 1);
+    // Typing changes the first page after that tile was rendered: the invalidation that covers it has a higher revision, so the shell knows the tile is stale, whenever the invalidation arrives.
+    let text = format!(
+        r#"{{"v":1,"id":3,"type":"input.text","payload":{{"doc_id":{doc_id},"text":"a"}}}}"#
+    );
+    assert_eq!(post(engine, &text), BAYAN_STATUS_OK);
+    // The tile requested now waits for the text before it, so it shows revision 2, which no invalidation outranks, even if its pixels arrive before the invalidation's message.
+    assert_eq!(
+        render_with_revision(engine, &request, 4, 4, 16, &mut buffer, &raw mut revision),
+        BAYAN_STATUS_OK
+    );
+    assert_eq!(revision, 2);
+    let invalidation = collector.wait_for(|message| message["type"] == "render.invalidate");
+    assert_eq!(invalidation["payload"]["revision"], 2);
+    assert_eq!(invalidation["payload"]["regions"][0]["page"], 0);
+    // A failed render leaves the revision alone.
+    revision = 77;
+    assert_eq!(
+        render_with_revision(engine, "{", 4, 4, 16, &mut buffer, &raw mut revision),
+        BAYAN_STATUS_INVALID_ARGUMENT
+    );
+    assert_eq!(revision, 77);
     free(engine);
 }

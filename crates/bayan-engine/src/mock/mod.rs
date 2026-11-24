@@ -2,7 +2,7 @@
 //!
 //! It exists so the shells can prove scrolling, tiles, input and accessibility end to end (DESK-002, WEB-002). Its pages hold a heading, paragraphs, a bulleted list, a small table and, on the first page, an **editable line** that shows the text the shell sends: committed text as dark boxes, one per character, and input method composition as blue boxes with an underline (thicker under the composition's selected part), so the input method path is visible. Text is drawn as grey bars ("greeked") until the text pipeline exists (CORE-003); screen readers get the real words through the accessibility tree.
 //!
-//! The editable line understands `input.text`, `input.composition`, the keys `Backspace`, `Delete`, `ArrowLeft`, `ArrowRight`, `Home` and `End`, and a primary-button press inside it, which moves the caret. It holds at most 1,024 UTF-16 code units of text and 256 of composition.
+//! The editable line understands `input.text`, `input.composition`, the document keys `Backspace`, `Delete`, `ArrowLeft`, `ArrowRight`, `Home` and `End` (with any modifiers, as spec §14.3 matches document keys), and a primary-button press inside it, which moves the caret. It holds at most 1,024 UTF-16 code units of text and 256 of composition. Its render revision grows with every change to what its tiles show: the editable line's text and composition, but not the caret, which the shell draws over the tiles, and the view's mode and formatting marks; it lays every mode out like `print` (spec §14.6).
 
 mod content;
 mod editable;
@@ -14,8 +14,9 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::limits::MAX_ID;
 use crate::protocol::{
-    A11yCaret, A11yNode, A11yRole, Caret, CharBox, PageInfo, PageRect, Rect, TextRange,
+    A11yCaret, A11yNode, A11yRole, Caret, CharBox, PageInfo, PageRect, Rect, TextRange, ViewMode,
 };
 use crate::raster::{Shape, TileGeometry, rasterize};
 
@@ -42,12 +43,30 @@ pub(crate) struct View {
 }
 
 /// One open copy of the mock document.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MockDocument {
     /// The shell's view, once it sent `view.set`.
     pub(crate) view: Option<View>,
+    /// The view mode that the tiles show (spec §14.6): `print` until a `view.set` chooses another.
+    mode: ViewMode,
+    /// Whether the tiles show formatting marks: not until a `view.set` asks for them.
+    show_formatting_marks: bool,
+    /// The render revision (spec §14.6): 1 when the document opens, one more with every change to what any of its tiles shows.
+    revision: u64,
     /// The editable line.
     line: EditableLine,
+}
+
+impl Default for MockDocument {
+    fn default() -> Self {
+        Self {
+            view: None,
+            mode: ViewMode::Print,
+            show_formatting_marks: false,
+            revision: 1,
+            line: EditableLine::default(),
+        }
+    }
 }
 
 /// Where the editable line's text sits.
@@ -273,6 +292,8 @@ impl MockDocument {
             editable: true,
             bounds: Some(layout.editable),
             chars: Some(chars),
+            child_count: None,
+            children_start: None,
             children: None,
         }
     }
@@ -312,34 +333,75 @@ impl MockDocument {
             editable: false,
             bounds: None,
             chars: None,
+            child_count: None,
+            children_start: None,
             children: Some(children),
         }
     }
 
-    /// The subtree rooted at node `id`, if there is such a node.
-    pub(crate) fn a11y_subtree(&self, id: u64) -> Option<A11yNode> {
-        fn find(node: A11yNode, id: u64) -> Option<A11yNode> {
-            if node.id == id {
-                return Some(node);
-            }
-            node.children?.into_iter().find_map(|child| find(child, id))
+    /// The accessibility tree and the accessibility caret within the depth limit of spec §14.7, flattened below level 64; the mock document's tree is three levels deep, so nothing is.
+    pub(crate) fn a11y_tree_and_caret(&self) -> (A11yNode, Option<A11yCaret>) {
+        let mut tree = self.a11y_tree();
+        let mut caret = Some(self.a11y_caret());
+        crate::a11y::flatten(&mut tree, &mut caret);
+        (tree, caret)
+    }
+
+    /// The identifier of the editable line's accessibility node.
+    pub(crate) fn editable_id(&self) -> u64 {
+        fixed().editable_id
+    }
+
+    /// The render revision: what the document's tiles show now (spec §14.6).
+    pub(crate) const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Raises the render revision after a change to what a tile shows. It stays below 2⁵³ (spec §14.6): reaching that would take more changes than a session can make, and the revision then stays at its largest value.
+    fn raise_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1).min(MAX_ID);
+    }
+
+    /// Applies an edit to the editable line, and raises the render revision if the edit changed what the tiles show: the text and the composition, but not the caret, which the shell draws over the tiles (spec §6.3).
+    fn edit<R>(&mut self, edit: impl FnOnce(&mut EditableLine) -> R) -> R {
+        let before = self.line.shown();
+        let result = edit(&mut self.line);
+        if self.line.shown() != before {
+            self.raise_revision();
         }
-        find(self.a11y_tree(), id)
+        result
+    }
+
+    /// Takes a `view.set` (spec §14.6): the zoom, which converts pointer positions, the mode and whether formatting marks show. Returns whether every page must be invalidated: after a new mode or a change of `show_formatting_marks`, which raise the render revision. A new viewport, zoom or device scale changes no tile: the mock document lays every mode out like `print`, so even in `web`, whose layout follows the window, the new layout changes nothing.
+    pub(crate) fn set_view(
+        &mut self,
+        zoom: f64,
+        mode: ViewMode,
+        show_formatting_marks: bool,
+    ) -> bool {
+        self.view = Some(View { zoom });
+        let changed = mode != self.mode || show_formatting_marks != self.show_formatting_marks;
+        self.mode = mode;
+        self.show_formatting_marks = show_formatting_marks;
+        if changed {
+            self.raise_revision();
+        }
+        changed
     }
 
     /// Inserts committed text (`input.text`).
     pub(crate) fn insert_text(&mut self, text: &str) -> Result<bool, TooLong> {
-        self.line.insert(text)
+        self.edit(|line| line.insert(text))
     }
 
     /// Applies an editing key (`input.key`).
     pub(crate) fn key(&mut self, key: &str) -> bool {
-        self.line.key(key)
+        self.edit(|line| line.key(key))
     }
 
     /// Starts a composition (`input.composition` `start`).
     pub(crate) fn start_composition(&mut self) -> bool {
-        self.line.start_composition()
+        self.edit(EditableLine::start_composition)
     }
 
     /// Updates the composition (`input.composition` `update`).
@@ -348,12 +410,12 @@ impl MockDocument {
         text: &str,
         selection: Option<TextRange>,
     ) -> Result<bool, TooLong> {
-        self.line.update_composition(text, selection)
+        self.edit(|line| line.update_composition(text, selection))
     }
 
     /// Ends the composition (`input.composition` `end`).
     pub(crate) fn end_composition(&mut self) -> bool {
-        self.line.end_composition()
+        self.edit(EditableLine::end_composition)
     }
 
     /// A primary-button press at a position in device-independent pixels from the view origin: inside the editable line, it moves the caret to the nearest character boundary. Returns whether the caret moved.
@@ -395,7 +457,7 @@ impl MockDocument {
                 && view.zoom >= crate::limits::MIN_ZOOM
                 && view.zoom <= crate::limits::MAX_ZOOM
         });
-        view_ok && self.line.is_valid()
+        view_ok && (1..=MAX_ID).contains(&self.revision) && self.line.is_valid()
     }
 }
 
@@ -428,6 +490,7 @@ mod tests {
         // Without a view, the engine cannot tell where a click lands.
         assert!(!document.press(0.0, 0.0));
         document.view = Some(View { zoom: 1.0 });
+        let revision = document.revision();
         let frame = MockDocument::editable_region().rect;
         let area = text_area(frame);
         // Click just right of the second character's middle: the caret lands after it.
@@ -436,6 +499,8 @@ mod tests {
         let y = f64::from(i32::try_from((frame.y + frame.height / 2) / BLU_PER_DIP).unwrap());
         assert!(document.press(x, y));
         assert_eq!(document.a11y_caret().offset, 2);
+        // The caret is drawn over the tiles, so moving it changes no tile.
+        assert_eq!(document.revision(), revision);
         // A click far outside does nothing.
         assert!(!document.press(1.0, 1.0));
     }
@@ -473,12 +538,43 @@ mod tests {
     }
 
     #[test]
+    fn the_revision_grows_with_what_the_tiles_show() {
+        let mut document = MockDocument::default();
+        assert_eq!(document.revision(), 1);
+        document.insert_text("ab").unwrap();
+        assert_eq!(document.revision(), 2);
+        // Moving the caret, or a key that changes nothing, keeps the revision.
+        assert!(document.key("ArrowLeft"));
+        assert!(!document.key("Escape"));
+        assert_eq!(document.revision(), 2);
+        assert!(document.key("Backspace"));
+        assert_eq!(document.revision(), 3);
+        // A composition shows in the tiles.
+        assert!(document.start_composition());
+        assert!(document.update_composition("x", None).unwrap());
+        assert_eq!(document.revision(), 4);
+        // The view: only a new mode or formatting marks change what the tiles show.
+        assert!(!document.set_view(2.0, ViewMode::Print, false));
+        assert!(!document.set_view(0.5, ViewMode::Print, false));
+        assert_eq!(document.revision(), 4);
+        assert!(document.set_view(0.5, ViewMode::Web, false));
+        assert!(!document.set_view(1.5, ViewMode::Web, false));
+        assert!(document.set_view(1.5, ViewMode::Web, true));
+        assert_eq!(document.revision(), 6);
+        document.revision = MAX_ID;
+        document.raise_revision();
+        assert_eq!(document.revision(), MAX_ID);
+    }
+
+    #[test]
     fn finds_subtrees_by_identifier() {
         let document = MockDocument::default();
-        let tree = document.a11y_tree();
+        let (tree, caret) = document.a11y_tree_and_caret();
         assert_eq!(tree.role, A11yRole::Document);
-        let editable = document.a11y_subtree(fixed().editable_id).unwrap();
+        assert_eq!(tree, document.a11y_tree());
+        let editable = crate::a11y::find(&tree, document.editable_id()).unwrap();
         assert!(editable.editable);
-        assert!(document.a11y_subtree(u64::MAX).is_none());
+        assert_eq!(caret.unwrap().node, editable.id);
+        assert!(crate::a11y::find(&tree, u64::MAX).is_none());
     }
 }

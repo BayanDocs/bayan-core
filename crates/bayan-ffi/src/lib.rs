@@ -11,6 +11,7 @@
 //! - Never call an engine synchronously from inside a callback (spec §8): `bayan_render_tile` returns `BAYAN_STATUS_WRONG_THREAD` inside any engine's callback, because it would wait for the thread it runs on, or for another engine that may be waiting for this one. Posting from inside the callback is allowed.
 //! - Every function may be called from any thread, also from several threads at once, except `bayan_engine_free`: it must be the last call on an engine, made when no thread other than the engine's own callback is inside a call on that engine. It stops the engine; after it returns, the callback is never called again. A callback may free only its own engine: freeing another one waits for that engine's thread, which may be waiting for this one.
 //! - No function lets a Rust panic escape; failures are reported through return values and `engine.error` messages. The callback must not let a C++ exception escape either.
+//! - After a panic the engine discards its session and continues with a fresh one, at most three times in any ten minutes (spec section 14.2): the `engine.error` with `recoverable: false` carries `restart`, `{ number, limit }` while restarts remain, and `null` once they are used up. Then the engine has stopped: `bayan_engine_post` and `bayan_render_tile` return `BAYAN_STATUS_INTERNAL_ERROR`, and the callback is not called again. The engine counts restarts by the monotonic clock with which it times messages and tiles for recordings.
 //! - Panics inside the engine are not printed, because their messages could quote document content: the first `bayan_engine_new` installs a panic hook that stays silent for the engine's threads and calls, and hands every other panic in the process to the hook installed before.
 //!
 //! **Unsafe code.** Talking to C requires `unsafe` code, so this is one of the two crates where it is not forbidden ([ADR-0006] §2). It is still denied by default and allowed only where `#[expect(unsafe_code, reason = "…")]` marks it: the exported functions (whose `#[unsafe(no_mangle)]` attribute and raw pointers are unsafe by nature), the call of the shell's callback, and the pointer helpers in `pointers.rs`, which Miri checks. A comment above every `unsafe` block explains why it is sound.
@@ -46,12 +47,21 @@ pub struct BayanEngine {
     thread: EngineThread,
     blobs: Arc<BlobStore>,
     started: Instant,
+    /// Milliseconds that the tests add to the clock, to show the restart allowance over ten minutes without waiting them.
+    #[cfg(test)]
+    clock_offset_ms: std::sync::atomic::AtomicU64,
 }
 
 impl BayanEngine {
-    /// Milliseconds since the engine was created, the clock of its recordings (spec section 10).
+    /// Milliseconds since the engine was created on a monotonic clock, the clock of its recordings and of its restart allowance (spec sections 10 and 14.2).
     fn now_ms(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(test)]
+        let elapsed = elapsed.saturating_add(
+            self.clock_offset_ms
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
+        elapsed
     }
 }
 
@@ -199,6 +209,8 @@ pub unsafe extern "C" fn bayan_engine_new(
             thread,
             blobs,
             started: Instant::now(),
+            #[cfg(test)]
+            clock_offset_ms: std::sync::atomic::AtomicU64::new(0),
         }))
     })
 }
@@ -262,7 +274,7 @@ pub unsafe extern "C" fn bayan_engine_set_callback(
     })
 }
 
-/// Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping.
+/// Queues one message (a protocol envelope of `json_len` bytes of UTF-8 JSON, spec section 4) for the engine thread and returns without waiting for it to be handled. Returns `BAYAN_STATUS_INVALID_ARGUMENT` for a null pointer, an empty message or one over 16 MiB, and `BAYAN_STATUS_INTERNAL_ERROR` if the engine is stopping or has stopped after using up its restarts (spec section 14.2).
 ///
 /// # Safety
 ///
@@ -398,12 +410,13 @@ pub unsafe extern "C" fn bayan_blob_release(
 /// - `width`, `height`: the tile's size in pixels, 1 to 4,096 each.
 /// - `stride`: the distance between the starts of two rows, in bytes; at least 4 * `width`. The bytes between rows are left untouched.
 /// - `out_capacity`: the size of `rgba_out` in bytes; at least `stride` * (`height` - 1) + 4 * `width`, otherwise `BAYAN_STATUS_BUFFER_TOO_SMALL`.
+/// - `revision_out`: NULL, or where to write the render revision that the tile shows (spec section 14.6), when the function returns `BAYAN_STATUS_OK`. Keep a tile while no `render.invalidate` with a higher revision covers it; tiles and messages arrive in no particular order.
 ///
-/// The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock.
+/// The request is handled on the engine thread in order with the posted messages, so it waits for messages posted before it. From inside any engine's callback it returns `BAYAN_STATUS_WRONG_THREAD`, because waiting there could deadlock. Once the engine has stopped after using up its restarts (spec section 14.2), it returns `BAYAN_STATUS_INTERNAL_ERROR`.
 ///
 /// # Safety
 ///
-/// `engine` must be a live engine, `request_json` must point to `request_len` initialized, readable bytes, and `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call.
+/// `engine` must be a live engine, `request_json` must point to `request_len` initialized, readable bytes, `rgba_out` to `out_capacity` writable bytes that nothing else uses during the call, and `revision_out` must be NULL or point to a writable `uint64_t`.
 #[expect(
     unsafe_code,
     reason = "exported to C without name mangling, and reads and writes memory that C passes in"
@@ -418,6 +431,7 @@ pub unsafe extern "C" fn bayan_render_tile(
     width: u32,
     height: u32,
     stride: usize,
+    revision_out: *mut u64,
 ) -> BayanStatus {
     // SAFETY: the caller guarantees that a non-null `engine` is a live engine; it is only read.
     let Some(engine) = (unsafe { engine.as_ref() }) else {
@@ -443,8 +457,8 @@ pub unsafe extern "C" fn bayan_render_tile(
             .thread
             .render_tile(request.to_vec(), width, height, engine.now_ms())
     });
-    let pixels = match rendered {
-        Ok(pixels) => pixels,
+    let tile = match rendered {
+        Ok(tile) => tile,
         Err(TileError::InvalidArgument) => return BAYAN_STATUS_INVALID_ARGUMENT,
         Err(TileError::NotFound) => return BAYAN_STATUS_NOT_FOUND,
         Err(TileError::WrongThread) => return BAYAN_STATUS_WRONG_THREAD,
@@ -454,7 +468,7 @@ pub unsafe extern "C" fn bayan_render_tile(
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
     // The engine returns exactly `height` rows; anything else would leave rows of the caller's buffer unwritten.
-    if Some(pixels.len())
+    if Some(tile.pixels.len())
         != usize::try_from(height)
             .ok()
             .and_then(|rows| rows.checked_mul(row))
@@ -462,11 +476,14 @@ pub unsafe extern "C" fn bayan_render_tile(
         return BAYAN_STATUS_INTERNAL_ERROR;
     }
     // SAFETY: the caller guarantees that `rgba_out` points to `out_capacity` writable bytes that nothing else uses during this call; `write_rows` checks that the rows fit in them.
-    if unsafe { pointers::write_rows(&pixels, row, rgba_out, out_capacity, stride) } {
-        BAYAN_STATUS_OK
-    } else {
-        BAYAN_STATUS_INTERNAL_ERROR
+    if !unsafe { pointers::write_rows(&tile.pixels, row, rgba_out, out_capacity, stride) } {
+        return BAYAN_STATUS_INTERNAL_ERROR;
     }
+    if !revision_out.is_null() {
+        // SAFETY: `revision_out` is not null and, as the caller guarantees, points to a writable `uint64_t`.
+        unsafe { pointers::write_u64(revision_out, tile.revision) };
+    }
+    BAYAN_STATUS_OK
 }
 
 #[cfg(test)]

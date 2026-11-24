@@ -132,7 +132,7 @@ fn damage(bytes: &[u8], random: &mut Random) -> Vec<u8> {
 /// Valid messages of every kind, to damage.
 fn seeds(doc_id: u64, blob: u64) -> Vec<Vec<u8>> {
     [
-        request(1, "hello", json!({ "protocol_versions": [0], "shell": { "name": "x", "version": "1", "platform": "p" } })),
+        request(1, "hello", json!({ "protocol_versions": [1], "shell": { "name": "x", "version": "1", "platform": "p" } })),
         request(2, "doc.open", json!({ "blob": blob })),
         request(3, "view.set", view(doc_id, 1.25)),
         request(4, "render.tile", whole_page(doc_id, 0, 8, 8)),

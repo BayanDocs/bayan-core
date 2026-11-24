@@ -67,6 +67,24 @@ pub(crate) unsafe fn write_size(out: *mut usize, value: usize) -> bool {
     true
 }
 
+/// Writes a 64-bit number, such as a tile's render revision, through a pointer C passed in. Returns false if the pointer is null. The pointer need not be aligned.
+///
+/// # Safety
+///
+/// Unless `out` is null, it must point to a writable `uint64_t`.
+#[expect(
+    unsafe_code,
+    reason = "reads or writes memory that C passes in, as the C interface requires (ADR-0006 §2)"
+)]
+pub(crate) unsafe fn write_u64(out: *mut u64, value: u64) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    // SAFETY: `out` is not null and, as the caller guarantees, points to a writable `uint64_t`; `write_unaligned` does not need it to be aligned.
+    unsafe { out.write_unaligned(value) };
+    true
+}
+
 /// The number of bytes a tile of `width` × `height` pixels needs in a buffer whose rows start `stride` bytes apart: `stride × (height − 1) + 4 × width`. Returns `None` if a size is 0, the stride is shorter than a row, or the size does not fit in `usize`.
 pub(crate) fn tile_buffer_len(width: u32, height: u32, stride: usize) -> Option<usize> {
     let row = usize::try_from(width).ok()?.checked_mul(4)?;
@@ -174,6 +192,25 @@ mod tests {
         assert_eq!(usize::from_ne_bytes(written), 0x0102);
         // SAFETY: a null pointer is refused before it is used.
         let null_written = unsafe { write_size(ptr::null_mut(), 1) };
+        assert!(!null_written);
+    }
+
+    #[test]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "the test makes an unaligned pointer on purpose; write_u64 writes through it with write_unaligned"
+    )]
+    fn writes_64_bit_numbers_through_unaligned_pointers() {
+        let mut bytes = [0_u8; 1 + size_of::<u64>()];
+        let unaligned = bytes[1..].as_mut_ptr().cast::<u64>();
+        // SAFETY: `unaligned` points to `size_of::<u64>()` writable bytes inside `bytes`; `write_u64` does not need alignment.
+        let written = unsafe { write_u64(unaligned, 0x0102_0304_0506_0708) };
+        assert!(written);
+        let mut written = [0_u8; size_of::<u64>()];
+        written.copy_from_slice(&bytes[1..]);
+        assert_eq!(u64::from_ne_bytes(written), 0x0102_0304_0506_0708);
+        // SAFETY: a null pointer is refused before it is used.
+        let null_written = unsafe { write_u64(ptr::null_mut(), 1) };
         assert!(!null_written);
     }
 

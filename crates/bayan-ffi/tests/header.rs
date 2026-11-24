@@ -140,7 +140,7 @@ fn the_header_declares_the_prototypes_of_the_specification() {
             "BayanBlobId bayan_blob_put(BayanEngine *engine, const uint8_t *bytes, size_t len)",
             "BayanStatus bayan_blob_get(BayanEngine *engine, BayanBlobId blob, uint8_t *out, size_t out_capacity, size_t *out_len)",
             "BayanStatus bayan_blob_release(BayanEngine *engine, BayanBlobId blob)",
-            "BayanStatus bayan_render_tile(BayanEngine *engine, const uint8_t *request_json, size_t request_len, uint8_t *rgba_out, size_t out_capacity, uint32_t width, uint32_t height, size_t stride)",
+            "BayanStatus bayan_render_tile(BayanEngine *engine, const uint8_t *request_json, size_t request_len, uint8_t *rgba_out, size_t out_capacity, uint32_t width, uint32_t height, size_t stride, uint64_t *revision_out)",
         ]
     );
 }

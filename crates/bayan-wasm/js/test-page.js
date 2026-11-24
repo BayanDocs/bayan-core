@@ -50,7 +50,7 @@ function enable(on) {
 function request(type, payload, transfer = []) {
   const id = nextId;
   nextId += 1;
-  worker.postMessage({ v: 0, id, type, payload }, transfer);
+  worker.postMessage({ v: 1, id, type, payload }, transfer);
   return new Promise((resolve) => waiting.set(id, resolve));
 }
 
@@ -90,6 +90,11 @@ function receive(message) {
     case "view.pages":
       pages = payload.pages;
       layOut();
+      // In protocol v1 a view.set in print layout invalidates nothing (§14.6), so the page requests the tiles that its
+      // layout and scale need itself.
+      for (const page of pages) {
+        renderPage(page.index);
+      }
       break;
     case "render.invalidate":
       for (const index of new Set(payload.regions.map((region) => region.page))) {
@@ -100,9 +105,14 @@ function receive(message) {
       showCaret(payload.caret);
       break;
     case "engine.error":
-      if (!payload.recoverable) {
-        setStatus(`The engine reported ${payload.code} and started a new session.`);
-        begin();
+      if (payload.recoverable !== true) {
+        if (payload.restart !== null && typeof payload.restart === "object") {
+          setStatus(`The engine reported ${payload.code}; restart ${payload.restart.number} of ${payload.restart.limit}.`);
+          begin();
+        } else {
+          setStatus(`The engine reported ${payload.code} and stopped. Reload the page to start it again.`);
+          enable(false);
+        }
       }
       break;
     default:
@@ -114,7 +124,12 @@ function receive(message) {
 async function begin() {
   docId = null;
   enable(false);
-  const welcome = await request("hello", { protocol_versions: [0], locale: navigator.language });
+  // A test page names no platform, which counts as "other", where the manifest's Ctrl stays Ctrl (§14.1).
+  const welcome = await request("hello", {
+    protocol_versions: [1],
+    shell: { name: "bayan-core test page", version: "1", runtime: "browser" },
+    locale: navigator.language,
+  });
   if (!welcome.ok) {
     return;
   }

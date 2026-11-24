@@ -1,4 +1,4 @@
-//! The messages of engine protocol v0 as Rust types ([engine protocol specification][spec] §4–§6).
+//! The messages of engine protocol v1 as Rust types ([engine protocol specification][spec] §4–§6 and the changes of §14).
 //!
 //! Every payload that crosses the engine boundary is defined here once. serde turns these types into JSON and back, and schemars derives the JSON Schema from the same definitions ([`crate::schema`]), from which [`crate::typescript`] writes the TypeScript declarations for the web shell, so the schema and the declarations cannot drift from the code (ADR-0012 §1).
 //!
@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
-/// The protocol version that this engine speaks (spec §4: version 0 is the unstable draft).
-pub const PROTOCOL_VERSION: u32 = 0;
+/// The protocol version that this engine speaks, and the only one (spec §9, §14.1): every message it sends carries it in `v`, and it refuses every message with another `v` except `hello`, which it reads whatever its `v`.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The layout epoch (ADR-0004 §4): 0 until the first real layout engine changes layout output.
 pub const LAYOUT_EPOCH: u32 = 0;
@@ -103,11 +103,11 @@ pub type Args = BTreeMap<String, ArgValue>;
 pub enum ErrorCode {
     /// Not a JSON object of the envelope's shape, or not UTF-8.
     InvalidMessage,
-    /// `v` is not 0, or `hello` offers no common version.
+    /// A message other than `hello` whose `v` is not the protocol version, or a `hello` that offers no common version.
     UnsupportedProtocolVersion,
     /// A message other than `hello` before the handshake.
     HandshakeRequired,
-    /// An unknown message type, or one v0 does not implement.
+    /// An unknown message type, or one this engine does not implement.
     UnsupportedMessage,
     /// The payload does not have the message's shape, or a value is out of range.
     InvalidRequest,
@@ -203,10 +203,10 @@ impl ErrorInfo {
 // Handshake and documents (spec §5, §6.1)
 // ---------------------------------------------------------------------------------------------
 
-/// `hello`: the shell starts a session (spec §5).
+/// `hello`: the shell starts a session (spec §5, §14.1). The engine reads it whatever its envelope's `v`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Hello {
-    /// The protocol versions the shell speaks; must contain 0.
+    /// The protocol versions the shell speaks; must contain 1, the only version this engine speaks.
     pub protocol_versions: Vec<u32>,
     /// Which shell this is.
     #[serde(default)]
@@ -231,9 +231,91 @@ pub struct ShellInfo {
     /// The shell's version.
     #[serde(default)]
     pub version: String,
-    /// The operating system or browser it runs on.
+    /// The operating system whose keyboard conventions apply (spec §14.1); a browser shell names the system it runs on, as far as the browser tells it. A missing or unknown value counts as `other`.
     #[serde(default)]
-    pub platform: String,
+    pub platform: Platform,
+    /// Whether the shell runs natively or in a browser (spec §14.1). A missing or unknown value counts as `native`.
+    #[serde(default)]
+    pub runtime: Runtime,
+}
+
+/// The operating system whose keyboard conventions apply (spec §14.1). The engine uses it only to resolve the UI manifest's key bindings (spec §14.3); nothing that affects layout or rendering depends on it (ADR-0004).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    /// Windows.
+    Windows,
+    /// macOS.
+    Macos,
+    /// Linux.
+    Linux,
+    /// iOS and iPadOS.
+    Ios,
+    /// Android.
+    Android,
+    /// ChromeOS.
+    Chromeos,
+    /// Any other system, and any value the engine does not know; Ctrl stays Ctrl.
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl Platform {
+    /// Every platform, in the order of the specification's list.
+    pub const ALL: [Self; 7] = [
+        Self::Windows,
+        Self::Macos,
+        Self::Linux,
+        Self::Ios,
+        Self::Android,
+        Self::Chromeos,
+        Self::Other,
+    ];
+
+    /// The platform as it appears in JSON, such as `macos`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+            Self::Ios => "ios",
+            Self::Android => "android",
+            Self::Chromeos => "chromeos",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Whether the shell runs natively or in a browser (spec §14.1), which keeps keys that a native app does not (spec §14.3).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Runtime {
+    /// A web page in a browser.
+    Browser,
+    /// A native application, and any value the engine does not know.
+    #[default]
+    #[serde(other)]
+    Native,
+}
+
+impl Runtime {
+    /// Both runtimes.
+    pub const ALL: [Self; 2] = [Self::Native, Self::Browser];
+
+    /// The runtime as it appears in JSON, such as `browser`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Browser => "browser",
+        }
+    }
 }
 
 /// What the shell can do.
@@ -253,9 +335,9 @@ pub struct Capabilities {
 /// `welcome`: the reply to `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Welcome {
-    /// The protocol version of the session: 0.
+    /// The protocol version of the session: 1.
     pub protocol_version: u32,
-    /// The core's semantic version.
+    /// The core's version as Semantic Versioning 2.0 writes it, at most 64 ASCII characters (spec §14.1).
     pub engine_version: String,
     /// The layout epoch (ADR-0004 §4).
     pub layout_epoch: u32,
@@ -266,7 +348,7 @@ pub struct Welcome {
 /// `doc.open`: opens a document from a blob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DocOpen {
-    /// The document's bytes. The v0 skeleton opens the mock document whatever they contain.
+    /// The document's bytes. Until real documents can be opened, the engine opens the mock document whatever they contain.
     pub blob: BlobRef,
     /// The format, if the shell knows it, such as `docx`.
     #[serde(default)]
@@ -281,6 +363,8 @@ pub struct DocOpen {
 pub struct DocOpened {
     /// The new document's identifier.
     pub doc_id: u64,
+    /// The document's render revision (spec §14.6): a positive integer below 2⁵³ that grows with every change to what any of the document's tiles shows.
+    pub revision: u64,
     /// How many pages the document is expected to have.
     pub page_count_estimate: u32,
     /// Problems found while opening, as Fluent messages.
@@ -389,12 +473,14 @@ pub struct PageInfo {
     pub y: i64,
 }
 
-/// `render.invalidate`: parts of pages whose tiles the shell must request again.
+/// `render.invalidate`: parts of pages whose tiles the shell must request again (spec §14.6). A shell keeps a tile while no invalidation with a higher revision covers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RenderInvalidate {
     /// The document.
     pub doc_id: u64,
-    /// The changed regions, in page coordinates.
+    /// The document's render revision after the change.
+    pub revision: u64,
+    /// The regions changed since the previous revision, in page coordinates.
     pub regions: Vec<PageRect>,
 }
 
@@ -430,7 +516,7 @@ pub struct RenderTile {
     /// Physical pixels per device-independent pixel, a hint for later rasterizers; it does not change the pixels.
     #[serde(default)]
     pub device_scale: Option<f64>,
-    /// The rasterizer to use (ADR-0011 §3); both give the same pixels in v0.
+    /// The rasterizer to use (ADR-0011 §3); both give the same pixels until the real rasterizers exist.
     #[serde(default)]
     pub mode: Option<RenderMode>,
 }
@@ -500,6 +586,8 @@ pub struct RenderTileReply {
     pub stride: u32,
     /// The digest of the pixels, `fnv1a64:` and 16 hexadecimal digits (spec §10).
     pub hash: String,
+    /// The render revision that the tile shows (spec §14.6).
+    pub revision: u64,
     /// The pixels, premultiplied RGBA8, rows from top to bottom, as a blob that the shell releases.
     pub blob: BlobRef,
 }
@@ -513,6 +601,8 @@ pub struct RenderTileWebReply {
     pub height: u32,
     /// The digest of the engine's premultiplied pixels (spec §10).
     pub hash: String,
+    /// The render revision that the tile shows (spec §14.6).
+    pub revision: u64,
     /// The pixels.
     pub bitmap: ImageBitmapRef,
 }
@@ -527,13 +617,15 @@ pub struct ImageBitmapRef {}
 pub struct OverlayUpdate {
     /// The document.
     pub doc_id: u64,
+    /// The render revision that the rectangles belong to (spec §14.6).
+    pub revision: u64,
     /// The caret, or `null` when there is none.
     pub caret: Option<Caret>,
     /// The selection's rectangles, per page.
     pub selection: Vec<SelectionRects>,
-    /// Other people's cursors (Phase 3); always empty in v0.
+    /// Other people's cursors (Phase 3); always empty so far.
     pub remote: Vec<serde_json::Value>,
-    /// Find highlights (Phase 2); always empty in v0.
+    /// Find highlights (Phase 2); always empty so far.
     pub highlights: Vec<serde_json::Value>,
 }
 
@@ -673,7 +765,7 @@ pub enum CompositionPhase {
 // Accessibility (spec §6.6)
 // ---------------------------------------------------------------------------------------------
 
-/// `query.a11y`: asks for the accessibility tree.
+/// `query.a11y`: asks for the accessibility tree (spec §6.6, §14.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct QueryA11y {
     /// The document.
@@ -681,6 +773,18 @@ pub struct QueryA11y {
     /// The node whose subtree to return; the whole document when omitted.
     #[serde(default)]
     pub node: Option<u64>,
+    /// A range of the node's children to load, for a node that a tree gave with `child_count` (spec §14.7). The answer holds the node with as many of these children as fit, each with as much of its own subtree as fits, and at least one whenever the node has a child at `start`.
+    #[serde(default)]
+    pub children: Option<ChildRange>,
+}
+
+/// A range of a node's children: at most `count` of them, from index `start` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChildRange {
+    /// The index of the first child, counting from 0.
+    pub start: u32,
+    /// The most children to return; at least 1.
+    pub count: u32,
 }
 
 /// The reply to `query.a11y`.
@@ -719,6 +823,12 @@ pub struct A11yNode {
     /// The box of every character of `text`, on the page of `bounds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chars: Option<Vec<CharBox>>,
+    /// The number of the node's children, on a node that holds fewer than all of them (spec §14.7): the shell loads the rest with `query.a11y` and a `children` range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_count: Option<u32>,
+    /// The index of the first child that the node holds, on a node that holds some but not all of its children; they are always one unbroken run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children_start: Option<u32>,
     /// The node's children, in reading order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<A11yNode>>,
@@ -808,15 +918,17 @@ pub struct UiManifestRequest {
     pub locale: Option<String>,
 }
 
-/// The UI manifest: a stub in v0 (spec §6.8).
+/// The UI manifest: a stub until ADR-0019's manifest (spec §6.8), with its key data resolved for the session's platform and runtime (spec §14.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UiManifest {
-    /// The manifest format's version: 0.
+    /// The stub manifest's format version: 0, until ADR-0019's manifest.
     pub manifest_version: u32,
     /// The language of the strings.
     pub locale: String,
     /// The commands.
     pub commands: Vec<UiCommand>,
+    /// The keys that the engine handles in the document area, and those that the shell keeps (spec §14.3).
+    pub keys: UiKeys,
     /// The ribbon.
     pub ribbon: UiRibbon,
 }
@@ -828,9 +940,71 @@ pub struct UiCommand {
     pub id: String,
     /// Its label, formatted.
     pub label: String,
-    /// Its default shortcut, such as `Ctrl+B`.
+    /// Its key bindings, resolved for the session's platform and runtime (spec §14.3).
+    pub bindings: Vec<KeyBinding>,
+    /// For a command that the shell carries out itself through the platform, such as the clipboard's: `copy`, `cut` or `paste` in v1. A shell that meets a value it does not know neither sends the command's keys nor offers the command (spec §14.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shortcut: Option<String>,
+    pub shell_action: Option<String>,
+}
+
+/// A key binding of a command (spec §14.3): a key, named by `key` or by `code`, with all four modifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct KeyBinding {
+    /// The key as the DOM's `KeyboardEvent.key` names it: a lower-case letter, a digit, a punctuation character, or a name such as `F7`. Exactly one of `key` and `code` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The physical key as the DOM's `KeyboardEvent.code` names it, such as `KeyA`, for a binding that follows a key's position rather than its character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Control.
+    pub ctrl: bool,
+    /// Shift.
+    pub shift: bool,
+    /// Alt (Option on macOS).
+    pub alt: bool,
+    /// Meta (Command on macOS and iOS).
+    pub meta: bool,
+    /// The binding as the platform writes it, such as `Ctrl+B` or `⌘B`.
+    pub label: String,
+}
+
+/// The key data of the UI manifest (spec §14.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UiKeys {
+    /// The keys that the engine handles in the document area with any modifiers.
+    pub document: Vec<DocumentKey>,
+    /// The presses that the shell keeps for itself, the operating system or the browser, even where a binding or a document key matches them.
+    pub reserved: Vec<ReservedKey>,
+}
+
+/// A key that the engine handles in the document area, with any modifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentKey {
+    /// The key, as the DOM's `KeyboardEvent.key` names it.
+    pub key: String,
+}
+
+/// A press that the shell keeps (spec §14.3): a key, named by `key` or by `code`, with only the modifiers that matter; one that it leaves out matches either state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReservedKey {
+    /// The key as the DOM's `KeyboardEvent.key` names it. Exactly one of `key` and `code` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The physical key as the DOM's `KeyboardEvent.code` names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Control, if it matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl: Option<bool>,
+    /// Shift, if it matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<bool>,
+    /// Alt, if it matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<bool>,
+    /// Meta, if it matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<bool>,
 }
 
 /// The ribbon.
@@ -919,14 +1093,26 @@ pub struct EngineError {
     pub code: ErrorCode,
     /// A Fluent message identifier, for people.
     pub message_id: String,
-    /// `true`: the engine kept its state. `false`: it discarded its session, and the shell starts a new one with `hello`.
+    /// `true`: the engine kept its state. `false`: it discarded its session; `restart` says what follows.
     pub recoverable: bool,
     /// Codes and numbers that explain the error; never document content.
     pub args: Args,
+    /// On every `engine.error` with `recoverable: false`, added by the engine's binding (spec §14.2): `{ number, limit }` while the restart allowance lasts, and the shell starts restart `number` of `limit` with `hello`; `null` when it is used up, and the engine has stopped and answers nothing more. Absent on errors the engine recovered from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Option<Restart>>,
+}
+
+/// A restart that the restart allowance grants (spec §14.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Restart {
+    /// Which restart this is within the last ten minutes, from 1 to `limit`.
+    pub number: u32,
+    /// How many restarts the allowance grants within ten minutes: 3.
+    pub limit: u32,
 }
 
 // ---------------------------------------------------------------------------------------------
-// The catalog of v0 messages
+// The catalog of messages
 // ---------------------------------------------------------------------------------------------
 
 /// Who sends a message.
@@ -947,7 +1133,7 @@ pub fn schema_of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
     generator.subschema_for::<T>()
 }
 
-/// A message type that v0 implements, with its payload type and reply. The schema and the TypeScript declarations are generated from this list ([`MESSAGES`]), and a test checks that the engine handles every entry.
+/// A message type that the engine implements, with its payload type and reply. The schema and the TypeScript declarations are generated from this list ([`MESSAGES`]), and a test checks that the engine handles every entry.
 #[derive(Debug, Clone, Copy)]
 pub struct MessageSpec {
     /// The message type, such as `doc.open`.
@@ -986,7 +1172,7 @@ const fn event(name: &'static str, payload: SchemaFn) -> MessageSpec {
     }
 }
 
-/// Every message type that v0 implements (spec §6), in the order of the specification.
+/// Every message type that the engine implements (spec §6), in the order of the specification.
 pub const MESSAGES: [MessageSpec; 21] = [
     MessageSpec {
         reply_type: Some("welcome"),
@@ -1044,7 +1230,7 @@ pub const MESSAGES: [MessageSpec; 21] = [
     event("engine.error", schema_of::<EngineError>),
 ];
 
-/// The catalog entry of a message type, if v0 implements it.
+/// The catalog entry of a message type, if the engine implements it.
 #[must_use]
 pub fn message_spec(name: &str) -> Option<&'static MessageSpec> {
     MESSAGES.iter().find(|spec| spec.name == name)

@@ -109,6 +109,8 @@ impl Builder {
                 rect: block.bounds(),
             }),
             chars: Some(block.char_boxes()),
+            child_count: None,
+            children_start: None,
             children: None,
         };
         (node, block.bottom())
@@ -193,6 +195,8 @@ impl Builder {
             editable: false,
             bounds,
             chars: None,
+            child_count: None,
+            children_start: None,
             children: Some(children),
         }));
         self.y += PARAGRAPH_SPACING - LIST_ITEM_SPACING;
@@ -259,6 +263,8 @@ impl Builder {
                     },
                 }),
                 chars: None,
+                child_count: None,
+                children_start: None,
                 children: Some(cell_nodes),
             });
         }
@@ -299,6 +305,8 @@ impl Builder {
                 },
             }),
             chars: None,
+            child_count: None,
+            children_start: None,
             children: Some(row_nodes),
         }));
         self.y = top + height + PARAGRAPH_SPACING;

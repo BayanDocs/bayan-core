@@ -1,0 +1,1126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BayanDocs engine conformance vectors",
+  "description": "The format of bayan-core's conformance vectors (engine protocol specification §15): shared test cases with their expected results, for behavior that the engine, its bindings and both shells must agree on. One file per area; a case changes only with the specification.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "bayan-engine-conformance"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "protocol_version": {
+      "description": "The protocol version whose behavior the cases describe.",
+      "const": 1
+    },
+    "area": {
+      "description": "The area, which is also the file's name.",
+      "enum": [
+        "restart",
+        "tile-grid",
+        "a11y-limits",
+        "keys"
+      ]
+    },
+    "cases": {
+      "description": "The cases. A shell's test fails on a case of its areas that it does not recognize.",
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RestartBindingCase"
+          },
+          {
+            "$ref": "#/$defs/RestartRecordingCase"
+          },
+          {
+            "$ref": "#/$defs/RestartShellCase"
+          },
+          {
+            "$ref": "#/$defs/TileGridCase"
+          },
+          {
+            "$ref": "#/$defs/A11yShellCase"
+          },
+          {
+            "$ref": "#/$defs/A11yEngineCase"
+          },
+          {
+            "$ref": "#/$defs/KeysManifestCase"
+          },
+          {
+            "$ref": "#/$defs/KeysPressCase"
+          }
+        ]
+      }
+    },
+    "removed": {
+      "description": "The identifiers of removed cases, which are never reused.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "protocol_version",
+    "area",
+    "cases",
+    "removed"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Restart": {
+      "type": "object",
+      "properties": {
+        "number": {
+          "description": "Which restart this is.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "limit": {
+          "description": "How many restarts the allowance grants in ten minutes.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "number",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "RestartBindingCase": {
+      "description": "Failures with their monotonic times, and the `restart` that each `engine.error` must carry (spec §14.2).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`binding`: the engine's bindings, the native engine thread and the web worker host, both pass it.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "binding"
+            ]
+          }
+        },
+        "failures_ms": {
+          "description": "The monotonic times, in milliseconds on the binding's clock, at which the engine discards its session after a panic.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "restarts": {
+              "description": "The `restart` of each failure's `engine.error`, in order; after `null` the engine has stopped.",
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Restart"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "restarts"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "failures_ms",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "RestartRecordingCase": {
+      "description": "A recording that spans a restart, and its replays (spec §14.2 item 4).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`binding`, with `runtime` naming the binding.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "binding"
+            ]
+          }
+        },
+        "runtime": {
+          "description": "The one binding that passes it: `native`, the engine thread that bayan-ffi drives.",
+          "enum": [
+            "native"
+          ]
+        },
+        "config": {
+          "description": "The engine configuration (spec §3.3).",
+          "type": "object"
+        },
+        "messages": {
+          "description": "The messages a shell posts, in order; the last is `diag.record.stop`.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "at_ms": {
+                "description": "The monotonic time at which the binding receives the message.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "message": {
+                "description": "A protocol message, as JSON.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "at_ms",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "replays": {
+          "description": "How many times the recording that the last message's reply carries is then replayed with `diag.replay`.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "restarts": {
+              "description": "The `restart` of each `engine.error` with `recoverable: false` while the messages are handled.",
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Restart"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "entries": {
+              "description": "The number of entries of the recording.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "identical": {
+              "description": "Whether every replay reproduces every digest.",
+              "type": "boolean"
+            },
+            "stopped": {
+              "description": "Whether the engine has stopped after the replays.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "restarts",
+            "entries",
+            "identical",
+            "stopped"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "runtime",
+        "config",
+        "messages",
+        "replays",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "RestartShellCase": {
+      "description": "Messages that a shell sends and receives around a failure, with what it must do (spec §12.1, §14.2).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`shell`: both shells pass it; `web` or `desktop`: only that shell.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "shell",
+              "web",
+              "desktop"
+            ]
+          }
+        },
+        "steps": {
+          "description": "The messages in the order they are sent and received.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "description": "A message the shell sends.",
+                "type": "object",
+                "properties": {
+                  "shell_sends": {
+                    "description": "A protocol message, as JSON.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "shell_sends"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "A message the shell receives from the engine, and what it must do.",
+                "type": "object",
+                "properties": {
+                  "engine_sends": {
+                    "description": "A protocol message, as JSON.",
+                    "type": "object"
+                  },
+                  "expect": {
+                    "description": "What the shell must do with the message: `handle` it as part of the current session; `ignore` it, because it belongs to an old session and neither ends the new session nor counts as an error (spec §12.1 step 4); `restart`, telling the user which restart this is and starting a new session with `hello`; or `stop` using the engine, with the stop message.",
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "handle",
+                          "ignore",
+                          "stop"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "restart": {
+                            "$ref": "#/$defs/Restart"
+                          }
+                        },
+                        "required": [
+                          "restart"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "engine_sends",
+                  "expect"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "A control message the web shell receives from the worker host, and what it must do.",
+                "type": "object",
+                "properties": {
+                  "worker_sends": {
+                    "description": "A control message of the web worker host (spec §3.2).",
+                    "type": "object"
+                  },
+                  "expect": {
+                    "description": "What the shell must do with the message: `handle` it as part of the current session; `ignore` it, because it belongs to an old session and neither ends the new session nor counts as an error (spec §12.1 step 4); `restart`, telling the user which restart this is and starting a new session with `hello`; or `stop` using the engine, with the stop message.",
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "handle",
+                          "ignore",
+                          "stop"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "restart": {
+                            "$ref": "#/$defs/Restart"
+                          }
+                        },
+                        "required": [
+                          "restart"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "worker_sends",
+                  "expect"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "Size": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "Rect": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer",
+          "minimum": -4611686018427387904
+        },
+        "y": {
+          "type": "integer",
+          "minimum": -4611686018427387904
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "TileGridCase": {
+      "description": "A page size, zoom, device scale and tile size, with the tile grid that the formulas of spec §14.6 item 3 give, computed in IEEE 754 double precision in the spec's order.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`shell`: both shells pass it.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "shell"
+            ]
+          }
+        },
+        "page": {
+          "$ref": "#/$defs/Size"
+        },
+        "zoom": {
+          "description": "The zoom factor.",
+          "type": "number"
+        },
+        "device_scale": {
+          "description": "Physical pixels per device-independent pixel.",
+          "type": "number"
+        },
+        "tile_size": {
+          "description": "The width and height in pixels of the shell's tiles; the last column and row may be narrower.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "expect": {
+          "description": "The page's size in device pixels, the number of tile columns and rows, and chosen tiles.",
+          "type": "object",
+          "properties": {
+            "pixels": {
+              "$ref": "#/$defs/Size"
+            },
+            "columns": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tiles": {
+              "description": "Chosen tiles: their rectangles in the page's device pixels and in BLU.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "column": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "row": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pixels": {
+                    "$ref": "#/$defs/Rect"
+                  },
+                  "blu": {
+                    "$ref": "#/$defs/Rect"
+                  }
+                },
+                "required": [
+                  "column",
+                  "row",
+                  "pixels",
+                  "blu"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "pixels",
+            "columns",
+            "rows",
+            "tiles"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "page",
+        "zoom",
+        "device_scale",
+        "tile_size",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "Tree": {
+      "description": "A tree described by a generator (spec §15).",
+      "type": "object",
+      "properties": {
+        "generator": {
+          "description": "`chain`: the document node (id 1, level 1, no text) and below it one paragraph per level down to `depth`, the node at level L with id L and text L in decimal. `wide`: the document node (id 1) holding `children` paragraphs, child i with id i + 2 and text i in decimal, or `text_units` letters x; with `child_count`, the document node holds those children from index `children_start` (default 0) and has `child_count` in all.",
+          "enum": [
+            "chain",
+            "wide"
+          ]
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "children": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "child_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "children_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text_units": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "generator"
+      ],
+      "additionalProperties": false
+    },
+    "Caret": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "node",
+        "offset"
+      ],
+      "additionalProperties": false
+    },
+    "ChildQuery": {
+      "description": "A `query.a11y` with a range of a node's children (spec §14.7).",
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "children": {
+          "type": "object",
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "start",
+            "count"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "node",
+        "children"
+      ],
+      "additionalProperties": false
+    },
+    "A11yShellCase": {
+      "description": "A tree a shell receives, with whether it accepts it and the parts it lacks (spec §14.7).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`shell`: both shells pass it.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "shell"
+            ]
+          }
+        },
+        "root_level": {
+          "description": "The level of the tree's root: 1 for the document node, more for a reply to `query.a11y` for a node below it.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "tree": {
+          "$ref": "#/$defs/Tree"
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "accept": {
+              "description": "Whether the tree is within the limits and consistent; a tree that is not breaks the protocol (spec §14.1 item 5).",
+              "type": "boolean"
+            },
+            "queries": {
+              "description": "The ranges of children the tree lacks, which the shell loads: node by node in depth-first reading order, each node's ranges in order, each asking for the whole gap.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ChildQuery"
+              }
+            }
+          },
+          "required": [
+            "accept",
+            "queries"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "root_level",
+        "tree",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "A11yEngineCase": {
+      "description": "A tree that the engine keeps within the limits (spec §14.7), with a caret or a query, and the result.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`engine`: the engine passes it.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "engine"
+            ]
+          }
+        },
+        "tree": {
+          "$ref": "#/$defs/Tree"
+        },
+        "caret": {
+          "$ref": "#/$defs/Caret"
+        },
+        "query": {
+          "$ref": "#/$defs/ChildQuery"
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "description": "The depth of the tree the engine keeps.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "nodes": {
+              "description": "Its number of nodes.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "texts": {
+              "description": "The text of chosen nodes, by node identifier.",
+              "type": "object"
+            },
+            "caret": {
+              "$ref": "#/$defs/Caret"
+            },
+            "first": {
+              "description": "The document node in the first reply: its `child_count` and `children_start`, if it carries them, and how many children it holds.",
+              "type": "object",
+              "properties": {
+                "child_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "children_start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "held": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "held"
+              ],
+              "additionalProperties": false
+            },
+            "loads": {
+              "description": "The queries with a range of the document node's children that load the rest, in order, and what each answer holds.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "children_start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "held": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "start",
+                  "count",
+                  "children_start",
+                  "held"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "within_message_limit": {
+              "description": "Every reply fits the message limit.",
+              "type": "boolean"
+            },
+            "loads_completely": {
+              "description": "Loading every part the replies lack, with ranges, gives every child once, in order.",
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "tree",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "KeyBinding": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "ctrl": {
+          "type": "boolean"
+        },
+        "shift": {
+          "type": "boolean"
+        },
+        "alt": {
+          "type": "boolean"
+        },
+        "meta": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "ctrl",
+        "shift",
+        "alt",
+        "meta",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "ReservedKey": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "ctrl": {
+          "type": "boolean"
+        },
+        "shift": {
+          "type": "boolean"
+        },
+        "alt": {
+          "type": "boolean"
+        },
+        "meta": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "KeysManifestCase": {
+      "description": "The v1 stub manifest's commands and key data, resolved for a platform and runtime (spec §14.3).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`engine`: the engine's `ui.manifest` for the platform and runtime.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "engine"
+            ]
+          }
+        },
+        "platform": {
+          "enum": [
+            "windows",
+            "macos",
+            "linux",
+            "ios",
+            "android",
+            "chromeos",
+            "other"
+          ]
+        },
+        "runtime": {
+          "enum": [
+            "native",
+            "browser"
+          ]
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "bindings": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/KeyBinding"
+                    }
+                  },
+                  "shell_action": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "bindings"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "keys": {
+              "type": "object",
+              "properties": {
+                "document": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "reserved": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ReservedKey"
+                  }
+                }
+              },
+              "required": [
+                "document",
+                "reserved"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "commands",
+            "keys"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "platform",
+        "runtime",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "KeysPressCase": {
+      "description": "A key press, with whether a shell sends it and what the engine does with it (spec §14.3).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`shell`: both shells send the press as `input.key` exactly when `send` says; `engine`: the engine runs what `runs` says.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "engine",
+              "shell"
+            ]
+          }
+        },
+        "manifest": {
+          "description": "The identifier of the manifest case whose key data apply.",
+          "type": "string"
+        },
+        "layout": {
+          "description": "The keyboard layout the press comes from, for people: `us`, `fr`, `de`, `ar`, `ru`, `ja` or `zh`.",
+          "type": "string"
+        },
+        "press": {
+          "description": "The press as `input.key` would carry it.",
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "code": {
+              "type": "string"
+            },
+            "ctrl": {
+              "type": "boolean"
+            },
+            "shift": {
+              "type": "boolean"
+            },
+            "alt": {
+              "type": "boolean"
+            },
+            "meta": {
+              "type": "boolean"
+            },
+            "composing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key",
+            "code",
+            "ctrl",
+            "shift",
+            "alt",
+            "meta",
+            "composing"
+          ],
+          "additionalProperties": false
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "send": {
+              "type": "boolean"
+            },
+            "runs": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "document_key": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "document_key"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "send",
+            "runs"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "manifest",
+        "layout",
+        "press",
+        "expect"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

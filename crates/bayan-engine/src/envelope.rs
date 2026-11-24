@@ -16,6 +16,9 @@ use crate::protocol::{ErrorCode, ErrorInfo, PROTOCOL_VERSION};
 /// The payload of a message that has none.
 const EMPTY_PAYLOAD: &str = "{}";
 
+/// The type of the one message that the engine reads whatever its `v` (spec §14.1).
+const HELLO: &str = "hello";
+
 /// The longest message type an error repeats in its `args` (spec §12).
 const MAX_TYPE_IN_ERROR: usize = 64;
 
@@ -26,7 +29,7 @@ pub(crate) enum EnvelopeError {
     TooLarge,
     /// Not JSON, not an object, the same field twice, or a field of the wrong type.
     Invalid,
-    /// `v` is not the protocol version.
+    /// `v` is not the protocol version, on a message other than `hello`.
     UnsupportedVersion,
 }
 
@@ -43,6 +46,8 @@ pub(crate) struct Envelope<'a> {
 
 impl<'a> Envelope<'a> {
     /// Reads an envelope. On failure, also returns the request identifier if one could be read, so the error can be the reply.
+    ///
+    /// The envelope has the same fields with the same meanings in every protocol version (spec §14.1), so that a shell and an engine without a common version can still exchange `hello` and its refusal: a `hello` is read whatever its `v`, and every other message must carry the protocol version.
     pub(crate) fn parse(message: &'a [u8]) -> Result<Self, (Option<u64>, EnvelopeError)> {
         if message.len() > MAX_MESSAGE_BYTES {
             return Err((None, EnvelopeError::TooLarge));
@@ -54,7 +59,8 @@ impl<'a> Envelope<'a> {
             Some(Field::Unsigned(id)) if (1..=MAX_ID).contains(&id) => Some(id),
             Some(_) => return Err((None, EnvelopeError::Invalid)),
         };
-        if fields.v != Some(Field::Unsigned(u64::from(PROTOCOL_VERSION))) {
+        let hello = matches!(&fields.kind, Some(Field::Text(kind)) if kind == HELLO);
+        if !hello && fields.v != Some(Field::Unsigned(u64::from(PROTOCOL_VERSION))) {
             return Err((id, EnvelopeError::UnsupportedVersion));
         }
         let Some(Field::Text(kind)) = fields.kind else {
@@ -276,7 +282,9 @@ mod tests {
                 _ => return Err((None, EnvelopeError::Invalid)),
             },
         };
-        if fields.get("v").and_then(Value::as_u64) != Some(u64::from(PROTOCOL_VERSION)) {
+        // Since protocol v1, a hello is read whatever its v (spec §14.1).
+        let hello = fields.get("type") == Some(&Value::String("hello".to_owned()));
+        if !hello && fields.get("v").and_then(Value::as_u64) != Some(u64::from(PROTOCOL_VERSION)) {
             return Err((id, EnvelopeError::UnsupportedVersion));
         }
         let Some(Value::String(kind)) = fields.remove("type") else {
@@ -365,11 +373,11 @@ mod tests {
             b"null",
             b"not json",
             b"{",
-            b"{\"v\":0,\"type\":\"x\"} trailing",
-            b"{\"v\":0,\"type\":\"x\",}",
+            b"{\"v\":1,\"type\":\"x\"} trailing",
+            b"{\"v\":1,\"type\":\"x\",}",
             b" {\"v\" : 0 , \"type\" : \"x\" , \"payload\" : {} } ",
             b"{\"\\u0076\":0,\"\\u0074ype\":\"x\",\"payload\":{\"a\":1}}",
-            b"{\"v\":0,\"type\":\"\\ud800\"}",
+            b"{\"v\":1,\"type\":\"\\ud800\"}",
         ];
         for message in messages {
             assert_eq!(
@@ -380,45 +388,45 @@ mod tests {
             );
         }
         // Not UTF-8.
-        let latin1 = b"{\"v\":0,\"type\":\"caf\xe9\"}";
+        let latin1 = b"{\"v\":1,\"type\":\"caf\xe9\"}";
         assert_eq!(current(latin1), reference(latin1));
     }
 
     #[test]
     fn parses_envelopes_strictly() {
-        let ok = Envelope::parse(br#"{"v":0,"id":3,"type":"hello","payload":{"a":1}}"#).unwrap();
+        let ok = Envelope::parse(br#"{"v":1,"id":3,"type":"hello","payload":{"a":1}}"#).unwrap();
         assert_eq!(
             (ok.id, ok.kind.as_str(), ok.payload),
             (Some(3), "hello", r#"{"a":1}"#)
         );
-        let empty = Envelope::parse(br#"{"v":0,"type":"x","payload":null}"#).unwrap();
+        let empty = Envelope::parse(br#"{"v":1,"type":"x","payload":null}"#).unwrap();
         assert_eq!((empty.id, empty.payload), (None, "{}"));
         let cases: [(&[u8], Option<u64>, EnvelopeError); 8] = [
             (b"[]", None, EnvelopeError::Invalid),
             (b"not json", None, EnvelopeError::Invalid),
             (
-                br#"{"v":0,"id":0,"type":"x"}"#,
+                br#"{"v":1,"id":0,"type":"x"}"#,
                 None,
                 EnvelopeError::Invalid,
             ),
             (
-                br#"{"v":0,"id":9007199254740992,"type":"x"}"#,
+                br#"{"v":1,"id":9007199254740992,"type":"x"}"#,
                 None,
                 EnvelopeError::Invalid,
             ),
             (
-                br#"{"v":1,"id":4,"type":"x"}"#,
+                br#"{"v":0,"id":4,"type":"x"}"#,
                 Some(4),
                 EnvelopeError::UnsupportedVersion,
             ),
-            (br#"{"v":0,"id":5}"#, Some(5), EnvelopeError::Invalid),
+            (br#"{"v":1,"id":5}"#, Some(5), EnvelopeError::Invalid),
             (
-                br#"{"v":0,"id":6,"type":"x","payload":[]}"#,
+                br#"{"v":1,"id":6,"type":"x","payload":[]}"#,
                 Some(6),
                 EnvelopeError::Invalid,
             ),
             (
-                br#"{"v":0,"id":7,"type":7}"#,
+                br#"{"v":1,"id":7,"type":7}"#,
                 Some(7),
                 EnvelopeError::Invalid,
             ),
@@ -439,13 +447,53 @@ mod tests {
     }
 
     #[test]
+    fn hello_is_read_whatever_its_v_and_every_other_message_needs_v_1() {
+        // A shell and an engine without a common version can still exchange hello and its refusal (spec §14.1).
+        for v in [
+            "",
+            r#""v":0,"#,
+            r#""v":1,"#,
+            r#""v":2,"#,
+            r#""v":null,"#,
+            r#""v":"one","#,
+            r#""v":-1,"#,
+        ] {
+            let hello =
+                format!(r#"{{{v}"id":3,"type":"hello","payload":{{"protocol_versions":[1]}}}}"#);
+            let envelope = Envelope::parse(hello.as_bytes()).unwrap();
+            assert_eq!(
+                (envelope.id, envelope.kind.as_str()),
+                (Some(3), "hello"),
+                "{hello}"
+            );
+            let other = format!(r#"{{{v}"id":4,"type":"ui.manifest"}}"#);
+            let outcome = Envelope::parse(other.as_bytes()).map(|envelope| envelope.kind);
+            if v == r#""v":1,"# {
+                assert_eq!(outcome, Ok("ui.manifest".to_owned()), "{other}");
+            } else {
+                assert_eq!(
+                    outcome,
+                    Err((Some(4), EnvelopeError::UnsupportedVersion)),
+                    "{other}"
+                );
+            }
+        }
+        // Only the exact type "hello" is exempt, after JSON escapes are undone.
+        assert!(Envelope::parse(br#"{"v":0,"type":"hell\u006f"}"#).is_ok());
+        assert_eq!(
+            Envelope::parse(br#"{"v":0,"id":5,"type":"Hello"}"#).unwrap_err(),
+            (Some(5), EnvelopeError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
     fn a_field_twice_makes_the_envelope_invalid() {
         for message in [
-            r#"{"v":0,"v":0,"type":"x"}"#,
-            r#"{"v":0,"id":1,"id":2,"type":"x"}"#,
-            r#"{"v":0,"type":"x","type":"y"}"#,
-            r#"{"v":0,"type":"x","payload":{},"payload":{}}"#,
-            r#"{"v":0,"type":"x","\u0074ype":"y"}"#,
+            r#"{"v":1,"v":1,"type":"x"}"#,
+            r#"{"v":1,"id":1,"id":2,"type":"x"}"#,
+            r#"{"v":1,"type":"x","type":"y"}"#,
+            r#"{"v":1,"type":"x","payload":{},"payload":{}}"#,
+            r#"{"v":1,"type":"x","\u0074ype":"y"}"#,
         ] {
             assert_eq!(
                 Envelope::parse(message.as_bytes()).unwrap_err(),
@@ -454,14 +502,14 @@ mod tests {
             );
         }
         // Unknown fields may repeat: they are never read.
-        assert!(Envelope::parse(br#"{"v":0,"type":"x","a":1,"a":2}"#).is_ok());
+        assert!(Envelope::parse(br#"{"v":1,"type":"x","a":1,"a":2}"#).is_ok());
     }
 
     #[test]
     fn unknown_fields_are_skipped_at_any_depth() {
         // The tree reader stopped at serde_json's nesting limit of 128; skipping needs no limit, because it does not recurse and stores nothing.
         let deep = format!("{}{}", "[".repeat(10_000), "]".repeat(10_000));
-        let message = format!(r#"{{"v":0,"type":"x","junk":{deep},"payload":{{"junk":{deep}}}}}"#);
+        let message = format!(r#"{{"v":1,"type":"x","junk":{deep},"payload":{{"junk":{deep}}}}}"#);
         let envelope = Envelope::parse(message.as_bytes()).unwrap();
         assert_eq!(envelope.kind, "x");
         let payload: crate::protocol::Empty = envelope.payload().unwrap();
@@ -470,7 +518,7 @@ mod tests {
 
     #[test]
     fn a_payload_with_a_field_twice_is_an_invalid_request() {
-        let message = br#"{"v":0,"type":"doc.close","payload":{"doc_id":1,"doc_id":2}}"#;
+        let message = br#"{"v":1,"type":"doc.close","payload":{"doc_id":1,"doc_id":2}}"#;
         let envelope = Envelope::parse(message).unwrap();
         let error = envelope.payload::<crate::protocol::DocClose>().unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidRequest);

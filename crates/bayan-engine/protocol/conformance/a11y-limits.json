@@ -1,0 +1,155 @@
+{
+  "format": "bayan-engine-conformance",
+  "format_version": 1,
+  "protocol_version": 1,
+  "area": "a11y-limits",
+  "cases": [
+    {
+      "id": "a-tree-64-levels-deep-is-accepted",
+      "description": "A chain from the document node (level 1) to level 64 is within the depth limit.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "chain", "depth": 64},
+      "expect": {"accept": true, "queries": []}
+    },
+    {
+      "id": "a-tree-65-levels-deep-breaks-the-protocol",
+      "description": "A node at level 65 is beyond the depth limit: the shell treats the tree as a protocol violation.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "chain", "depth": 65},
+      "expect": {"accept": false, "queries": []}
+    },
+    {
+      "id": "a-subtree-counts-levels-from-the-document",
+      "description": "The reply to query.a11y for a node at level 10 holds a subtree 55 levels deep, which reaches level 64.",
+      "for": ["shell"],
+      "root_level": 10,
+      "tree": {"generator": "chain", "depth": 55},
+      "expect": {"accept": true, "queries": []}
+    },
+    {
+      "id": "a-subtree-beyond-level-64-breaks-the-protocol",
+      "description": "A subtree 56 levels deep from a node at level 10 reaches level 65.",
+      "for": ["shell"],
+      "root_level": 10,
+      "tree": {"generator": "chain", "depth": 56},
+      "expect": {"accept": false, "queries": []}
+    },
+    {
+      "id": "200000-nodes-are-accepted",
+      "description": "The document node and 199,999 children: 200,000 nodes, the node limit of one reply.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 199999},
+      "expect": {"accept": true, "queries": []}
+    },
+    {
+      "id": "200001-nodes-break-the-protocol",
+      "description": "The document node and 200,000 children: one node beyond the limit.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 200000},
+      "expect": {"accept": false, "queries": []}
+    },
+    {
+      "id": "a-node-that-holds-the-first-part-of-its-children",
+      "description": "The document node holds its first 199,999 of 250,000 children: the shell loads the rest from index 199,999.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 199999, "child_count": 250000, "children_start": 0},
+      "expect": {"accept": true, "queries": [{"node": 1, "children": {"start": 199999, "count": 50001}}]}
+    },
+    {
+      "id": "a-node-that-holds-the-part-with-the-caret",
+      "description": "The caret is in child 220,000 of 250,000, so the document node holds the part of its children that starts there, the 30,000 to its end; the shell loads the 220,000 before it.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 30000, "child_count": 250000, "children_start": 220000},
+      "expect": {"accept": true, "queries": [{"node": 1, "children": {"start": 0, "count": 220000}}]}
+    },
+    {
+      "id": "a-node-that-holds-a-middle-part",
+      "description": "A node holds children 2,000 to 2,999 of 5,000: the shell loads the parts before and after.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 1000, "child_count": 5000, "children_start": 2000},
+      "expect": {
+        "accept": true,
+        "queries": [{"node": 1, "children": {"start": 0, "count": 2000}}, {"node": 1, "children": {"start": 3000, "count": 2000}}]
+      }
+    },
+    {
+      "id": "a-node-that-holds-none-of-its-children",
+      "description": "A node with child_count and no children: the shell loads all of them.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 0, "child_count": 5},
+      "expect": {"accept": true, "queries": [{"node": 1, "children": {"start": 0, "count": 5}}]}
+    },
+    {
+      "id": "more-children-than-child-count-breaks-the-protocol",
+      "description": "A node that says it has 10 children but holds 6 from index 5 contradicts itself.",
+      "for": ["shell"],
+      "root_level": 1,
+      "tree": {"generator": "wide", "children": 6, "child_count": 10, "children_start": 5},
+      "expect": {"accept": false, "queries": []}
+    },
+    {
+      "id": "flattens-what-lies-below-level-64",
+      "description": "A chain 70 levels deep: the node at level 64 has no children, and the text of the six nodes below it is appended to its own, each starting on a new line; the caret in the deepest node moves along.",
+      "for": ["engine"],
+      "tree": {"generator": "chain", "depth": 70},
+      "caret": {"node": 70, "offset": 1},
+      "expect": {"depth": 64, "nodes": 64, "texts": {"64": "64\n65\n66\n67\n68\n69\n70"}, "caret": {"node": 64, "offset": 19}}
+    },
+    {
+      "id": "keeps-a-tree-64-levels-deep",
+      "description": "A chain 64 levels deep is within the limit and comes whole.",
+      "for": ["engine"],
+      "tree": {"generator": "chain", "depth": 64},
+      "caret": {"node": 64, "offset": 2},
+      "expect": {"depth": 64, "nodes": 64, "texts": {"64": "64"}, "caret": {"node": 64, "offset": 2}}
+    },
+    {
+      "id": "splits-a-node-with-more-children-than-one-reply-holds",
+      "description": "The document node has 250,000 children: the first reply holds the first 199,999, and one query for the rest loads the other 50,001.",
+      "for": ["engine"],
+      "tree": {"generator": "wide", "children": 250000},
+      "expect": {
+        "first": {"child_count": 250000, "children_start": 0, "held": 199999},
+        "loads": [{"start": 199999, "count": 50001, "children_start": 199999, "held": 50001}]
+      }
+    },
+    {
+      "id": "the-part-with-the-caret-comes-first",
+      "description": "The caret is in child 220,000 of 250,000: the first reply holds the part of the children that starts with it.",
+      "for": ["engine"],
+      "tree": {"generator": "wide", "children": 250000},
+      "caret": {"node": 220002, "offset": 0},
+      "expect": {
+        "first": {"child_count": 250000, "children_start": 220000, "held": 30000},
+        "loads": [
+          {"start": 0, "count": 220000, "children_start": 0, "held": 199999},
+          {"start": 199999, "count": 20001, "children_start": 199999, "held": 20001}
+        ]
+      }
+    },
+    {
+      "id": "splits-children-too-large-for-one-message",
+      "description": "5,000 children of 4,096 characters each take about 20 MB: every reply fits the message limit, holds at least one child, and the children load completely, in order.",
+      "for": ["engine"],
+      "tree": {"generator": "wide", "children": 5000, "text_units": 4096},
+      "expect": {"within_message_limit": true, "loads_completely": true}
+    },
+    {
+      "id": "a-start-at-the-end-gives-no-children",
+      "description": "A query whose start equals the number of children gives the node with child_count and no children.",
+      "for": ["engine"],
+      "tree": {"generator": "wide", "children": 10},
+      "query": {"node": 1, "children": {"start": 10, "count": 5}},
+      "expect": {"first": {"child_count": 10, "held": 0}}
+    }
+  ],
+  "removed": []
+}

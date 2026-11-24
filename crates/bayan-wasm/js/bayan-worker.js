@@ -3,8 +3,9 @@
 // Run it as a module worker: new Worker(new URL("bayan-worker.js", base), { type: "module" }). It loads the engine
 // (bayan_wasm.js and bayan_wasm_bg.wasm, next to this file), relays protocol messages between the main thread and the
 // engine one at a time and in order, carries blobs as ArrayBuffers, delivers tiles as ImageBitmaps, and replaces the
-// engine when it panics. It has no dependencies and never looks inside documents. It logs nothing itself; only
-// wasm-bindgen's glue warns on the console, without any content, if the module is not served as application/wasm.
+// engine when it panics, within the restart allowance (§14.2). It has no dependencies and never looks inside documents.
+// It logs nothing itself; only wasm-bindgen's glue warns on the console, without any content, if the module is not
+// served as application/wasm.
 //
 // SPDX-FileCopyrightText: 2026 BayanDocs contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
@@ -18,8 +19,18 @@ const MAX_ID = Number.MAX_SAFE_INTEGER;
 let engine = null;
 /** The configuration as JSON text, kept to create a replacement engine after a panic. */
 let configText = "";
-/** "new" until the engine starts loading, then "starting", "ready" or "failed". After "failed" every message is ignored. */
+/**
+ * The times of the restarts that the restart allowance may still count, on this worker's clock (§14.2). They live here,
+ * not in the engine, because a panic discards the engine's instance with all its state; each new instance gets them.
+ */
+let restartTimes = [];
+/**
+ * "new" until the engine starts loading, then "starting", "ready", "failed", or "stopped" once the engine has used up
+ * its restarts (§14.2). After "failed" and "stopped" every message is ignored.
+ */
 let state = "new";
+/** Subresource Integrity metadata as an integrity attribute holds it: hash expressions of SHA-256, SHA-384 or SHA-512. */
+const INTEGRITY = /^(?:sha256|sha384|sha512)-[A-Za-z0-9+/]+={0,2}$/;
 /** Whether a message has arrived: only the very first message may be init (§3.2). */
 let firstSeen = false;
 /** Work runs as a chain of promises, so messages are handled one at a time and answered in order. No link rejects. */
@@ -61,6 +72,18 @@ function requestId(message) {
   return Number.isSafeInteger(id) && id >= 1 ? id : Number.NaN;
 }
 
+/**
+ * Whether `integrity` is Subresource Integrity metadata that the browser checks (§14.8): one or more hash expressions,
+ * separated by spaces. Metadata without a hash the browser knows would make it accept any bytes, so it is refused.
+ */
+function validIntegrity(integrity) {
+  if (typeof integrity !== "string") {
+    return false;
+  }
+  const tokens = integrity.split(/[ \t\n\f\r]+/).filter((token) => token !== "");
+  return tokens.length > 0 && tokens.every((token) => INTEGRITY.test(token));
+}
+
 /** Loads the engine and answers "ready", or "failed" with a fixed reason. */
 async function start(control) {
   try {
@@ -74,7 +97,19 @@ async function start(control) {
     if (wasmUrl.origin !== new URL(import.meta.url).origin) {
       return fail("load_failed");
     }
-    await init({ module_or_path: wasmUrl });
+    // With wasm_integrity, the browser checks the module's bytes against the hash before anything of it runs, and
+    // refuses bytes that do not match; the fetch then fails, and so does the start (§14.8).
+    if (control.wasm_integrity !== undefined && !validIntegrity(control.wasm_integrity)) {
+      return fail("load_failed");
+    }
+    const response = await fetch(
+      wasmUrl,
+      control.wasm_integrity === undefined ? {} : { integrity: control.wasm_integrity },
+    );
+    if (!response.ok) {
+      return fail("load_failed");
+    }
+    await init({ module_or_path: response });
   } catch {
     return fail("load_failed");
   }
@@ -95,6 +130,7 @@ function fail(reason) {
 
 /** Hands one protocol message to the engine and delivers its answers, in order. */
 async function relay(message, receivedMs) {
+  // Before the engine is ready, the message waits in the queue; after "failed" or "stopped", it is ignored.
   if (state !== "ready") {
     return;
   }
@@ -134,8 +170,8 @@ async function relay(message, receivedMs) {
     }
   } catch {
     // A panic stops the WebAssembly instance (it traps), and anything else thrown from inside the engine leaves it
-    // in an unknown state, so either way the instance is replaced (§3.2, §12).
-    restart(id);
+    // in an unknown state, so either way the instance is replaced (§3.2, §12), within the restart allowance (§14.2).
+    restart(id, receivedMs);
   }
 }
 
@@ -278,18 +314,31 @@ function unpremultiply(source, stride, width, height) {
 }
 
 /**
- * Replaces an engine that panicked with a new one from the same configuration, and lets the new one answer request
- * `id`, the message that caused the panic (§3.2). Only the identifier is passed, so the new instance never copies or
- * parses that message again. The old engine object belongs to the discarded instance: it must not be used or freed
- * (wasm-bindgen refuses calls on it, and its finalizer leaves the new instance alone).
+ * Replaces an engine that panicked while handling a message that arrived at `receivedMs` with a new one from the same
+ * configuration, and lets the new one answer request `id`, the message that caused the panic (§3.2). Only the
+ * identifier is passed, so the new instance never copies or parses that message again. The new instance applies the
+ * restart allowance with the times of earlier restarts kept here, and adds `restart` to its engine.error (§14.2):
+ * once the allowance is used up, `restart` is null, and the worker ignores every message from then on. The old engine
+ * object belongs to the discarded instance: it must not be used or freed (wasm-bindgen refuses calls on it, and its
+ * finalizer leaves the new instance alone).
  */
-function restart(id) {
+function restart(id, receivedMs) {
   engine = null;
+  let report;
   try {
     __wbg_reset_state();
     engine = new WasmEngine(configText);
-    deliverAll(engine.reportPanic(id));
+    report = JSON.parse(engine.reportPanic(id, receivedMs, new Float64Array(restartTimes)));
   } catch {
     fail("restart_failed");
+    return;
+  }
+  restartTimes = report.restart_times;
+  for (const answer of report.messages) {
+    deliver(answer);
+  }
+  if (report.stopped) {
+    state = "stopped";
+    engine = null;
   }
 }

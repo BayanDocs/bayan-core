@@ -30,6 +30,15 @@ const LICENSE_FILES: [&str; 2] = [
     "LicenseRef-BayanDocs-App-Store-Permission.txt",
 ];
 
+/// The conformance vectors and their JSON Schema (engine protocol §15), in `crates/bayan-engine/protocol/conformance`, which both artifacts ship next to the protocol's schema: in `schema/conformance/` of the C SDK and in `conformance/` of the WebAssembly package.
+const CONFORMANCE_FILES: [&str; 5] = [
+    "a11y-limits.json",
+    "conformance.schema.json",
+    "keys.json",
+    "restart.json",
+    "tile-grid.json",
+];
+
 /// The JavaScript files of the WebAssembly package that live in `crates/bayan-wasm/js`.
 const WASM_PACKAGE_SCRIPTS: [&str; 4] = [
     "bayan-worker.js",
@@ -285,6 +294,7 @@ fn build_sdk(args: &[&str]) -> Result<(), String> {
         &out.join("schema").join("engine-protocol.schema.json"),
         &protocol_file(&root, "schema")?,
     )?;
+    copy_conformance(&root, &out.join("schema").join("conformance"))?;
     let version = engine_version(&metadata)?;
     write_licenses(
         &root,
@@ -350,11 +360,12 @@ fn sdk_readme(version: &str, target: &str, family: Family, native_libs: &str) ->
     let static_library = family.static_library();
     format!(
         "# BayanDocs engine C SDK\n\n\
-         The BayanDocs engine {version} for `{target}`, with engine protocol version 0. Built by `cargo xtask sdk` in bayan-core (work package CORE-007).\n\n\
+         The BayanDocs engine {version} for `{target}`, with engine protocol version 1. Built by `cargo xtask sdk` in bayan-core (work packages CORE-007 and CORE-013).\n\n\
          - `include/bayan_ffi.h`: the C interface (engine protocol specification §3.1). Read the rules for callers at its top.\n\
          - {}\n\
          - `{static_library}`: the engine as a static library. A program that links it also links the system libraries in `lib/static/native-libs.txt`: `{native_libs}`.\n\
          - `schema/engine-protocol.schema.json`: the JSON Schema of the protocol's messages.\n\
+         - `schema/conformance/`: the conformance vectors (engine protocol specification §15), test cases with their expected results that a shell's tests read, and `conformance.schema.json`, their format.\n\
          - `LICENSES/`, `THIRD-PARTY-LICENSES.txt` and `RUST-STANDARD-LIBRARY-COPYRIGHT.html`: BayanDocs' licence ({LICENSE}) and the notices of the code compiled into the libraries. Distribute them with the libraries.\n\n\
          The protocol: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md\n",
         family.dynamic_library()
@@ -428,6 +439,7 @@ fn build_wasm_package(args: &[&str]) -> Result<(), String> {
         &out.join("engine-protocol.d.ts"),
         &protocol_file(&root, "typescript")?,
     )?;
+    copy_conformance(&root, &out.join("conformance"))?;
     let version = engine_version(&metadata)?;
     write(&out.join("package.json"), &package_json(&version))?;
     write_licenses(
@@ -442,20 +454,39 @@ fn build_wasm_package(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Copies the conformance vectors and their schema (engine protocol §15) into `folder`, unchanged: bayan-desktop compares its copies with the SDK's byte for byte.
+fn copy_conformance(root: &Path, folder: &Path) -> Result<(), String> {
+    let source = root
+        .join("crates")
+        .join("bayan-engine")
+        .join("protocol")
+        .join("conformance");
+    for file in CONFORMANCE_FILES {
+        copy(&source.join(file), &folder.join(file))?;
+    }
+    println!(
+        "    the conformance vectors in {}: {}",
+        folder.display(),
+        CONFORMANCE_FILES.join(", ")
+    );
+    Ok(())
+}
+
 /// A `package.json` that names the package and its licence. It is private: the package is a build artifact, never published to a registry.
 fn package_json(version: &str) -> String {
     format!(
-        "{{\n  \"name\": \"@bayandocs/engine-wasm\",\n  \"version\": \"{version}\",\n  \"description\": \"The BayanDocs engine as WebAssembly, with its Web Worker host (engine protocol v0)\",\n  \"license\": \"{MANIFEST_LICENSE}\",\n  \"private\": true,\n  \"type\": \"module\"\n}}\n"
+        "{{\n  \"name\": \"@bayandocs/engine-wasm\",\n  \"version\": \"{version}\",\n  \"description\": \"The BayanDocs engine as WebAssembly, with its Web Worker host (engine protocol v1)\",\n  \"license\": \"{MANIFEST_LICENSE}\",\n  \"private\": true,\n  \"type\": \"module\"\n}}\n"
     )
 }
 
 fn wasm_readme(version: &str) -> String {
     format!(
         "# BayanDocs engine WebAssembly package\n\n\
-         The BayanDocs engine {version} as WebAssembly, with engine protocol version 0. Built by `cargo xtask wasm-package` in bayan-core (work package CORE-007).\n\n\
+         The BayanDocs engine {version} as WebAssembly, with engine protocol version 1. Built by `cargo xtask wasm-package` in bayan-core (work packages CORE-007 and CORE-013).\n\n\
          - `bayan-worker.js`: the worker host. Start it with `new Worker(new URL(\"bayan-worker.js\", base), {{ type: \"module\" }})` and exchange protocol messages with it (engine protocol specification §3.2). It has no dependencies.\n\
          - `bayan_wasm.js`, `bayan_wasm_bg.wasm` and their `.d.ts` files: the engine module and wasm-bindgen's glue, which the worker host loads. The web shell never calls them directly.\n\
          - `engine-protocol.d.ts` and `engine-protocol.schema.json`: the protocol's TypeScript declarations and JSON Schema.\n\
+         - `conformance/`: the conformance vectors (engine protocol specification §15), test cases with their expected results that the web shell's tests read, and `conformance.schema.json`, their format.\n\
          - `test-page.html`, `test-page.css` and `test-page.js`: a page for trying the engine by hand. Serve this folder over HTTP, for example with `python3 -m http.server`, and open `test-page.html`.\n\
          - `LICENSES/`, `THIRD-PARTY-LICENSES.txt` and `RUST-STANDARD-LIBRARY-COPYRIGHT.html`: BayanDocs' licence ({LICENSE}) and the notices of the code compiled into the module. Distribute them with it.\n\n\
          Serving it: send `bayan_wasm_bg.wasm` as `application/wasm` (otherwise wasm-bindgen's glue falls back to a slower way of loading it and warns on the console) and the `.js` files as `text/javascript`. The page that starts the worker needs `'self'` in `worker-src` of its Content Security Policy, and under Trusted Types a policy for the worker's script address. The worker has a Content Security Policy of its own, which comes with the response that delivers `bayan-worker.js`, so send one with that response too: it needs `'self'` and `'wasm-unsafe-eval'` in `script-src` (for the scripts it imports and to compile the module) and `'self'` in `connect-src` (to fetch the module).\n\n\
@@ -1040,5 +1071,21 @@ mod tests {
                 "{file}"
             );
         }
+    }
+
+    #[test]
+    fn the_artifacts_ship_every_conformance_file() {
+        // Every file of the folder, so that a new area cannot be left out of the artifacts.
+        let folder = crate::workspace_root()
+            .join("crates")
+            .join("bayan-engine")
+            .join("protocol")
+            .join("conformance");
+        let mut found: Vec<String> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        found.sort();
+        assert_eq!(found, CONFORMANCE_FILES);
     }
 }

@@ -1,7 +1,7 @@
 //! The JSON Schema and the TypeScript declarations match the engine's Rust types (CORE-007 AC-4).
 //!
 //! - The committed copies in `crates/bayan-engine/protocol/` are exactly what the generators produce from the current types. After changing a protocol type, regenerate them with `BAYAN_UPDATE_GENERATED=1 cargo test -p bayan-engine --test engine` and review the difference like any other change.
-//! - Sample messages, both those a shell sends and every message the engine sent during a session that uses every v0 message, validate against the schema; messages that break it are refused by the schema and by the engine alike.
+//! - Sample messages, both those a shell sends and every message the engine sent during a session that uses every message of the catalog, validate against the schema; messages that break it are refused by the schema and by the engine alike.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -137,7 +137,7 @@ fn every_message_of_a_session_validates_against_the_schema() {
         1,
         "hello",
         json!({
-            "protocol_versions": [0],
+            "protocol_versions": [1],
             "shell": { "name": "test", "version": "1", "platform": "linux" },
             "capabilities": { "clipboard_formats": [], "ime": true, "accessibility": true },
             "locale": "en-US",
@@ -367,10 +367,10 @@ fn messages_that_break_the_schema_are_refused_by_the_engine_too() {
     }
     // Envelopes that break the schema are refused too.
     for message in [
-        json!({ "v": 0, "id": 40 }),
-        json!({ "v": 0, "id": 0, "type": "ui.manifest" }),
-        json!({ "v": 0, "id": 41, "type": "ui.manifest", "payload": [] }),
-        json!({ "v": 1, "id": 42, "type": "ui.manifest" }),
+        json!({ "v": 1, "id": 40 }),
+        json!({ "v": 1, "id": 0, "type": "ui.manifest" }),
+        json!({ "v": 1, "id": 41, "type": "ui.manifest", "payload": [] }),
+        json!({ "v": 0, "id": 42, "type": "ui.manifest" }),
     ] {
         assert!(
             validator.validate(&message).is_err(),
@@ -384,7 +384,7 @@ fn messages_that_break_the_schema_are_refused_by_the_engine_too() {
     }
     assert!(
         events(
-            &send(&mut engine, &json!({ "v": 0, "type": 5 })),
+            &send(&mut engine, &json!({ "v": 1, "type": 5 })),
             "engine.error"
         )
         .len()

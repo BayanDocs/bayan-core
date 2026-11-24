@@ -245,25 +245,26 @@ int main(void) {
   check(bayan_engine_set_callback(engine, on_message, &collector) == BAYAN_STATUS_OK, "bayan_engine_set_callback");
 
   /* Handshake. */
-  post(engine, "{\"v\":0,\"id\":1,\"type\":\"hello\",\"payload\":{\"protocol_versions\":[0]}}");
+  post(engine, "{\"v\":1,\"id\":1,\"type\":\"hello\",\"payload\":{\"protocol_versions\":[1]}}");
   char *reply = wait_reply(&collector, 1);
   check(contains(reply, "\"ok\":true") && contains(reply, "\"type\":\"welcome\"") &&
-            contains(reply, "\"protocol_version\":0"),
-        "hello is answered by welcome with protocol version 0");
+            contains(reply, "\"protocol_version\":1"),
+        "hello is answered by welcome with protocol version 1");
   free(reply);
   pass("handshake");
 
   /* Record everything from here on. */
-  post(engine, "{\"v\":0,\"id\":2,\"type\":\"diag.record.start\"}");
+  post(engine, "{\"v\":1,\"id\":2,\"type\":\"diag.record.start\"}");
   reply = wait_reply(&collector, 2);
   check(contains(reply, "\"ok\":true"), "diag.record.start");
   free(reply);
 
-  /* Open: the file's bytes travel as a blob. Protocol v0 opens the mock document whatever they are. */
-  static const char file[] = "any bytes: protocol v0 opens the mock document";
+  /* Open: the file's bytes travel as a blob. Until real documents can be opened, the engine opens the mock document
+   * whatever they are. */
+  static const char file[] = "any bytes: the engine opens the mock document";
   BayanBlobId blob = bayan_blob_put(engine, (const uint8_t *)file, sizeof file - 1);
   check(blob != 0 && blob % 2 == 1, "bayan_blob_put gives the shell's blob an odd identifier");
-  snprintf(message, sizeof message, "{\"v\":0,\"id\":3,\"type\":\"doc.open\",\"payload\":{\"blob\":%llu}}",
+  snprintf(message, sizeof message, "{\"v\":1,\"id\":3,\"type\":\"doc.open\",\"payload\":{\"blob\":%llu}}",
            (unsigned long long)blob);
   post(engine, message);
   reply = wait_reply(&collector, 3);
@@ -280,9 +281,11 @@ int main(void) {
   check(request_length > 0 && (size_t)request_length < sizeof request, "the tile request fits");
   static uint8_t pixels[TILE_STRIDE * TILE_SIDE];
   memset(pixels, 0xAB, sizeof pixels);
+  uint64_t revision = 0;
   check(bayan_render_tile(engine, (const uint8_t *)request, (size_t)request_length, pixels, sizeof pixels, TILE_SIDE,
-                          TILE_SIDE, TILE_STRIDE) == BAYAN_STATUS_OK,
+                          TILE_SIDE, TILE_STRIDE, &revision) == BAYAN_STATUS_OK,
         "bayan_render_tile");
+  check(revision == 1, "the tile shows the document's first render revision");
   uint64_t hash = FNV_OFFSET;
   for (size_t row = 0; row < TILE_SIDE; row += 1) {
     const uint8_t *start = pixels + row * TILE_STRIDE;
@@ -296,13 +299,13 @@ int main(void) {
   }
   snprintf(digest, sizeof digest, "fnv1a64:%016" PRIx64, hash);
   check(bayan_render_tile(engine, (const uint8_t *)request, (size_t)request_length, pixels, TILE_SIDE * 4, TILE_SIDE,
-                          TILE_SIDE, TILE_STRIDE) == BAYAN_STATUS_BUFFER_TOO_SMALL,
+                          TILE_SIDE, TILE_STRIDE, NULL) == BAYAN_STATUS_BUFFER_TOO_SMALL,
         "bayan_render_tile refuses a buffer that is too small");
   pass("render a tile with bayan_render_tile");
 
   /* The same tile through a message: the reply carries the digest and a blob with the pixels. */
   snprintf(message, sizeof message,
-           "{\"v\":0,\"id\":4,\"type\":\"render.tile\",\"payload\":{" TILE_REQUEST ",\"width\":%d,\"height\":%d}}", doc_id,
+           "{\"v\":1,\"id\":4,\"type\":\"render.tile\",\"payload\":{" TILE_REQUEST ",\"width\":%d,\"height\":%d}}", doc_id,
            TILE_SIDE, TILE_SIDE);
   post(engine, message);
   reply = wait_reply(&collector, 4);
@@ -320,7 +323,7 @@ int main(void) {
   pass("render the same tile with render.tile");
 
   /* Stop recording and replay the recording. */
-  post(engine, "{\"v\":0,\"id\":5,\"type\":\"diag.record.stop\"}");
+  post(engine, "{\"v\":1,\"id\":5,\"type\":\"diag.record.stop\"}");
   reply = wait_reply(&collector, 5);
   check(contains(reply, "\"ok\":true") && contains(reply, "\"truncated\":false"), "diag.record.stop");
   BayanBlobId recording_blob = (BayanBlobId)number_field(reply, "blob");
@@ -330,7 +333,7 @@ int main(void) {
   BayanBlobId replay_blob = bayan_blob_put(engine, recording, recording_length);
   free(recording);
   check(replay_blob != 0, "the recording goes back in as a blob");
-  snprintf(message, sizeof message, "{\"v\":0,\"id\":6,\"type\":\"diag.replay\",\"payload\":{\"blob\":%llu}}",
+  snprintf(message, sizeof message, "{\"v\":1,\"id\":6,\"type\":\"diag.replay\",\"payload\":{\"blob\":%llu}}",
            (unsigned long long)replay_blob);
   post(engine, message);
   reply = wait_reply(&collector, 6);
@@ -342,14 +345,15 @@ int main(void) {
   pass("record and replay: identical tile hashes");
 
   /* A panic in a message handler becomes engine.error, and the engine stays usable. */
-  post(engine, "{\"v\":0,\"id\":7,\"type\":\"diag.panic\"}");
+  post(engine, "{\"v\":1,\"id\":7,\"type\":\"diag.panic\"}");
   reply = wait_reply(&collector, 7);
   check(contains(reply, "\"ok\":false") && contains(reply, "\"code\":\"panic\""), "diag.panic is answered with panic");
   free(reply);
   reply = wait_for(&collector, "\"type\":\"engine.error\"");
-  check(contains(reply, "\"recoverable\":false"), "engine.error says the session is gone");
+  check(contains(reply, "\"recoverable\":false") && contains(reply, "\"restart\":{\"number\":1,\"limit\":3}"),
+        "engine.error says the session is gone and that this is restart 1 of 3");
   free(reply);
-  post(engine, "{\"v\":0,\"id\":8,\"type\":\"hello\",\"payload\":{\"protocol_versions\":[0]}}");
+  post(engine, "{\"v\":1,\"id\":8,\"type\":\"hello\",\"payload\":{\"protocol_versions\":[1]}}");
   reply = wait_reply(&collector, 8);
   check(contains(reply, "\"ok\":true"), "a new handshake after the panic");
   free(reply);

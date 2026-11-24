@@ -1,4 +1,4 @@
-//! The JSON Schema of engine protocol v0, generated from the Rust types ([engine protocol specification][spec] §9, ADR-0012 §1).
+//! The JSON Schema of engine protocol v1, generated from the Rust types ([engine protocol specification][spec] §9, ADR-0012 §1).
 //!
 //! schemars derives the schema of every payload from the same definitions serde uses ([`crate::protocol`]): payloads the shell sends are described as the engine reads them (optional fields may be left out), payloads the engine sends as it writes them. This module adds the envelopes of spec §4 and the list of messages, `x-bayan-messages`, from which [`crate::typescript`] writes the TypeScript declarations. The schema follows JSON Schema draft 2020-12; keywords that start with `x-bayan-` are annotations for our generators, which validators ignore.
 //!
@@ -11,7 +11,7 @@ use crate::limits::MAX_ID;
 use crate::protocol::{Direction, ErrorInfo, MESSAGES, PROTOCOL_VERSION, schema_of};
 
 /// The schema's identifier.
-pub const SCHEMA_ID: &str = "urn:bayandocs:engine-protocol:v0";
+pub const SCHEMA_ID: &str = "urn:bayandocs:engine-protocol:v1";
 
 /// The file name under which the schema is published (spec §9).
 pub const SCHEMA_FILE: &str = "engine-protocol.schema.json";
@@ -223,8 +223,8 @@ pub fn json_schema() -> Result<Value, String> {
     Ok(json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
-        "title": "BayanDocs engine protocol, version 0",
-        "description": "Every message of engine protocol v0 (BayanDocs docs repository, specs/engine-protocol.md), generated from the engine's Rust types. A message is a request, a reply or an event.",
+        "title": "BayanDocs engine protocol, version 1",
+        "description": "Every message of engine protocol v1 (BayanDocs docs repository, specs/engine-protocol.md), generated from the engine's Rust types. A message is a request, a reply or an event.",
         "x-bayan-protocol-version": PROTOCOL_VERSION,
         "x-bayan-messages": listed,
         "oneOf": [reference("Request"), reference("Reply"), reference("Event")],
