@@ -386,6 +386,8 @@ async function main() {
       [{ worker: "init", wasm_url: "missing.wasm" }, "load_failed"],
       // Another origin serves the same module in this test, but the worker host loads the engine only from its own.
       [{ worker: "init", wasm_url: "https://cdn.example/bayan_wasm_bg.wasm" }, "load_failed"],
+      // Nor by a redirect from its own origin to another (see worker-scope.mjs).
+      [{ worker: "init", wasm_url: "redirect-to-elsewhere.wasm" }, "load_failed"],
     ]) {
       const failing = new Shell();
       try {

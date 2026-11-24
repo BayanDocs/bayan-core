@@ -191,7 +191,7 @@ fn json_array(messages: &[String]) -> String {
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "a float-to-integer `as` cast saturates: fractions are cut off, negative numbers and NaN become 0, and numbers beyond u64 become u64::MAX, all harmless for a recording's timestamps"
+    reason = "a float-to-integer `as` cast saturates: fractions are cut off, negative numbers and NaN become 0, and numbers beyond u64 become u64::MAX, all harmless for a recording's timestamps and for the times of the restart allowance, which the worker host takes from `performance.now()` too"
 )]
 fn milliseconds(value: f64) -> u64 {
     value as u64

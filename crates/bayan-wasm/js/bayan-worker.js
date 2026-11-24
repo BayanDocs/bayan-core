@@ -102,10 +102,12 @@ async function start(control) {
     if (control.wasm_integrity !== undefined && !validIntegrity(control.wasm_integrity)) {
       return fail("load_failed");
     }
-    const response = await fetch(
-      wasmUrl,
-      control.wasm_integrity === undefined ? {} : { integrity: control.wasm_integrity },
-    );
+    // A redirect could lead to another origin after the check above, so the fetch refuses to follow one, with or
+    // without wasm_integrity.
+    const response = await fetch(wasmUrl, {
+      redirect: "error",
+      ...(control.wasm_integrity === undefined ? {} : { integrity: control.wasm_integrity }),
+    });
     if (!response.ok) {
       return fail("load_failed");
     }
@@ -324,21 +326,19 @@ function unpremultiply(source, stride, width, height) {
  */
 function restart(id, receivedMs) {
   engine = null;
-  let report;
   try {
     __wbg_reset_state();
     engine = new WasmEngine(configText);
-    report = JSON.parse(engine.reportPanic(id, receivedMs, new Float64Array(restartTimes)));
+    const report = JSON.parse(engine.reportPanic(id, receivedMs, new Float64Array(restartTimes)));
+    restartTimes = report.restart_times;
+    if (report.stopped) {
+      state = "stopped";
+      engine = null;
+    }
+    for (const answer of report.messages) {
+      deliver(answer);
+    }
   } catch {
     fail("restart_failed");
-    return;
-  }
-  restartTimes = report.restart_times;
-  for (const answer of report.messages) {
-    deliver(answer);
-  }
-  if (report.stopped) {
-    state = "stopped";
-    engine = null;
   }
 }

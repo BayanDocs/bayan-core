@@ -60,10 +60,19 @@ function integrityMatches(bytes, metadata) {
 }
 
 // Node.js's fetch does not read files; serve the engine module the way a web server would. Any http: or https: address
-// serves the same module, so the driver can check that the worker host refuses one from another origin. Like a
-// browser, it refuses bytes that do not match the request's integrity metadata.
+// serves the same module, so the driver can check that the worker host refuses one from another origin. A file named
+// REDIRECTING_FILE, next to the worker host, answers with a redirect to another origin that serves the module, which a
+// fetch with redirect "error" refuses, as a browser's does. Like a browser, it refuses bytes that do not match the
+// request's integrity metadata.
+const REDIRECTING_FILE = "redirect-to-elsewhere.wasm";
 globalThis.fetch = async (url, init = {}) => {
-  const address = new URL(url);
+  let address = new URL(url);
+  if (address.protocol === "file:" && address.pathname.endsWith(`/${REDIRECTING_FILE}`)) {
+    if (init.redirect === "error") {
+      throw new TypeError("Failed to fetch: the response is a redirect");
+    }
+    address = new URL("https://elsewhere.example/bayan_wasm_bg.wasm");
+  }
   let file;
   if (address.protocol === "file:") {
     file = fileURLToPath(address);
