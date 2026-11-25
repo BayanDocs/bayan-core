@@ -41,10 +41,13 @@ fn recording_with_a_panic() -> Vec<u8> {
 fn run_case(case: &str) {
     libfuzzer_hook();
     match case {
-        "engine_messages, a panic the engine catches" => {
-            engine::messages_with(Config { allow_panic: true }, DIAG_PANIC)
+        "engine_messages, a panic the engine catches" => engine::messages_with(
+            Config { allow_panic: true },
+            &engine::messages_input(b"", DIAG_PANIC),
+        ),
+        "engine_messages, diag.panic refused" => {
+            engine::messages(&engine::messages_input(b"", DIAG_PANIC))
         }
-        "engine_messages, diag.panic refused" => engine::messages(DIAG_PANIC),
         "engine_replay, a panic the replaying engine catches" => {
             engine::replay_with(Config { allow_panic: true }, &recording_with_a_panic())
         }
@@ -142,7 +145,10 @@ fn a_panic_the_replaying_engine_catches_fails_engine_replay() {
 fn without_the_hook_the_harness_still_fails_on_a_panic_the_engine_caught() {
     // Without libfuzzer-sys's hook the engine catches the panic and answers with the error `panic`, which the harness's own check refuses.
     let caught = catch_unwind(AssertUnwindSafe(|| {
-        engine::messages_with(Config { allow_panic: true }, DIAG_PANIC)
+        engine::messages_with(
+            Config { allow_panic: true },
+            &engine::messages_input(b"", DIAG_PANIC),
+        )
     }));
     let message = caught.unwrap_err();
     let message = message

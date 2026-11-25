@@ -102,6 +102,17 @@
             "null"
           ]
         },
+        "dir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The node's direction, on a node that sets it; its descendants inherit it unless they set their own. The document node always has it."
+        },
         "editable": {
           "description": "Whether the user can edit the node's text.",
           "type": "boolean"
@@ -112,6 +123,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "lang": {
+          "description": "The node's language, as a BCP 47 tag, on a node that sets it; its descendants inherit it unless they set their own (spec §14.7). The document node always has it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "level": {
           "description": "A heading's level, 1 to 9.",
           "format": "uint8",
@@ -119,6 +137,18 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "line_starts": {
+          "description": "The offsets in `text` at which its lines start, as laid out, from 0 in increasing order; on every node that holds text.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -132,6 +162,16 @@
         "role": {
           "$ref": "#/$defs/A11yRole",
           "description": "The node's role."
+        },
+        "runs": {
+          "description": "The parts of the node's own text whose language or direction differs from the node's, in order and without overlapping.",
+          "items": {
+            "$ref": "#/$defs/TextRun"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "text": {
           "description": "The node's own text, on nodes that hold text.",
@@ -197,6 +237,24 @@
         }
       ]
     },
+    "A11ySelection": {
+      "description": "A selected range of text (spec §14.7): from `anchor`, the end that stays when the selection is extended, to `focus`, where the caret is.",
+      "properties": {
+        "anchor": {
+          "$ref": "#/$defs/TextPosition",
+          "description": "Where the selection starts."
+        },
+        "focus": {
+          "$ref": "#/$defs/TextPosition",
+          "description": "Where the selection ends, and the caret is."
+        }
+      },
+      "required": [
+        "anchor",
+        "focus"
+      ],
+      "type": "object"
+    },
     "A11yTree": {
       "description": "The reply to `query.a11y`.",
       "properties": {
@@ -220,6 +278,16 @@
         "root": {
           "$ref": "#/$defs/A11yNode",
           "description": "The requested subtree."
+        },
+        "selection": {
+          "description": "The document's selection (spec §14.7): empty when nothing is selected, so that a caret alone is no selection. The engine always sends it; an engine of protocol v1 from before CORE-014 does not.",
+          "items": {
+            "$ref": "#/$defs/A11ySelection"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -255,6 +323,16 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "selection": {
+          "description": "The document's selection (spec §14.7): empty when nothing is selected. The engine always sends it; an engine of protocol v1 from before CORE-014 does not.",
+          "items": {
+            "$ref": "#/$defs/A11ySelection"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -392,6 +470,60 @@
       "required": [
         "start",
         "count"
+      ],
+      "type": "object"
+    },
+    "ClipboardCopy": {
+      "description": "`clipboard.copy`: asks for the selection's content, for the platform's copy or cut action (spec §14.5).",
+      "properties": {
+        "cut": {
+          "default": false,
+          "description": "Whether to cut: the engine also deletes the selection where the document is editable.",
+          "type": "boolean"
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "doc_id"
+      ],
+      "type": "object"
+    },
+    "ClipboardItem": {
+      "description": "One format of a clipboard's content, as raw bytes (spec §14.5).",
+      "properties": {
+        "blob": {
+          "$ref": "#/$defs/BlobRef",
+          "description": "The bytes; text formats as UTF-8."
+        },
+        "mime": {
+          "description": "The format, as a MIME type such as `text/plain`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mime",
+        "blob"
+      ],
+      "type": "object"
+    },
+    "ClipboardItems": {
+      "description": "The reply to `clipboard.copy`: the selection in every format the engine writes, which the shell writes to the platform's clipboard as raw bytes; empty when nothing is selected.",
+      "properties": {
+        "items": {
+          "description": "The formats, each as a blob that the shell releases.",
+          "items": {
+            "$ref": "#/$defs/ClipboardItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
       ],
       "type": "object"
     },
@@ -843,6 +975,58 @@
       ],
       "type": "object"
     },
+    "Hit": {
+      "description": "The text position at a point (spec §14.4).",
+      "properties": {
+        "caret": {
+          "description": "The caret position nearest to the point: the offset at the nearer edge, in the line's visual order, of the character under or beside the point, so that in right-to-left text the right half of a character gives the offset before it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "character": {
+          "description": "The offset of the character whose box holds the point, or `null` when the point lies on no character's box.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "node": {
+          "description": "The accessibility node whose text the offsets are in.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node",
+        "caret",
+        "character"
+      ],
+      "type": "object"
+    },
+    "HitReply": {
+      "description": "The reply to `query.hit`.",
+      "properties": {
+        "hit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What lies at the point, or `null` when the point is on no page."
+        }
+      },
+      "required": [
+        "hit"
+      ],
+      "type": "object"
+    },
     "ImageBitmapRef": {
       "description": "An `ImageBitmap` transferred from the web worker (spec §3.2); only in the TypeScript declarations.",
       "type": "object",
@@ -930,6 +1114,29 @@
       ],
       "type": "object"
     },
+    "InputPaste": {
+      "description": "`input.paste`: the content of the platform's clipboard, which the engine inserts at the selection (spec §14.5).",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "The clipboard's bytes in every format that both the shell and the engine list. The engine inserts the richest format it reads and ignores the others: it keeps only the first item of each format of `welcome.clipboard_formats`, and skips every other item without storing it.",
+          "items": {
+            "$ref": "#/$defs/ClipboardItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "items"
+      ],
+      "type": "object"
+    },
     "InputPointer": {
       "description": "`input.pointer`: a mouse, pen or touch event.",
       "properties": {
@@ -997,8 +1204,33 @@
       ],
       "type": "object"
     },
+    "InputSelect": {
+      "description": "`input.select`: sets the selection, which is a caret where `anchor` and `focus` are equal (spec §14.4). The engine answers with `overlay.update` and `a11y.update` when the selection changes. A node that does not exist is `not_found`; a node that is not editable, or an offset beyond its node's text or inside a surrogate pair, is `invalid_request`.",
+      "properties": {
+        "anchor": {
+          "$ref": "#/$defs/TextPosition",
+          "description": "Where the selection starts: the end that stays when it is extended."
+        },
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "focus": {
+          "$ref": "#/$defs/TextPosition",
+          "description": "Where the selection ends: the end that moves, and where the caret is."
+        }
+      },
+      "required": [
+        "doc_id",
+        "anchor",
+        "focus"
+      ],
+      "type": "object"
+    },
     "InputText": {
-      "description": "`input.text`: committed text.",
+      "description": "`input.text`: committed text (spec §6.5, §14.4).",
       "properties": {
         "doc_id": {
           "description": "The document.",
@@ -1006,8 +1238,20 @@
           "minimum": 0,
           "type": "integer"
         },
+        "replace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextReplace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The range of a node's text that `text` replaces; the caret ends after the new text (spec §14.4). A node that does not exist is `not_found`; a node that is not editable, a range outside its text or backwards, or an end inside a surrogate pair is `invalid_request`."
+        },
         "text": {
-          "description": "The text, inserted at the caret.",
+          "description": "The text. Without `replace`, it replaces the selection, or is inserted at the caret when nothing is selected; an active composition ends, and the text takes its place.",
           "type": "string"
         }
       },
@@ -1329,6 +1573,33 @@
       },
       "required": [
         "doc_id"
+      ],
+      "type": "object"
+    },
+    "QueryHit": {
+      "description": "`query.hit`: asks which text position lies at a point (spec §14.4).",
+      "properties": {
+        "doc_id": {
+          "description": "The document.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "x": {
+          "description": "The horizontal position, in device-independent pixels from the view origin, as for `input.pointer`.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "The vertical position, in device-independent pixels from the view origin.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "doc_id",
+        "x",
+        "y"
       ],
       "type": "object"
     },
@@ -1863,10 +2134,62 @@
         {
           "properties": {
             "payload": {
+              "$ref": "#/$defs/InputSelect"
+            },
+            "type": {
+              "const": "input.select"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/InputPaste"
+            },
+            "type": {
+              "const": "input.paste"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
               "$ref": "#/$defs/QueryA11y"
             },
             "type": {
               "const": "query.a11y"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/QueryHit"
+            },
+            "type": {
+              "const": "query.hit"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        {
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/ClipboardCopy"
+            },
+            "type": {
+              "const": "clipboard.copy"
             }
           },
           "required": [
@@ -2085,6 +2408,43 @@
       },
       "type": "object"
     },
+    "TextDirection": {
+      "description": "The direction of text (spec §14.7).",
+      "oneOf": [
+        {
+          "const": "ltr",
+          "description": "Left to right.",
+          "type": "string"
+        },
+        {
+          "const": "rtl",
+          "description": "Right to left.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextPosition": {
+      "description": "A position in the text of an accessibility node (spec §14.4): the node, and an offset in UTF-16 code units into its `text`, never inside a surrogate pair.",
+      "properties": {
+        "node": {
+          "description": "The node.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The offset, in UTF-16 code units into the node's text.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node",
+        "offset"
+      ],
+      "type": "object"
+    },
     "TextRange": {
       "description": "A range of UTF-16 code units.",
       "properties": {
@@ -2096,6 +2456,75 @@
         },
         "start": {
           "description": "The first code unit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "TextReplace": {
+      "description": "The range of a node's text that `input.text` replaces (spec §14.4), in UTF-16 code units of the node's text as the engine last sent it.",
+      "properties": {
+        "end": {
+          "description": "The code unit after the range; equal to `start` to insert without replacing.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "description": "The accessibility node whose text it is.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "The first code unit of the range.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "TextRun": {
+      "description": "A part of a node's own text whose language or direction differs from the node's (spec §14.7).",
+      "properties": {
+        "dir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The part's direction, where it differs from the node's."
+        },
+        "end": {
+          "description": "The code unit after the part.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lang": {
+          "description": "The part's language, as a BCP 47 tag, where it differs from the node's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "The first UTF-16 code unit of the part.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -2464,6 +2893,16 @@
     "Welcome": {
       "description": "`welcome`: the reply to `hello`.",
       "properties": {
+        "clipboard_formats": {
+          "description": "The clipboard formats that the engine reads and writes, as MIME types, preferred first (spec §14.5): `text/plain`. The engine always sends it; an engine of protocol v1 from before CORE-014 does not, and reads and writes no clipboard formats.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "engine_version": {
           "description": "The core's version as Semantic Versioning 2.0 writes it, at most 64 ASCII characters (spec §14.1).",
           "type": "string"
@@ -2592,6 +3031,18 @@
     },
     {
       "direction": "to_engine",
+      "payload": "#/$defs/InputSelect",
+      "reply": "#/$defs/Empty",
+      "type": "input.select"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/InputPaste",
+      "reply": "#/$defs/Empty",
+      "type": "input.paste"
+    },
+    {
+      "direction": "to_engine",
       "payload": "#/$defs/QueryA11y",
       "reply": "#/$defs/A11yTree",
       "type": "query.a11y"
@@ -2600,6 +3051,18 @@
       "direction": "to_shell",
       "payload": "#/$defs/A11yUpdate",
       "type": "a11y.update"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/QueryHit",
+      "reply": "#/$defs/HitReply",
+      "type": "query.hit"
+    },
+    {
+      "direction": "to_engine",
+      "payload": "#/$defs/ClipboardCopy",
+      "reply": "#/$defs/ClipboardItems",
+      "type": "clipboard.copy"
     },
     {
       "direction": "to_engine",

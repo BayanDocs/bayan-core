@@ -1,22 +1,38 @@
-//! The fixed part of the mock document laid out once: the shapes of every page, the accessibility nodes, and where the editable line sits.
+//! The fixed part of the mock document laid out once: the shapes of every page, the accessibility nodes, the lines of their text for hit-testing, and where the editable line sits.
 
-use crate::protocol::{A11yNode, A11yRole, PageRect, Rect};
+use crate::protocol::{A11yNode, A11yRole, PageRect, Rect, TextDirection, TextRun};
 use crate::raster::Shape;
 
-use super::content::{BLOCKS, Block};
+use super::content::{BLOCKS, Block, Foreign};
 use super::geometry::{
     BULLET_INDENT, BULLET_SIZE, CELL_PADDING, CONTENT_WIDTH, EDITABLE_HEIGHT, HEADER_FILL,
     HEADING_SPACING_AFTER, HEADING_SPACING_BEFORE, LIST_ITEM_SPACING, LIST_TEXT_INDENT, MARGIN,
     MUTED, PAGE_HEIGHT, PAGE_WIDTH, PAPER, PARAGRAPH_SPACING, TABLE_ROW_HEIGHT, TABLE_RULE,
 };
-use super::text::{BODY, HEADING_1, HEADING_2, TextBlock, TextStyle};
+use super::text::{BODY, Bidi, HEADING_1, HEADING_2, HitLine, LTR, TextBlock, TextStyle};
 
 /// One top-level child of the document node, in reading order.
 #[derive(Debug, Clone)]
 pub(crate) enum Slot {
-    /// A fixed node, with its children.
-    Fixed(A11yNode),
+    /// A fixed node, with its children, kept apart because a node is large and the editable line's slot holds nothing.
+    Fixed(Box<A11yNode>),
     /// The editable line, whose node changes with its text.
+    Editable,
+}
+
+/// The text of one node, in reading order, as hit-testing sees it (spec §14.4).
+#[derive(Debug, Clone)]
+pub(crate) enum Lines {
+    /// The lines of a fixed node, on its page.
+    Fixed {
+        /// The node.
+        node: u64,
+        /// The page.
+        page: u32,
+        /// Its lines.
+        lines: Vec<HitLine>,
+    },
+    /// The editable line, whose characters change.
     Editable,
 }
 
@@ -27,19 +43,29 @@ pub(crate) struct Layout {
     pub(crate) pages: Vec<Vec<Shape>>,
     /// The document node's children.
     pub(crate) slots: Vec<Slot>,
+    /// The text of every node that holds text, in reading order.
+    pub(crate) lines: Vec<Lines>,
     /// The editable line's page and frame.
     pub(crate) editable: PageRect,
     /// The editable line's accessibility node identifier.
     pub(crate) editable_id: u64,
+    /// The largest accessibility node identifier: the nodes are numbered from [`DOCUMENT_ID`] to it without gaps.
+    pub(crate) last_id: u64,
 }
 
 /// The accessibility node identifier of the document.
 pub(crate) const DOCUMENT_ID: u64 = 1;
 
+/// The length of a string in UTF-16 code units.
+fn utf16_len(text: &str) -> u32 {
+    u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
+}
+
 /// Lays the blocks out from the top of the first page, moving a block to the next page when it does not fit.
 struct Builder {
     pages: Vec<Vec<Shape>>,
     slots: Vec<Slot>,
+    lines: Vec<Lines>,
     editable: Option<(PageRect, u64)>,
     next_id: u64,
     y: i64,
@@ -82,7 +108,7 @@ impl Builder {
         }
     }
 
-    /// Lays out text, moving it to the next page if it does not fit, and returns its node.
+    /// Lays out left-to-right text, moving it to the next page if it does not fit, and returns its node.
     fn text(
         &mut self,
         text: &str,
@@ -91,14 +117,33 @@ impl Builder {
         width: i64,
         role: A11yRole,
     ) -> (A11yNode, i64) {
-        let mut block = TextBlock::new(text, style, left, self.y, width);
+        self.directed(text, style, left, width, role, LTR)
+    }
+
+    /// Lays out text in the direction of `bidi`, as [`TextBlock::directed`] does, and returns its node, which inherits its language and direction; records its lines for hit-testing.
+    fn directed(
+        &mut self,
+        text: &str,
+        style: TextStyle,
+        left: i64,
+        width: i64,
+        role: A11yRole,
+        bidi: Bidi<'_>,
+    ) -> (A11yNode, i64) {
+        let mut block = TextBlock::directed(text, style, left, self.y, width, bidi);
         if self.y > MARGIN && block.bottom() > PAGE_HEIGHT - MARGIN {
             self.new_page();
-            block = TextBlock::new(text, style, left, self.y, width);
+            block = TextBlock::directed(text, style, left, self.y, width, bidi);
         }
         self.shapes(block.shapes());
+        let id = self.id();
+        self.lines.push(Lines::Fixed {
+            node: id,
+            page: self.page(),
+            lines: block.hit_lines(),
+        });
         let node = A11yNode {
-            id: self.id(),
+            id,
             role,
             level: None,
             name: None,
@@ -109,11 +154,55 @@ impl Builder {
                 rect: block.bounds(),
             }),
             chars: Some(block.char_boxes()),
+            lang: None,
+            dir: None,
+            runs: None,
+            line_starts: Some(block.line_starts()),
             child_count: None,
             children_start: None,
             children: None,
         };
         (node, block.bottom())
+    }
+
+    /// A paragraph whose language and direction differ from the document's, with its parts in other languages as runs (spec §14.7).
+    fn foreign(&mut self, foreign: &Foreign) {
+        let mut text = String::new();
+        let mut runs = Vec::new();
+        let mut ltr = Vec::new();
+        for part in foreign.parts {
+            let start = utf16_len(&text);
+            text.push_str(part.text);
+            let end = utf16_len(&text);
+            if let Some((lang, dir)) = part.run {
+                runs.push(TextRun {
+                    start,
+                    end,
+                    lang: (lang != foreign.lang).then(|| lang.to_owned()),
+                    dir: (dir != foreign.dir).then_some(dir),
+                });
+                if dir == TextDirection::Ltr {
+                    ltr.push((start, end));
+                }
+            }
+        }
+        let bidi = Bidi {
+            dir: foreign.dir,
+            ltr: &ltr,
+        };
+        let (mut node, bottom) = self.directed(
+            &text,
+            BODY,
+            MARGIN,
+            CONTENT_WIDTH,
+            A11yRole::Paragraph,
+            bidi,
+        );
+        node.lang = Some(foreign.lang.to_owned());
+        node.dir = Some(foreign.dir);
+        node.runs = (!runs.is_empty()).then_some(runs);
+        self.slots.push(Slot::Fixed(Box::new(node)));
+        self.y = bottom + PARAGRAPH_SPACING;
     }
 
     fn heading(&mut self, level: u8, text: &str) {
@@ -123,13 +212,13 @@ impl Builder {
         let style = if level == 1 { HEADING_1 } else { HEADING_2 };
         let (mut node, bottom) = self.text(text, style, MARGIN, CONTENT_WIDTH, A11yRole::Heading);
         node.level = Some(level);
-        self.slots.push(Slot::Fixed(node));
+        self.slots.push(Slot::Fixed(Box::new(node)));
         self.y = bottom + HEADING_SPACING_AFTER;
     }
 
     fn paragraph(&mut self, text: &str) {
         let (node, bottom) = self.text(text, BODY, MARGIN, CONTENT_WIDTH, A11yRole::Paragraph);
-        self.slots.push(Slot::Fixed(node));
+        self.slots.push(Slot::Fixed(Box::new(node)));
         self.y = bottom + PARAGRAPH_SPACING;
     }
 
@@ -147,6 +236,7 @@ impl Builder {
         let id = self.id();
         self.editable = Some((frame, id));
         self.slots.push(Slot::Editable);
+        self.lines.push(Lines::Editable);
         self.y += EDITABLE_HEIGHT + PARAGRAPH_SPACING;
     }
 
@@ -186,7 +276,7 @@ impl Builder {
                 height: self.y - LIST_ITEM_SPACING - top,
             },
         });
-        self.slots.push(Slot::Fixed(A11yNode {
+        self.slots.push(Slot::Fixed(Box::new(A11yNode {
             id: list_id,
             role: A11yRole::List,
             level: None,
@@ -195,10 +285,14 @@ impl Builder {
             editable: false,
             bounds,
             chars: None,
+            lang: None,
+            dir: None,
+            runs: None,
+            line_starts: None,
             child_count: None,
             children_start: None,
             children: Some(children),
-        }));
+        })));
         self.y += PARAGRAPH_SPACING - LIST_ITEM_SPACING;
     }
 
@@ -263,6 +357,10 @@ impl Builder {
                     },
                 }),
                 chars: None,
+                lang: None,
+                dir: None,
+                runs: None,
+                line_starts: None,
                 child_count: None,
                 children_start: None,
                 children: Some(cell_nodes),
@@ -288,7 +386,7 @@ impl Builder {
             });
         }
         self.shapes(rules.into_iter().map(|rect| Shape { rect, color: MUTED }));
-        self.slots.push(Slot::Fixed(A11yNode {
+        self.slots.push(Slot::Fixed(Box::new(A11yNode {
             id: table_id,
             role: A11yRole::Table,
             level: None,
@@ -305,10 +403,14 @@ impl Builder {
                 },
             }),
             chars: None,
+            lang: None,
+            dir: None,
+            runs: None,
+            line_starts: None,
             child_count: None,
             children_start: None,
             children: Some(row_nodes),
-        }));
+        })));
         self.y = top + height + PARAGRAPH_SPACING;
     }
 
@@ -334,6 +436,7 @@ pub(crate) fn lay_out() -> Layout {
     let mut builder = Builder {
         pages: Vec::new(),
         slots: Vec::new(),
+        lines: Vec::new(),
         editable: None,
         next_id: DOCUMENT_ID + 1,
         y: MARGIN,
@@ -343,6 +446,7 @@ pub(crate) fn lay_out() -> Layout {
         match block {
             Block::Heading(level, text) => builder.heading(*level, text),
             Block::Paragraph(text) => builder.paragraph(text),
+            Block::Foreign(foreign) => builder.foreign(foreign),
             Block::Editable => builder.editable(),
             Block::List(items) => builder.list(items),
             Block::Table(rows) => builder.table(rows),
@@ -365,8 +469,10 @@ pub(crate) fn lay_out() -> Layout {
     Layout {
         pages: builder.pages,
         slots: builder.slots,
+        lines: builder.lines,
         editable,
         editable_id,
+        last_id: builder.next_id - 1,
     }
 }
 
@@ -408,6 +514,147 @@ mod tests {
         ] {
             assert!(roles.contains(&role), "{role:?}");
         }
+    }
+
+    /// The fixed node with the identifier `id`, among the layout's top-level nodes.
+    fn fixed_node(layout: &Layout, id: u64) -> &A11yNode {
+        layout
+            .slots
+            .iter()
+            .find_map(|slot| match slot {
+                Slot::Fixed(node) if node.id == id => Some(node),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_arabic_paragraph_runs_right_to_left_on_the_last_page_with_an_english_run() {
+        let layout = lay_out();
+        // It comes before the last paragraph, which keeps the last place; the nodes before it keep their identifiers.
+        let arabic = fixed_node(&layout, 35);
+        assert_eq!(arabic.lang.as_deref(), Some("ar"));
+        assert_eq!(arabic.dir, Some(TextDirection::Rtl));
+        let text = arabic.text.as_deref().unwrap();
+        let run = &arabic.runs.as_ref().unwrap()[0];
+        assert_eq!(
+            (run.start, run.end, run.lang.as_deref(), run.dir),
+            (52, 64, Some("en"), Some(TextDirection::Ltr))
+        );
+        let english: String = text
+            .encode_utf16()
+            .skip(52)
+            .take(12)
+            .map(|unit| char::from_u32(u32::from(unit)).unwrap())
+            .collect();
+        assert_eq!(english, "Hello, world");
+        // Two lines; the second starts with the word that did not fit.
+        assert_eq!(arabic.line_starts.as_deref(), Some(&[0, 84][..]));
+        assert_eq!(arabic.bounds.unwrap().page, 2);
+        let last = fixed_node(&layout, 36);
+        assert_eq!(
+            last.text.as_deref(),
+            Some("This is the end of the mock document.")
+        );
+        assert_eq!((last.lang.as_ref(), last.dir), (None, None));
+        // The English run reads left to right: its first character is left of its last.
+        let boxes = arabic.chars.as_ref().unwrap();
+        assert!(boxes[52].rect.x < boxes[63].rect.x);
+        // The Arabic reads right to left: its first character is right of its second.
+        assert!(boxes[0].rect.x > boxes[1].rect.x);
+        assert_eq!(
+            boxes[0].rect.x + boxes[0].rect.width,
+            MARGIN + CONTENT_WIDTH
+        );
+    }
+
+    #[test]
+    fn a_line_without_characters_puts_its_caret_where_its_lines_start() {
+        let layout = lay_out();
+        let empty_x = |id: u64| -> Vec<i64> {
+            layout
+                .lines
+                .iter()
+                .find_map(|lines| match lines {
+                    Lines::Fixed { node, lines, .. } if *node == id => {
+                        Some(lines.iter().map(|line| line.empty_x).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        // The Arabic paragraph's lines start at the right edge of the column, the last paragraph's at its left edge.
+        assert_eq!(empty_x(35), [MARGIN + CONTENT_WIDTH; 2]);
+        assert_eq!(empty_x(36), [MARGIN]);
+    }
+
+    #[test]
+    fn the_content_holds_no_bidirectional_formatting_characters() {
+        // Right-to-left text in a source file is shown reordered by editors; formatting characters could make code or text read differently from what it is ("Trojan Source"). The content uses none: only letters, digits, spaces and punctuation, whose order the Unicode Bidirectional Algorithm alone decides.
+        let formatting = |character: char| {
+            matches!(
+                character,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+        };
+        for part in super::super::content::ARABIC.parts {
+            assert!(!part.text.chars().any(formatting), "{:?}", part.text);
+        }
+        let layout = lay_out();
+        for slot in &layout.slots {
+            if let Slot::Fixed(node) = slot {
+                assert!(
+                    !node
+                        .text
+                        .iter()
+                        .flat_map(|text| text.chars())
+                        .any(formatting)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_text_node_has_line_starts_and_hit_lines() {
+        let layout = lay_out();
+        let mut with_text = 0;
+        let mut check = |node: &A11yNode| {
+            if let Some(text) = &node.text {
+                with_text += 1;
+                let starts = node.line_starts.as_deref().unwrap();
+                assert_eq!(starts.first(), Some(&0));
+                assert!(starts.windows(2).all(|pair| pair[0] < pair[1]));
+                assert!(starts.iter().all(|&start| start <= utf16_len(text)));
+            } else {
+                assert_eq!(node.line_starts, None);
+            }
+        };
+        fn walk(node: &A11yNode, check: &mut dyn FnMut(&A11yNode)) {
+            check(node);
+            for child in node.children.iter().flatten() {
+                walk(child, check);
+            }
+        }
+        for slot in &layout.slots {
+            if let Slot::Fixed(node) = slot {
+                walk(node, &mut check);
+            }
+        }
+        // Every node with text has its lines for hit-testing, and the editable line its place among them.
+        let fixed = layout
+            .lines
+            .iter()
+            .filter(|lines| matches!(lines, Lines::Fixed { .. }))
+            .count();
+        assert_eq!(fixed, with_text);
+        assert_eq!(
+            layout
+                .lines
+                .iter()
+                .filter(|lines| matches!(lines, Lines::Editable))
+                .count(),
+            1
+        );
     }
 
     #[test]

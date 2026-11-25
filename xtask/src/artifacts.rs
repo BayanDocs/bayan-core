@@ -31,11 +31,12 @@ const LICENSE_FILES: [&str; 2] = [
 ];
 
 /// The conformance vectors and their JSON Schema (engine protocol §15), in `crates/bayan-engine/protocol/conformance`, which both artifacts ship next to the protocol's schema: in `schema/conformance/` of the C SDK and in `conformance/` of the WebAssembly package.
-const CONFORMANCE_FILES: [&str; 5] = [
+const CONFORMANCE_FILES: [&str; 6] = [
     "a11y-limits.json",
     "conformance.schema.json",
     "keys.json",
     "restart.json",
+    "text-input.json",
     "tile-grid.json",
 ];
 

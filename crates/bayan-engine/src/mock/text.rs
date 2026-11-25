@@ -1,8 +1,10 @@
 //! A stand-in for text layout until the text pipeline exists (CORE-003): every character has a fixed advance, wide characters twice that, and lines break greedily at spaces.
 //!
 //! The words are drawn as grey bars ("greeked" text), and every character gets a box for the accessibility tree, so screen readers can tell where each character is.
+//!
+//! Right-to-left text is laid out from the column's right edge, with the parts that the caller marks left to right in reading order inside it: what the Unicode Bidirectional Algorithm (UAX #9) gives for a right-to-left paragraph whose left-to-right parts hold no right-to-left characters, its rule L1 included, which moves white space at a line's end to the paragraph's direction. The mock knows the direction of its parts from its content; the text pipeline will find it with the algorithm itself (ADR-0009).
 
-use crate::protocol::{CharBox, Rect};
+use crate::protocol::{CharBox, Rect, TextDirection};
 use crate::raster::{Rgb, Shape};
 
 use super::geometry::inches;
@@ -99,6 +101,38 @@ pub(crate) struct Placed {
     pub(crate) advance: i64,
     /// Whether it is white space, which is not drawn.
     pub(crate) space: bool,
+    /// Whether it runs right to left.
+    pub(crate) rtl: bool,
+}
+
+/// One line of laid-out text as hit-testing sees it (spec §14.4): its vertical extent and its characters in visual order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HitLine {
+    /// The line's top edge, in page coordinates.
+    pub(crate) top: i64,
+    /// The edge below the line.
+    pub(crate) bottom: i64,
+    /// The offset where the line starts in its text: the caret position of a line without characters.
+    pub(crate) start: u32,
+    /// Where the caret of a line without characters stands, in page coordinates.
+    pub(crate) empty_x: i64,
+    /// The characters, from left to right, with their boxes.
+    pub(crate) items: Vec<HitItem>,
+}
+
+/// A character of a [`HitLine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HitItem {
+    /// The box's left edge, in page coordinates.
+    pub(crate) left: i64,
+    /// The edge right of the box.
+    pub(crate) right: i64,
+    /// The character's first UTF-16 code unit.
+    pub(crate) start: u32,
+    /// The code unit after it.
+    pub(crate) end: u32,
+    /// Whether it runs right to left, so that its right edge is the offset before it.
+    pub(crate) rtl: bool,
 }
 
 /// Text laid out into lines.
@@ -108,13 +142,60 @@ pub(crate) struct TextBlock {
     left: i64,
     top: i64,
     width: i64,
-    /// The characters of each line.
+    /// Whether the text runs right to left, so that its lines start at the right edge.
+    rtl: bool,
+    /// The characters of each line, in reading order.
     lines: Vec<Vec<Placed>>,
 }
 
+/// The direction of a text, and the parts of it that run left to right inside right-to-left text, as UTF-16 ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bidi<'a> {
+    /// The text's direction.
+    pub(crate) dir: TextDirection,
+    /// In right-to-left text, the parts that run left to right.
+    pub(crate) ltr: &'a [(u32, u32)],
+}
+
+/// Left-to-right text.
+pub(crate) const LTR: Bidi<'static> = Bidi {
+    dir: TextDirection::Ltr,
+    ltr: &[],
+};
+
+/// Whether the UTF-16 range of a character lies inside one of `spans`.
+fn inside(spans: &[(u32, u32)], start: u32, end: u32) -> bool {
+    spans.iter().any(|&(from, to)| from <= start && end <= to)
+}
+
 impl TextBlock {
-    /// Lays out text in a column `width` wide whose top-left corner is at `left`, `top`. A word wider than the column is broken between characters.
+    /// Lays out left-to-right text in a column `width` wide whose top-left corner is at `left`, `top`. A word wider than the column is broken between characters. The layout lays every text out with [`TextBlock::directed`]; the tests use this shorthand.
+    #[cfg(test)]
     pub(crate) fn new(text: &str, style: TextStyle, left: i64, top: i64, width: i64) -> Self {
+        Self::directed(text, style, left, top, width, LTR)
+    }
+
+    /// Lays out text in a column as [`TextBlock::new`] does, in the direction of `bidi`. In right-to-left text, the characters inside `bidi.ltr` run left to right; each line starts at the column's right edge, and white space at a line's end goes to its left end.
+    pub(crate) fn directed(
+        text: &str,
+        style: TextStyle,
+        left: i64,
+        top: i64,
+        width: i64,
+        bidi: Bidi<'_>,
+    ) -> Self {
+        let mut block = Self::broken(text, style, left, top, width);
+        if bidi.dir == TextDirection::Rtl {
+            block.rtl = true;
+            for line in &mut block.lines {
+                mirror(line, width, bidi.ltr);
+            }
+        }
+        block
+    }
+
+    /// Breaks text into left-to-right lines.
+    fn broken(text: &str, style: TextStyle, left: i64, top: i64, width: i64) -> Self {
         let mut characters = Vec::new();
         let mut offset = 0_u32;
         for character in text.chars() {
@@ -137,6 +218,7 @@ impl TextBlock {
                     x,
                     advance: step,
                     space: true,
+                    rtl: false,
                 });
                 x += step;
                 index += 1;
@@ -166,6 +248,7 @@ impl TextBlock {
                     x,
                     advance: step,
                     space: false,
+                    rtl: false,
                 });
                 x += step;
             }
@@ -179,8 +262,53 @@ impl TextBlock {
             left,
             top,
             width,
+            rtl: false,
             lines,
         }
+    }
+
+    /// The offsets at which the lines start, from 0 (spec §14.7).
+    pub(crate) fn line_starts(&self) -> Vec<u32> {
+        let mut starts: Vec<u32> = self
+            .lines
+            .iter()
+            .filter_map(|line| line.first().map(|placed| placed.start))
+            .collect();
+        if starts.first() != Some(&0) {
+            starts.insert(0, 0);
+        }
+        starts
+    }
+
+    /// The lines as hit-testing sees them, in page coordinates (spec §14.4).
+    pub(crate) fn hit_lines(&self) -> Vec<HitLine> {
+        self.lines()
+            .map(|(top, line)| {
+                let mut items: Vec<HitItem> = line
+                    .iter()
+                    .map(|placed| HitItem {
+                        left: self.left + placed.x,
+                        right: self.left + placed.x + placed.advance,
+                        start: placed.start,
+                        end: placed.end,
+                        rtl: placed.rtl,
+                    })
+                    .collect();
+                items.sort_by_key(|item| item.left);
+                HitLine {
+                    top,
+                    bottom: top + self.style.line_pitch,
+                    start: line.first().map_or(0, |placed| placed.start),
+                    // Where the caret of a line without characters stands: where the line starts.
+                    empty_x: if self.rtl {
+                        self.left + self.width
+                    } else {
+                        self.left
+                    },
+                    items,
+                }
+            })
+            .collect()
     }
 
     /// The bottom edge of the last line.
@@ -210,22 +338,26 @@ impl TextBlock {
         })
     }
 
-    /// One bar for every word, centred on its line.
+    /// One bar for every word, centred on its line; a word whose direction changes inside it gets one bar for each direction.
     pub(crate) fn shapes(&self) -> Vec<Shape> {
         let mut shapes = Vec::new();
         let bar_top = (self.style.line_pitch - self.style.bar_height) / 2;
         for (top, line) in self.lines() {
             for word in line.split(|placed| placed.space) {
-                if let (Some(first), Some(last)) = (word.first(), word.last()) {
-                    shapes.push(Shape {
-                        rect: Rect {
-                            x: self.left + first.x,
-                            y: top + bar_top,
-                            width: last.x + last.advance - first.x,
-                            height: self.style.bar_height,
-                        },
-                        color: self.style.color,
-                    });
+                for part in word.chunk_by(|one, other| one.rtl == other.rtl) {
+                    let left = part.iter().map(|placed| placed.x).min();
+                    let right = part.iter().map(|placed| placed.x + placed.advance).max();
+                    if let (Some(left), Some(right)) = (left, right) {
+                        shapes.push(Shape {
+                            rect: Rect {
+                                x: self.left + left,
+                                y: top + bar_top,
+                                width: right - left,
+                                height: self.style.bar_height,
+                            },
+                            color: self.style.color,
+                        });
+                    }
                 }
             }
         }
@@ -253,9 +385,100 @@ impl TextBlock {
     }
 }
 
+/// Lays one line out right to left in a column `width` wide: each character is mirrored from its left-to-right place, then every unbroken run of characters inside `ltr` is put back in reading order from the run's left edge, except the white space at the line's end, which runs right to left whatever it lies in (UAX #9 rule L1).
+fn mirror(line: &mut [Placed], width: i64, ltr: &[(u32, u32)]) {
+    let trailing = line.iter().rev().take_while(|placed| placed.space).count();
+    let kept = line.len() - trailing;
+    for (index, placed) in line.iter_mut().enumerate() {
+        placed.x = width - placed.x - placed.advance;
+        placed.rtl = index >= kept || !inside(ltr, placed.start, placed.end);
+    }
+    let mut index = 0;
+    while index < kept {
+        if line[index].rtl {
+            index += 1;
+            continue;
+        }
+        let end = (index..kept).find(|&next| line[next].rtl).unwrap_or(kept);
+        let mut x = line[index..end]
+            .iter()
+            .map(|placed| placed.x)
+            .min()
+            .unwrap_or(0);
+        for placed in &mut line[index..end] {
+            placed.x = x;
+            x += placed.advance;
+        }
+        index = end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lays_right_to_left_text_out_from_the_right_with_left_to_right_parts_in_reading_order() {
+        // Ten narrow characters fit on a line; "AB" (offsets 4 to 6) runs left to right inside right-to-left text. The first line is "abc AB ", the second "defg hij".
+        let a = BODY.advance;
+        let bidi = Bidi {
+            dir: TextDirection::Rtl,
+            ltr: &[(4, 6)],
+        };
+        let block = TextBlock::directed("abc AB defg hij", BODY, 0, 0, 10 * a, bidi);
+        let lefts = |line: usize| -> Vec<(u32, i64, bool)> {
+            block.lines[line]
+                .iter()
+                .map(|placed| (placed.start, placed.x, placed.rtl))
+                .collect()
+        };
+        // "abc " from the right edge leftwards, then "AB" left to right in the next two places; the space at the line's end goes to its left end and runs right to left.
+        assert_eq!(
+            lefts(0),
+            [
+                (0, 9 * a, true),
+                (1, 8 * a, true),
+                (2, 7 * a, true),
+                (3, 6 * a, true),
+                (4, 4 * a, false),
+                (5, 5 * a, false),
+                (6, 3 * a, true),
+            ]
+        );
+        assert_eq!(lefts(1)[0], (7, 9 * a, true));
+        assert_eq!(lefts(1)[7], (14, 2 * a, true));
+        assert_eq!(block.line_starts(), [0, 7]);
+        // Left-to-right text is laid out as before.
+        let plain = TextBlock::new("abc AB defg hij", BODY, 0, 0, 10 * a);
+        assert_eq!(plain.lines[0][1].x, a);
+        assert!(plain.lines.iter().flatten().all(|placed| !placed.rtl));
+    }
+
+    #[test]
+    fn hit_lines_list_characters_left_to_right_with_their_direction() {
+        let width = 10 * BODY.advance;
+        let bidi = Bidi {
+            dir: TextDirection::Rtl,
+            ltr: &[(3, 5)],
+        };
+        let block = TextBlock::directed("ab CD", BODY, 100, 50, width, bidi);
+        let lines = block.hit_lines();
+        assert_eq!(lines.len(), 1);
+        let order: Vec<(u32, bool)> = lines[0]
+            .items
+            .iter()
+            .map(|item| (item.start, item.rtl))
+            .collect();
+        // Visually from the left: "CD" left to right, the space, then "ba".
+        assert_eq!(
+            order,
+            [(3, false), (4, false), (2, true), (1, true), (0, true)]
+        );
+        assert_eq!(lines[0].items[4].right, 100 + width);
+        assert_eq!((lines[0].top, lines[0].bottom), (50, 50 + BODY.line_pitch));
+        // A word that changes direction inside it gets a bar for each direction: "ab" and "CD".
+        assert_eq!(block.shapes().len(), 2);
+    }
 
     #[test]
     fn breaks_lines_greedily_at_spaces() {
@@ -294,5 +517,16 @@ mod tests {
         assert_eq!(block.lines.len(), 1);
         assert!(block.shapes().is_empty());
         assert_eq!(block.bounds().height, BODY.line_pitch);
+        assert_eq!(block.line_starts(), [0]);
+        let lines = block.hit_lines();
+        assert_eq!((lines.len(), lines[0].start, lines[0].empty_x), (1, 0, 5));
+        assert!(lines[0].items.is_empty());
+        // Right-to-left text starts at the right edge, so its empty line's caret stands there.
+        let rtl = Bidi {
+            dir: TextDirection::Rtl,
+            ltr: &[],
+        };
+        let lines = TextBlock::directed("", BODY, 5, 7, 100, rtl).hit_lines();
+        assert_eq!((lines.len(), lines[0].empty_x), (1, 105));
     }
 }

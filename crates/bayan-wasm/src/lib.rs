@@ -29,6 +29,7 @@ use std::sync::Arc;
 use bayan_engine::blobs::{BlobId, BlobStore};
 use bayan_engine::config::Config;
 use bayan_engine::limits::{MAX_BLOB_BYTES, MAX_ID, MAX_MESSAGE_BYTES};
+use bayan_engine::protocol::CLIPBOARD_FORMATS;
 use bayan_engine::restart::{RestartAllowance, add_restart};
 use bayan_engine::{ENGINE_VERSION, Engine};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -55,6 +56,13 @@ pub fn max_blob_bytes() -> u32 {
 #[must_use]
 pub fn max_message_bytes() -> u32 {
     u32::try_from(MAX_MESSAGE_BYTES).unwrap_or(u32::MAX)
+}
+
+/// The clipboard formats that the engine reads, one per line, as `welcome.clipboard_formats` lists them (spec §14.5). Of the items of an `input.paste`, the worker host copies into the module's memory only the first of each of these formats, which is all that the engine reads, and gives every other item blob 0 without copying it.
+#[wasm_bindgen(js_name = clipboardFormats)]
+#[must_use]
+pub fn clipboard_formats() -> String {
+    CLIPBOARD_FORMATS.join("\n")
 }
 
 /// An engine inside the worker.
@@ -413,6 +421,22 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 5);
+    }
+
+    #[test]
+    fn the_clipboard_formats_are_those_that_welcome_lists() {
+        let mut engine = WasmEngine::new("").unwrap();
+        let welcome = parse(&engine.post(
+            r#"{"v":1,"id":1,"type":"hello","payload":{"protocol_versions":[1]}}"#,
+            0.0,
+        ));
+        let listed: Vec<&str> = welcome[0]["payload"]["clipboard_formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|format| format.as_str().unwrap())
+            .collect();
+        assert_eq!(clipboard_formats().split('\n').collect::<Vec<_>>(), listed);
     }
 
     #[test]

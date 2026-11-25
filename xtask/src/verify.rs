@@ -54,10 +54,11 @@ pub const DATA_FILES: [DataFiles; 11] = [
             "crates/bayan-engine/protocol/conformance/a11y-limits.json",
             "crates/bayan-engine/protocol/conformance/conformance.schema.json",
             "crates/bayan-engine/protocol/conformance/keys.json",
+            "crates/bayan-engine/protocol/conformance/text-input.json",
             "crates/bayan-engine/protocol/conformance/tile-grid.json",
         ],
         members: &["bayan-engine"],
-        reason: "the conformance vectors of engine protocol §15 and their JSON Schema (CORE-013), test cases with their expected results that both shells read too, which bayan-engine's tests validate against the schema and check, every engine case against the code and every shell case against reference implementations of their own; compiled in, so that those tests read no files and also run in WebAssembly",
+        reason: "the conformance vectors of engine protocol §15 and their JSON Schema (CORE-013, CORE-014), test cases with their expected results that both shells read too, which bayan-engine's tests validate against the schema and check, every engine case against the code and every shell case against reference implementations of their own; compiled in, so that those tests read no files and also run in WebAssembly",
     },
     DataFiles {
         files: &["crates/bayan-engine/protocol/conformance/restart.json"],

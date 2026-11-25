@@ -6,10 +6,13 @@
 //!
 //! [spec]: https://github.com/BayanDocs/docs/blob/HEAD/specs/engine-protocol.md
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The protocol version that this engine speaks, and the only one (spec §9, §14.1): every message it sends carries it in `v`, and it refuses every message with another `v` except `hello`, which it reads whatever its `v`.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -19,6 +22,9 @@ pub const LAYOUT_EPOCH: u32 = 0;
 
 /// The features that `welcome` reports.
 pub const FEATURES: [&str; 2] = ["mock_document", "record_replay"];
+
+/// The clipboard formats that the engine reads and writes, as MIME types, preferred first (spec §14.5): `welcome` lists them, `input.paste` reads only these, and `clipboard.copy` writes only these. CORE-125 adds `text/html` for copying.
+pub const CLIPBOARD_FORMATS: [&str; 1] = ["text/plain"];
 
 /// A rectangle in BLU (1/25,400 point, ADR-0005).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -343,6 +349,9 @@ pub struct Welcome {
     pub layout_epoch: u32,
     /// What this engine offers, such as `mock_document`.
     pub features: Vec<String>,
+    /// The clipboard formats that the engine reads and writes, as MIME types, preferred first (spec §14.5): `text/plain`. The engine always sends it; an engine of protocol v1 from before CORE-014 does not, and reads and writes no clipboard formats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard_formats: Option<Vec<String>>,
 }
 
 /// `doc.open`: opens a document from a blob.
@@ -725,13 +734,151 @@ pub struct InputKey {
     pub composing: bool,
 }
 
-/// `input.text`: committed text.
+/// `input.text`: committed text (spec §6.5, §14.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputText {
     /// The document.
     pub doc_id: u64,
-    /// The text, inserted at the caret.
+    /// The text. Without `replace`, it replaces the selection, or is inserted at the caret when nothing is selected; an active composition ends, and the text takes its place.
     pub text: String,
+    /// The range of a node's text that `text` replaces; the caret ends after the new text (spec §14.4). A node that does not exist is `not_found`; a node that is not editable, a range outside its text or backwards, or an end inside a surrogate pair is `invalid_request`.
+    #[serde(default)]
+    pub replace: Option<TextReplace>,
+}
+
+/// The range of a node's text that `input.text` replaces (spec §14.4), in UTF-16 code units of the node's text as the engine last sent it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TextReplace {
+    /// The accessibility node whose text it is.
+    pub node: u64,
+    /// The first code unit of the range.
+    pub start: u32,
+    /// The code unit after the range; equal to `start` to insert without replacing.
+    pub end: u32,
+}
+
+/// A position in the text of an accessibility node (spec §14.4): the node, and an offset in UTF-16 code units into its `text`, never inside a surrogate pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TextPosition {
+    /// The node.
+    pub node: u64,
+    /// The offset, in UTF-16 code units into the node's text.
+    pub offset: u32,
+}
+
+/// `input.select`: sets the selection, which is a caret where `anchor` and `focus` are equal (spec §14.4). The engine answers with `overlay.update` and `a11y.update` when the selection changes. A node that does not exist is `not_found`; a node that is not editable, or an offset beyond its node's text or inside a surrogate pair, is `invalid_request`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputSelect {
+    /// The document.
+    pub doc_id: u64,
+    /// Where the selection starts: the end that stays when it is extended.
+    pub anchor: TextPosition,
+    /// Where the selection ends: the end that moves, and where the caret is.
+    pub focus: TextPosition,
+}
+
+/// `query.hit`: asks which text position lies at a point (spec §14.4).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct QueryHit {
+    /// The document.
+    pub doc_id: u64,
+    /// The horizontal position, in device-independent pixels from the view origin, as for `input.pointer`.
+    pub x: f64,
+    /// The vertical position, in device-independent pixels from the view origin.
+    pub y: f64,
+}
+
+/// The reply to `query.hit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HitReply {
+    /// What lies at the point, or `null` when the point is on no page.
+    pub hit: Option<Hit>,
+}
+
+/// The text position at a point (spec §14.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Hit {
+    /// The accessibility node whose text the offsets are in.
+    pub node: u64,
+    /// The caret position nearest to the point: the offset at the nearer edge, in the line's visual order, of the character under or beside the point, so that in right-to-left text the right half of a character gives the offset before it.
+    pub caret: u32,
+    /// The offset of the character whose box holds the point, or `null` when the point lies on no character's box.
+    pub character: Option<u32>,
+}
+
+/// One format of a clipboard's content, as raw bytes (spec §14.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClipboardItem {
+    /// The format, as a MIME type such as `text/plain`.
+    pub mime: String,
+    /// The bytes; text formats as UTF-8.
+    pub blob: BlobRef,
+}
+
+/// `input.paste`: the content of the platform's clipboard, which the engine inserts at the selection (spec §14.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputPaste {
+    /// The document.
+    pub doc_id: u64,
+    /// The clipboard's bytes in every format that both the shell and the engine list. The engine inserts the richest format it reads and ignores the others: it keeps only the first item of each format of `welcome.clipboard_formats`, and skips every other item without storing it.
+    #[serde(deserialize_with = "readable_items")]
+    pub items: Vec<ClipboardItem>,
+}
+
+/// `clipboard.copy`: asks for the selection's content, for the platform's copy or cut action (spec §14.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClipboardCopy {
+    /// The document.
+    pub doc_id: u64,
+    /// Whether to cut: the engine also deletes the selection where the document is editable.
+    #[serde(default)]
+    pub cut: bool,
+}
+
+/// The reply to `clipboard.copy`: the selection in every format the engine writes, which the shell writes to the platform's clipboard as raw bytes; empty when nothing is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClipboardItems {
+    /// The formats, each as a blob that the shell releases.
+    pub items: Vec<ClipboardItem>,
+}
+
+/// An item of `input.paste` as the engine reads it: its format borrowed from the message where JSON allows, so that an item the engine skips costs no memory beyond its reading.
+#[derive(Deserialize)]
+struct ItemRef<'a> {
+    #[serde(borrow)]
+    mime: Cow<'a, str>,
+    blob: BlobRef,
+}
+
+/// Reads the items of `input.paste`, keeping only the first item of each format the engine reads ([`CLIPBOARD_FORMATS`]) and checking every other item's shape without storing it. A message of 16 MiB can hold about 800,000 items, and keeping them all would cost the engine several times the message's size, which in WebAssembly is never returned (spec §13).
+fn readable_items<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ClipboardItem>, D::Error> {
+    struct Items;
+
+    impl<'de> Visitor<'de> for Items {
+        type Value = Vec<ClipboardItem>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a list of clipboard items")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Self::Value, A::Error> {
+            let mut kept: Vec<ClipboardItem> = Vec::new();
+            while let Some(item) = items.next_element::<ItemRef<'de>>()? {
+                let readable = CLIPBOARD_FORMATS.contains(&item.mime.as_ref());
+                if readable && kept.iter().all(|known| known.mime != item.mime) {
+                    kept.push(ClipboardItem {
+                        mime: item.mime.into_owned(),
+                        blob: item.blob,
+                    });
+                }
+            }
+            Ok(kept)
+        }
+    }
+
+    deserializer.deserialize_seq(Items)
 }
 
 /// `input.composition`: input method composition (pre-edit text).
@@ -796,6 +943,18 @@ pub struct A11yTree {
     pub root: A11yNode,
     /// The accessibility caret, or `null`.
     pub caret: Option<A11yCaret>,
+    /// The document's selection (spec §14.7): empty when nothing is selected, so that a caret alone is no selection. The engine always sends it; an engine of protocol v1 from before CORE-014 does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Vec<A11ySelection>>,
+}
+
+/// A selected range of text (spec §14.7): from `anchor`, the end that stays when the selection is extended, to `focus`, where the caret is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct A11ySelection {
+    /// Where the selection starts.
+    pub anchor: TextPosition,
+    /// Where the selection ends, and the caret is.
+    pub focus: TextPosition,
 }
 
 /// A node of the accessibility tree.
@@ -823,6 +982,18 @@ pub struct A11yNode {
     /// The box of every character of `text`, on the page of `bounds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chars: Option<Vec<CharBox>>,
+    /// The node's language, as a BCP 47 tag, on a node that sets it; its descendants inherit it unless they set their own (spec §14.7). The document node always has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// The node's direction, on a node that sets it; its descendants inherit it unless they set their own. The document node always has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<TextDirection>,
+    /// The parts of the node's own text whose language or direction differs from the node's, in order and without overlapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<TextRun>>,
+    /// The offsets in `text` at which its lines start, as laid out, from 0 in increasing order; on every node that holds text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_starts: Option<Vec<u32>>,
     /// The number of the node's children, on a node that holds fewer than all of them (spec §14.7): the shell loads the rest with `query.a11y` and a `children` range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_count: Option<u32>,
@@ -858,6 +1029,31 @@ pub enum A11yRole {
     Cell,
 }
 
+/// The direction of text (spec §14.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TextDirection {
+    /// Left to right.
+    Ltr,
+    /// Right to left.
+    Rtl,
+}
+
+/// A part of a node's own text whose language or direction differs from the node's (spec §14.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TextRun {
+    /// The first UTF-16 code unit of the part.
+    pub start: u32,
+    /// The code unit after the part.
+    pub end: u32,
+    /// The part's language, as a BCP 47 tag, where it differs from the node's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// The part's direction, where it differs from the node's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<TextDirection>,
+}
+
 /// The box of one character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CharBox {
@@ -887,6 +1083,9 @@ pub struct A11yUpdate {
     pub changes: Vec<A11yChange>,
     /// The accessibility caret, or `null`.
     pub caret: Option<A11yCaret>,
+    /// The document's selection (spec §14.7): empty when nothing is selected. The engine always sends it; an engine of protocol v1 from before CORE-014 does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Vec<A11ySelection>>,
 }
 
 /// One change to the accessibility tree.
@@ -1172,8 +1371,8 @@ const fn event(name: &'static str, payload: SchemaFn) -> MessageSpec {
     }
 }
 
-/// Every message type that the engine implements (spec §6), in the order of the specification.
-pub const MESSAGES: [MessageSpec; 21] = [
+/// Every message type that the engine implements (spec §6), in the order of the specification, with those of spec §14.4 and §14.5 after the messages of their kind.
+pub const MESSAGES: [MessageSpec; 25] = [
     MessageSpec {
         reply_type: Some("welcome"),
         ..request("hello", schema_of::<Hello>, schema_of::<Welcome>)
@@ -1208,8 +1407,16 @@ pub const MESSAGES: [MessageSpec; 21] = [
         schema_of::<InputComposition>,
         schema_of::<Empty>,
     ),
+    request("input.select", schema_of::<InputSelect>, schema_of::<Empty>),
+    request("input.paste", schema_of::<InputPaste>, schema_of::<Empty>),
     request("query.a11y", schema_of::<QueryA11y>, schema_of::<A11yTree>),
     event("a11y.update", schema_of::<A11yUpdate>),
+    request("query.hit", schema_of::<QueryHit>, schema_of::<HitReply>),
+    request(
+        "clipboard.copy",
+        schema_of::<ClipboardCopy>,
+        schema_of::<ClipboardItems>,
+    ),
     request(
         "ui.manifest",
         schema_of::<UiManifestRequest>,

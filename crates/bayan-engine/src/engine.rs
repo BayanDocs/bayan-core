@@ -21,14 +21,15 @@ use crate::limits::{
     MAX_VIEW_COORDINATE, MAX_ZOOM, MIN_ZOOM,
 };
 use crate::manifest;
-use crate::mock::MockDocument;
+use crate::mock::{MockDocument, Selected, TextError, clipboard_text};
 use crate::protocol::{
-    A11yChange, A11yChangeKind, A11yTree, A11yUpdate, BlobRef, CompositionPhase, DiagReplay,
-    DocClose, DocOpen, DocOpened, Empty, EngineError, ErrorCode, ErrorInfo, FEATURES, FontReport,
-    Hello, InputComposition, InputKey, InputPointer, InputText, LAYOUT_EPOCH, OverlayUpdate,
-    PROTOCOL_VERSION, Platform, PointerKind, QueryA11y, RecordStopped, RenderInvalidate,
-    RenderTile, RenderTileReply, ReplayTile, Runtime, TileRequest, UiManifestRequest,
-    ViewLayoutProgress, ViewPages, ViewSet, Welcome,
+    A11yChange, A11yChangeKind, A11yTree, A11yUpdate, BlobRef, CLIPBOARD_FORMATS, ClipboardCopy,
+    ClipboardItem, ClipboardItems, CompositionPhase, DiagReplay, DocClose, DocOpen, DocOpened,
+    Empty, EngineError, ErrorCode, ErrorInfo, FEATURES, FontReport, Hello, HitReply,
+    InputComposition, InputKey, InputPaste, InputPointer, InputSelect, InputText, LAYOUT_EPOCH,
+    OverlayUpdate, PROTOCOL_VERSION, Platform, PointerKind, QueryA11y, QueryHit, RecordStopped,
+    RenderInvalidate, RenderTile, RenderTileReply, ReplayTile, Runtime, TileRequest,
+    UiManifestRequest, ViewLayoutProgress, ViewPages, ViewSet, Welcome,
 };
 use crate::raster::TileGeometry;
 use crate::recording::{self, Recorder};
@@ -263,6 +264,15 @@ fn not_found(what: &str) -> ErrorInfo {
 
 fn limit_exceeded(limit: &str) -> ErrorInfo {
     ErrorInfo::new(ErrorCode::LimitExceeded).with_text("limit", limit)
+}
+
+/// The error for a text position or range that the document refuses (spec §14.4), in a message of type `kind`.
+fn text_error(error: TextError, kind: &str) -> ErrorInfo {
+    match error {
+        TextError::NotFound => not_found("node"),
+        TextError::Invalid => invalid_request(kind),
+        TextError::TooLong => limit_exceeded("text_length"),
+    }
 }
 
 fn blob_error(error: BlobError) -> ErrorInfo {
@@ -631,7 +641,11 @@ impl Engine {
             "input.key" => self.input_key(envelope, outbox),
             "input.text" => self.input_text(envelope, outbox),
             "input.composition" => self.input_composition(envelope, outbox),
+            "input.select" => self.input_select(envelope, outbox),
+            "input.paste" => self.input_paste(envelope, outbox),
             "query.a11y" => self.query_a11y(envelope, outbox),
+            "query.hit" => self.query_hit(envelope, outbox),
+            "clipboard.copy" => self.clipboard_copy(envelope, outbox),
             "ui.manifest" => self.ui_manifest(envelope, outbox),
             "diag.record.start" => self.record_start(envelope, outbox),
             "diag.record.stop" => self.record_stop(envelope, outbox),
@@ -684,6 +698,12 @@ impl Engine {
             engine_version: ENGINE_VERSION.to_owned(),
             layout_epoch: LAYOUT_EPOCH,
             features: FEATURES.iter().map(|&feature| feature.to_owned()).collect(),
+            clipboard_formats: Some(
+                CLIPBOARD_FORMATS
+                    .iter()
+                    .map(|&format| format.to_owned())
+                    .collect(),
+            ),
         };
         outbox.reply(envelope.id, Some("welcome"), &welcome);
         Ok(())
@@ -835,8 +855,9 @@ impl Engine {
             meta: key.modifiers.meta,
         };
         // The press means what the session's bindings and document keys say, matched as a shell matches them (spec §14.3). The mock document has no formatting, files or history yet, so a binding's command changes nothing; it acts on the document keys it handles.
+        // Shift with the arrows, Home and End extends the selection (spec §14.4).
         let changed = match keys::meaning(&press, key.composing, platform, runtime) {
-            Meaning::DocumentKey(name) => document.key(name),
+            Meaning::DocumentKey(name) => document.key(name, key.modifiers.shift),
             Meaning::Command(_) | Meaning::Nothing => false,
         };
         outbox.reply(envelope.id, None, &Empty {});
@@ -854,13 +875,118 @@ impl Engine {
         let input: InputText = envelope.payload()?;
         let document = self.document(input.doc_id)?;
         let revision = document.revision();
-        let changed = document
-            .insert_text(&input.text)
-            .map_err(|_| limit_exceeded("text_length"))?;
+        // With a range, the text replaces exactly that range of a node's text; without one, the selection (spec §14.4).
+        let changed = match input.replace {
+            Some(range) => document
+                .replace_text(range.node, range.start, range.end, &input.text)
+                .map_err(|error| text_error(error, &envelope.kind))?,
+            None => document
+                .insert_text(&input.text)
+                .map_err(|_| limit_exceeded("text_length"))?,
+        };
         outbox.reply(envelope.id, None, &Empty {});
         if changed {
             line_changed(input.doc_id, document, revision, outbox);
         }
+        Ok(())
+    }
+
+    fn input_select(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
+        let select: InputSelect = envelope.payload()?;
+        let document = self.document(select.doc_id)?;
+        let revision = document.revision();
+        // As for keys, the engine answers with the overlay and the accessibility tree when the selection changed; and when a composition kept the selection from changing to another, with the selection it kept, so that the shell's mirror does not drift from it (spec §14.4).
+        let selected = document
+            .select(select.anchor, select.focus)
+            .map_err(|error| text_error(error, &envelope.kind))?;
+        outbox.reply(envelope.id, None, &Empty {});
+        if selected != Selected::Unchanged {
+            line_changed(select.doc_id, document, revision, outbox);
+        }
+        Ok(())
+    }
+
+    fn input_paste(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
+        let paste: InputPaste = envelope.payload()?;
+        self.document(paste.doc_id)?;
+        // The richest format the engine reads, in the order of `welcome.clipboard_formats`; reading the message kept no item of another format (spec §14.5).
+        let item = CLIPBOARD_FORMATS
+            .iter()
+            .find_map(|&format| paste.items.iter().find(|item| item.mime == format));
+        let text = match item {
+            Some(item) => {
+                let bytes = self.read_blob(item.blob)?;
+                Some(clipboard_text(&bytes).map_err(|_| limit_exceeded("text_length"))?)
+            }
+            None => None,
+        };
+        let document = self.document(paste.doc_id)?;
+        let revision = document.revision();
+        // Pasted text is inserted as typed text is: in place of the selection, within the editable line's limits.
+        let changed = match text {
+            Some(text) => document
+                .insert_text(&text)
+                .map_err(|_| limit_exceeded("text_length"))?,
+            None => false,
+        };
+        outbox.reply(envelope.id, None, &Empty {});
+        if changed {
+            line_changed(paste.doc_id, document, revision, outbox);
+        }
+        Ok(())
+    }
+
+    fn clipboard_copy(
+        &mut self,
+        envelope: &Envelope<'_>,
+        outbox: &mut Outbox,
+    ) -> Result<(), ErrorInfo> {
+        let copy: ClipboardCopy = envelope.payload()?;
+        let text = self.document(copy.doc_id)?.selected_text();
+        let mut items = Vec::new();
+        // Without an identifier there is no reply, so nobody could learn the blob's identifier and release it (spec §4); a cut is still carried out.
+        if !text.is_empty() && envelope.id.is_some() {
+            let blob = self
+                .blobs
+                .put_engine(text.into_bytes())
+                .map_err(blob_error)?;
+            items.push(ClipboardItem {
+                mime: CLIPBOARD_FORMATS[0].to_owned(),
+                blob: BlobRef(blob),
+            });
+        }
+        // The selection is deleted only once its copy is stored, so that a cut that fails loses nothing.
+        let document = self.document(copy.doc_id)?;
+        let revision = document.revision();
+        let changed = copy.cut && document.cut();
+        outbox.reply(envelope.id, None, &ClipboardItems { items });
+        if changed {
+            line_changed(copy.doc_id, document, revision, outbox);
+        }
+        Ok(())
+    }
+
+    fn query_hit(&mut self, envelope: &Envelope<'_>, outbox: &mut Outbox) -> Result<(), ErrorInfo> {
+        let query: QueryHit = envelope.payload()?;
+        let valid = within(query.x, -MAX_VIEW_COORDINATE, MAX_VIEW_COORDINATE)
+            && within(query.y, -MAX_VIEW_COORDINATE, MAX_VIEW_COORDINATE);
+        if !valid {
+            return Err(invalid_request(&envelope.kind));
+        }
+        let document = self.document(query.doc_id)?;
+        // Before a view.set the engine knows no zoom, so it cannot place the point on a page.
+        let reply = HitReply {
+            hit: document.hit(query.x, query.y),
+        };
+        outbox.reply(envelope.id, None, &reply);
         Ok(())
     }
 
@@ -897,7 +1023,7 @@ impl Engine {
         }
         let document = self.document(query.doc_id)?;
         // The tree within the limits of spec §14.7: flattened below level 64, and split where one message cannot hold it.
-        let (tree, caret) = document.a11y_tree_and_caret();
+        let (tree, caret, selection) = document.a11y_state();
         let root = match query.node {
             Some(id) => a11y::find(&tree, id).ok_or_else(|| not_found("node"))?,
             None => &tree,
@@ -906,6 +1032,7 @@ impl Engine {
             doc_id: query.doc_id,
             root: a11y::fill(root, caret, query.children, &Limits::PROTOCOL),
             caret,
+            selection: Some(selection),
         };
         outbox.reply(envelope.id, None, &tree);
         Ok(())
@@ -1054,13 +1181,13 @@ fn overlay(doc_id: u64, document: &MockDocument) -> OverlayUpdate {
         doc_id,
         revision: document.revision(),
         caret: Some(document.caret()),
-        selection: Vec::new(),
+        selection: document.selection_rects(),
         remote: Vec::new(),
         highlights: Vec::new(),
     }
 }
 
-/// The events after the editable line changed: the region to draw again if what the tiles show changed since the render revision `before` (a caret that only moved changes no tile, spec §14.6), the caret, and the accessibility node, within the limits of spec §14.7.
+/// The events after the editable line changed: the region to draw again if what the tiles show changed since the render revision `before` (a caret or a selection that only moved changes no tile, spec §14.6), the caret and the selection, and the accessibility node with the selection, within the limits of spec §14.7.
 fn line_changed(doc_id: u64, document: &MockDocument, before: u64, outbox: &mut Outbox) {
     let revision = document.revision();
     if revision != before {
@@ -1074,7 +1201,7 @@ fn line_changed(doc_id: u64, document: &MockDocument, before: u64, outbox: &mut 
         );
     }
     outbox.event("overlay.update", &overlay(doc_id, document));
-    let (tree, caret) = document.a11y_tree_and_caret();
+    let (tree, caret, selection) = document.a11y_state();
     let changes = a11y::find(&tree, document.editable_id())
         .map(|node| A11yChange {
             kind: A11yChangeKind::Replace,
@@ -1088,6 +1215,7 @@ fn line_changed(doc_id: u64, document: &MockDocument, before: u64, outbox: &mut 
             doc_id,
             changes,
             caret,
+            selection: Some(selection),
         },
     );
 }

@@ -20,7 +20,8 @@
         "restart",
         "tile-grid",
         "a11y-limits",
-        "keys"
+        "keys",
+        "text-input"
       ]
     },
     "cases": {
@@ -51,6 +52,12 @@
           },
           {
             "$ref": "#/$defs/KeysPressCase"
+          },
+          {
+            "$ref": "#/$defs/TextInputShellCase"
+          },
+          {
+            "$ref": "#/$defs/TextInputEngineCase"
           }
         ]
       }
@@ -1118,6 +1125,394 @@
         "manifest",
         "layout",
         "press",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "TextState": {
+      "description": "The text of the node that holds the caret, as the engine shows it, and its selection (spec §14.4): in v1's mock document its editable line, node 5, whose first heading is node 2, which is not editable. Offsets count UTF-16 code units.",
+      "type": "object",
+      "properties": {
+        "node": {
+          "description": "The node.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "text": {
+          "description": "Its committed text.",
+          "type": "string"
+        },
+        "anchor": {
+          "description": "The selection's anchor; the focus when left out.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "focus": {
+          "description": "The selection's focus, where the caret is; the end of the text when left out.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "composition": {
+          "description": "The text of an active input-method composition, shown at the caret, with the input method's caret at its end; nothing is selected while one is active. The shell mirrors the node's text with it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "TextResult": {
+      "description": "The node's text, as the engine shows it, and its selection after the case's messages; when the engine refuses the last message, its error, and the text and the selection are those of `before`.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "anchor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "focus": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "description": "The error with which the engine answers the last message.",
+          "enum": [
+            "not_found",
+            "invalid_request",
+            "limit_exceeded"
+          ]
+        },
+        "items": {
+          "description": "The items of the engine's reply to a last clipboard.copy (spec §14.5).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClipboardContent"
+          }
+        }
+      },
+      "required": [
+        "text",
+        "anchor",
+        "focus"
+      ],
+      "additionalProperties": false
+    },
+    "ClipboardContent": {
+      "description": "One format of clipboard content: its MIME type and its bytes, given as `utf8`, the text whose UTF-8 encoding they are, or as `bytes`, numbers from 0 to 255, where they are not UTF-8. In a message, the test puts the bytes in a blob and names it in the item's `blob` (spec §14.5).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mime": {
+              "type": "string"
+            },
+            "utf8": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mime",
+            "utf8"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mime": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          },
+          "required": [
+            "mime",
+            "bytes"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TextMessage": {
+      "description": "A message that a shell sends, as its type and payload, without the envelope's `v` and `id` and without the payload's `doc_id`, which a test adds (spec §4). The items of an input.paste hold their bytes as ClipboardContent does.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "input.text",
+            "input.select",
+            "input.key",
+            "input.composition",
+            "input.paste",
+            "clipboard.copy"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "type",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "PlatformEdit": {
+      "description": "What the platform asks a shell for, in UTF-16 code units of the text the shell mirrors, which is the node's text as the engine shows it (spec §14.4).",
+      "oneOf": [
+        {
+          "description": "A range that `text` replaces, as an EditContext's update range, a beforeinput event's target range or a text interface's replaceText gives it.",
+          "type": "object",
+          "properties": {
+            "replace": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            "text": {
+              "description": "The new text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "replace",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A range relative to the caret, as Qt's input-method event gives it while nothing is composed: it starts `from` code units after the caret, or before it when negative, and is `length` code units long.",
+          "type": "object",
+          "properties": {
+            "replace_from_caret": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "integer"
+                },
+                "length": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "from",
+                "length"
+              ],
+              "additionalProperties": false
+            },
+            "text": {
+              "description": "The new text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "replace_from_caret",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "An offset at which `text` is inserted, as a text interface's insertText gives it.",
+          "type": "object",
+          "properties": {
+            "insert": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "text": {
+              "description": "The new text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "insert",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A range that is deleted, as a text interface's deleteText or a beforeinput deletion gives it.",
+          "type": "object",
+          "properties": {
+            "delete": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "delete"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A selection, with its anchor and its focus, as a screen reader or the user makes it in the mirror.",
+          "type": "object",
+          "properties": {
+            "select": {
+              "type": "object",
+              "properties": {
+                "anchor": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "focus": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "anchor",
+                "focus"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A caret position, as a text interface's setCursorPosition sets it.",
+          "type": "object",
+          "properties": {
+            "caret": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "caret"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TextInputShellCase": {
+      "description": "A platform's edit of the text that a shell mirrors, the message the shell sends for it (spec §14.4), and the text and the selection after the engine has handled that message.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`shell`: a shell sends the message of `send` for the edit of `platform`, with the text and the selection of `before` mirrored; `engine`: the engine, with the text and the selection of `before`, handles that message as `expect` says.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "shell",
+              "engine"
+            ]
+          }
+        },
+        "before": {
+          "$ref": "#/$defs/TextState"
+        },
+        "platform": {
+          "$ref": "#/$defs/PlatformEdit"
+        },
+        "send": {
+          "$ref": "#/$defs/TextMessage"
+        },
+        "expect": {
+          "$ref": "#/$defs/TextResult"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "before",
+        "platform",
+        "send",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "TextInputEngineCase": {
+      "description": "Messages that change a node's text or selection, or copy it (spec §14.4, §14.5), which the engine handles in order, with the text and the selection afterwards.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The case's identifier: lower-case letters and digits, words joined by hyphens. It is never reused; a removed case's identifier goes into `removed`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the case shows, in words.",
+          "type": "string"
+        },
+        "for": {
+          "description": "`engine`: the engine passes it.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "engine"
+            ]
+          }
+        },
+        "before": {
+          "$ref": "#/$defs/TextState"
+        },
+        "steps": {
+          "description": "The messages, in order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TextMessage"
+          }
+        },
+        "expect": {
+          "$ref": "#/$defs/TextResult"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "for",
+        "before",
+        "steps",
         "expect"
       ],
       "additionalProperties": false

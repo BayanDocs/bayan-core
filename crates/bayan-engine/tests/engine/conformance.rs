@@ -1,4 +1,4 @@
-//! The conformance vectors of `crates/bayan-engine/protocol/conformance/` (spec §15, CORE-013): every `engine` and `binding` case is checked against the code, and every expected result of a `shell` case against a reference implementation written here, independently of the code under test, so that a wrong expectation fails in bayan-core before it reaches a shell.
+//! The conformance vectors of `crates/bayan-engine/protocol/conformance/` (spec §15, CORE-013, CORE-014): every `engine` and `binding` case is checked against the code, and every expected result of a `shell` case against a reference implementation written here, independently of the code under test, so that a wrong expectation fails in bayan-core before it reaches a shell; the expected results of `text-input.json`'s engine cases are checked against a reference model of the editable line too.
 //!
 //! The files are compiled in (`DATA_FILES` in `xtask/src/verify.rs`), so these tests read no files and also run in WebAssembly, except those that start the native engine thread.
 
@@ -18,13 +18,15 @@ const RESTART: &str = include_str!("../../protocol/conformance/restart.json");
 const TILE_GRID: &str = include_str!("../../protocol/conformance/tile-grid.json");
 const A11Y_LIMITS: &str = include_str!("../../protocol/conformance/a11y-limits.json");
 const KEYS: &str = include_str!("../../protocol/conformance/keys.json");
+const TEXT_INPUT: &str = include_str!("../../protocol/conformance/text-input.json");
 
-/// The four files of the first set, by area.
-const FILES: [(&str, &str); 4] = [
+/// The files, by area: the four of the first set (CORE-013) and `text-input.json` (CORE-014).
+const FILES: [(&str, &str); 5] = [
     ("restart", RESTART),
     ("tile-grid", TILE_GRID),
     ("a11y-limits", A11Y_LIMITS),
     ("keys", KEYS),
+    ("text-input", TEXT_INPUT),
 ];
 
 fn parse(text: &str) -> Value {
@@ -466,6 +468,10 @@ fn paragraph(id: u64, text: String) -> A11yNode {
         editable: false,
         bounds: None,
         chars: None,
+        lang: None,
+        dir: None,
+        runs: None,
+        line_starts: None,
         child_count: None,
         children_start: None,
         children: None,
@@ -835,6 +841,480 @@ fn the_binding_cases_follow_one_rule() {
             "{}",
             case["id"]
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// text-input.json (spec §14.4, §14.5)
+// ---------------------------------------------------------------------------------------------
+
+/// The node of the cases: the mock document's editable line, the only text that holds a caret in v1.
+const EDITABLE: u64 = 5;
+
+/// The UTF-16 code units of a string.
+fn units(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+/// A count of UTF-16 code units from a case.
+fn count(value: &Value) -> usize {
+    usize::try_from(value.as_u64().unwrap()).unwrap()
+}
+
+/// Text as the mock document's editable line takes it: without control characters and the line and paragraph separators, which one line cannot hold (bayan-engine's documentation).
+fn cleaned(text: &str) -> Vec<u16> {
+    let kept: String = text
+        .chars()
+        .filter(|&character| {
+            !character.is_control() && !matches!(character, '\u{2028}' | '\u{2029}')
+        })
+        .collect();
+    units(&kept)
+}
+
+/// The bytes of a clipboard item of a case (`ClipboardContent`).
+fn content_bytes(item: &Value) -> Vec<u8> {
+    match item.get("utf8") {
+        Some(text) => text.as_str().unwrap().as_bytes().to_vec(),
+        None => item["bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+            .collect(),
+    }
+}
+
+/// A reference model of the node that holds the caret, written apart from the engine from spec §14.4 and §14.5 and the mock document's rules for its editable line: its text as shown, in UTF-16 code units, the selection, and the range of an active composition, inside which the input method's caret is at the end.
+#[derive(Debug, Clone, PartialEq)]
+struct Model {
+    text: Vec<u16>,
+    anchor: usize,
+    focus: usize,
+    composition: Option<(usize, usize)>,
+}
+
+impl Model {
+    /// The text and the selection of a case's `before`.
+    fn from_before(before: &Value) -> Self {
+        let committed = units(before["text"].as_str().unwrap());
+        let focus = before.get("focus").map_or(committed.len(), count);
+        let anchor = before.get("anchor").map_or(focus, count);
+        let Some(composition) = before.get("composition") else {
+            return Self {
+                text: committed,
+                anchor,
+                focus,
+                composition: None,
+            };
+        };
+        assert_eq!(anchor, focus, "nothing is selected while composing");
+        let composed = units(composition.as_str().unwrap());
+        let end = focus + composed.len();
+        Self {
+            text: [&committed[..focus], &composed, &committed[focus..]].concat(),
+            anchor: end,
+            focus: end,
+            composition: Some((focus, end)),
+        }
+    }
+
+    /// Whether an offset lies between characters of the text: not beyond it, and not between the two code units of a surrogate pair.
+    fn boundary(&self, offset: usize) -> bool {
+        offset <= self.text.len()
+            && !self
+                .text
+                .get(offset)
+                .is_some_and(|&unit| (0xDC00..=0xDFFF).contains(&unit))
+    }
+
+    /// The selection as a range.
+    fn selected(&self) -> (usize, usize) {
+        (self.anchor.min(self.focus), self.anchor.max(self.focus))
+    }
+
+    /// The start of the character before an offset.
+    fn previous(&self, offset: usize) -> usize {
+        let low = offset >= 2 && (0xDC00..=0xDFFF).contains(&self.text[offset - 1]);
+        offset.saturating_sub(if low { 2 } else { 1 })
+    }
+
+    /// The end of the character after an offset.
+    fn next(&self, offset: usize) -> usize {
+        match self.text.get(offset) {
+            Some(unit) if (0xD800..=0xDBFF).contains(unit) => offset + 2,
+            Some(_) => offset + 1,
+            None => offset,
+        }
+    }
+
+    /// Replaces the range `start` to `end` with `new`, ends a composition and drops what of its text lies outside the range; the caret ends after the new text, with nothing selected. The line holds at most 1,024 code units.
+    fn splice(&mut self, start: usize, end: usize, new: &[u16]) -> Result<(), &'static str> {
+        let composed = |index: &usize| {
+            self.composition
+                .is_some_and(|(from, to)| (from..to).contains(index))
+        };
+        let keep = |range: std::ops::Range<usize>| -> Vec<u16> {
+            range
+                .filter(|index| !composed(index))
+                .map(|index| self.text[index])
+                .collect()
+        };
+        let (before, after) = (keep(0..start), keep(end..self.text.len()));
+        if before.len() + new.len() + after.len() > 1024 {
+            return Err("limit_exceeded");
+        }
+        self.focus = before.len() + new.len();
+        self.anchor = self.focus;
+        self.text = [before, new.to_vec(), after].concat();
+        self.composition = None;
+        Ok(())
+    }
+
+    /// Typing or pasting: the text replaces an active composition, or the selection; text that is empty once cleaned changes nothing, except that a composition ends.
+    fn type_text(&mut self, new: &[u16]) -> Result<(), &'static str> {
+        if let Some((start, end)) = self.composition {
+            return self.splice(start, end, new);
+        }
+        if new.is_empty() {
+            return Ok(());
+        }
+        let (start, end) = self.selected();
+        self.splice(start, end, new)
+    }
+
+    /// An editing key; while composing, the input method owns it.
+    fn key(&mut self, key: &str, shift: bool) {
+        if self.composition.is_some() {
+            return;
+        }
+        let (start, end) = self.selected();
+        let length = self.text.len();
+        let outcome = match key {
+            "Backspace" | "Delete" if start < end => self.splice(start, end, &[]),
+            "Backspace" => self.splice(self.previous(self.focus), self.focus, &[]),
+            "Delete" => self.splice(self.focus, self.next(self.focus), &[]),
+            "ArrowLeft" | "ArrowRight" | "Home" | "End" => {
+                let to = match key {
+                    "ArrowLeft" if !shift && start < end => start,
+                    "ArrowRight" if !shift && start < end => end,
+                    "ArrowLeft" => self.previous(self.focus),
+                    "ArrowRight" => self.next(self.focus),
+                    "Home" => 0,
+                    _ => length,
+                };
+                self.focus = to;
+                if !shift {
+                    self.anchor = to;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        };
+        outcome.unwrap();
+    }
+
+    /// Checks the nodes of a text position or range: one that does not exist is `not_found`, one that is not the editable line `invalid_request` (spec §14.4).
+    fn nodes(nodes: &BTreeSet<u64>, named: &[&Value]) -> Result<(), &'static str> {
+        let ids: Vec<u64> = named.iter().map(|node| node.as_u64().unwrap()).collect();
+        if ids.iter().any(|id| !nodes.contains(id)) {
+            return Err("not_found");
+        }
+        if ids.iter().any(|&id| id != EDITABLE) {
+            return Err("invalid_request");
+        }
+        Ok(())
+    }
+
+    /// Handles a message of a case as spec §14.4 and §14.5 say; returns the items of a `clipboard.copy`'s reply, as a case writes them, or the error.
+    fn handle(
+        &mut self,
+        message: &Value,
+        nodes: &BTreeSet<u64>,
+    ) -> Result<Option<Value>, &'static str> {
+        let payload = &message["payload"];
+        match message["type"].as_str().unwrap() {
+            "input.text" => {
+                let new = cleaned(payload["text"].as_str().unwrap());
+                let Some(range) = payload.get("replace") else {
+                    return self.type_text(&new).map(|()| None);
+                };
+                Self::nodes(nodes, &[&range["node"]])?;
+                let (start, end) = (count(&range["start"]), count(&range["end"]));
+                if !(self.boundary(start) && self.boundary(end) && start <= end) {
+                    return Err("invalid_request");
+                }
+                self.splice(start, end, &new).map(|()| None)
+            }
+            "input.select" => {
+                let (anchor, focus) = (&payload["anchor"], &payload["focus"]);
+                Self::nodes(nodes, &[&anchor["node"], &focus["node"]])?;
+                let (anchor, focus) = (count(&anchor["offset"]), count(&focus["offset"]));
+                if !(self.boundary(anchor) && self.boundary(focus)) {
+                    return Err("invalid_request");
+                }
+                if self.composition.is_none() {
+                    (self.anchor, self.focus) = (anchor, focus);
+                }
+                Ok(None)
+            }
+            "input.key" => {
+                let shift = payload["modifiers"]["shift"] == json!(true);
+                self.key(payload["key"].as_str().unwrap(), shift);
+                Ok(None)
+            }
+            "input.composition" => {
+                assert_eq!(payload["phase"], json!("start"));
+                let (start, end) = self.selected();
+                self.splice(start, end, &[])?;
+                self.composition = Some((self.focus, self.focus));
+                Ok(None)
+            }
+            "input.paste" => {
+                let plain = payload["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["mime"] == json!("text/plain"));
+                match plain {
+                    Some(item) => {
+                        let text = String::from_utf8_lossy(&content_bytes(item)).into_owned();
+                        self.type_text(&cleaned(&text)).map(|()| None)
+                    }
+                    None => Ok(None),
+                }
+            }
+            "clipboard.copy" => {
+                let (start, end) = self.selected();
+                if start == end {
+                    return Ok(Some(json!([])));
+                }
+                let text = String::from_utf16(&self.text[start..end]).unwrap();
+                if payload["cut"] == json!(true) {
+                    self.splice(start, end, &[])?;
+                }
+                Ok(Some(json!([{ "mime": "text/plain", "utf8": text }])))
+            }
+            other => panic!("a message the cases do not use: {other}"),
+        }
+    }
+
+    /// The result of a case as `expect` writes it.
+    fn result(&self, outcome: Result<Option<Value>, &str>) -> Value {
+        let mut result = json!({
+            "text": String::from_utf16(&self.text).unwrap(),
+            "anchor": self.anchor,
+            "focus": self.focus,
+        });
+        match outcome {
+            Err(code) => result["error"] = json!(code),
+            Ok(Some(items)) => result["items"] = items,
+            Ok(None) => {}
+        }
+        result
+    }
+}
+
+/// The reference shell (spec §14.4): the message a shell sends for a platform's edit of the text it mirrors, the node's text as the engine shows it. Ranges count UTF-16 code units of that text; a range relative to the caret counts from it.
+fn reference_shell(case: &Value) -> Value {
+    let before = &case["before"];
+    let node = before["node"].clone();
+    let model = Model::from_before(before);
+    let platform = &case["platform"];
+    let replace = |text: &Value, start: i64, end: i64| json!({ "type": "input.text", "payload": { "text": text, "replace": { "node": node, "start": start, "end": end } } });
+    let select = |anchor: &Value, focus: &Value| json!({ "type": "input.select", "payload": { "anchor": { "node": node, "offset": anchor }, "focus": { "node": node, "offset": focus } } });
+    let number = |value: &Value| value.as_i64().unwrap();
+    if let Some(range) = platform.get("replace") {
+        return replace(
+            &platform["text"],
+            number(&range["start"]),
+            number(&range["end"]),
+        );
+    }
+    if let Some(relative) = platform.get("replace_from_caret") {
+        let start = i64::try_from(model.focus).unwrap() + number(&relative["from"]);
+        return replace(
+            &platform["text"],
+            start,
+            start + number(&relative["length"]),
+        );
+    }
+    if let Some(offset) = platform.get("insert") {
+        return replace(&platform["text"], number(offset), number(offset));
+    }
+    if let Some(range) = platform.get("delete") {
+        return replace(&json!(""), number(&range["start"]), number(&range["end"]));
+    }
+    if let Some(selection) = platform.get("select") {
+        return select(&selection["anchor"], &selection["focus"]);
+    }
+    let caret = &platform["caret"];
+    select(caret, caret)
+}
+
+/// The messages of a case for the engine: the shell's message of a shell case, or the steps.
+fn case_messages(case: &Value) -> Vec<Value> {
+    case.get("steps").map_or_else(
+        || vec![case["send"].clone()],
+        |steps| steps.as_array().unwrap().clone(),
+    )
+}
+
+/// The identifiers of every node of the mock document.
+fn node_ids() -> BTreeSet<u64> {
+    fn walk(node: &Value, ids: &mut BTreeSet<u64>) {
+        ids.insert(node["id"].as_u64().unwrap());
+        for child in node["children"].as_array().into_iter().flatten() {
+            walk(child, ids);
+        }
+    }
+    let mut engine = engine();
+    let doc_id = crate::support::open_document(&mut engine);
+    let answers = send(
+        &mut engine,
+        &request(3, "query.a11y", json!({ "doc_id": doc_id })),
+    );
+    let mut ids = BTreeSet::new();
+    walk(&ok_payload(&answers, 3)["root"], &mut ids);
+    ids
+}
+
+/// Runs a case against the engine: puts the text, the selection and the composition of `before` in the mock document's editable line, sends the messages, and returns the line's text and selection afterwards as `expect` writes them, with the last message's error or clipboard items.
+fn engine_result(case: &Value) -> Value {
+    let before = &case["before"];
+    assert_eq!(before["node"], json!(EDITABLE));
+    let mut engine = engine();
+    let doc_id = crate::support::open_document(&mut engine);
+    let text = before["text"].as_str().unwrap();
+    send(
+        &mut engine,
+        &request(3, "input.text", json!({ "doc_id": doc_id, "text": text })),
+    );
+    let focus = before.get("focus").map_or(units(text).len(), count);
+    let anchor = before.get("anchor").map_or(focus, count);
+    let at = |offset: usize| json!({ "node": EDITABLE, "offset": offset });
+    let answers = send(
+        &mut engine,
+        &request(
+            4,
+            "input.select",
+            json!({ "doc_id": doc_id, "anchor": at(anchor), "focus": at(focus) }),
+        ),
+    );
+    ok_payload(&answers, 4);
+    if let Some(composition) = before.get("composition") {
+        send(
+            &mut engine,
+            &request(
+                5,
+                "input.composition",
+                json!({ "doc_id": doc_id, "phase": "start" }),
+            ),
+        );
+        send(
+            &mut engine,
+            &request(
+                6,
+                "input.composition",
+                json!({ "doc_id": doc_id, "phase": "update", "text": composition }),
+            ),
+        );
+    }
+    let mut outcome = Ok(None);
+    for (index, message) in case_messages(case).iter().enumerate() {
+        let id = 100 + u64::try_from(index).unwrap();
+        let mut payload = message["payload"].clone();
+        payload["doc_id"] = json!(doc_id);
+        if let Some(items) = payload.get_mut("items").and_then(Value::as_array_mut) {
+            for item in items {
+                let blob = engine.blobs().put_shell(&content_bytes(item)).unwrap();
+                *item = json!({ "mime": item["mime"], "blob": blob });
+            }
+        }
+        let kind = message["type"].as_str().unwrap();
+        let answers = send(&mut engine, &request(id, kind, payload));
+        let reply = crate::support::reply_to(&answers, id).clone();
+        outcome = if reply["ok"] == json!(true) {
+            let items = reply["payload"].get("items").map(|items| {
+                let taken: Vec<Value> = items
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| {
+                        let bytes = engine.blobs().take(item["blob"].as_u64().unwrap()).unwrap();
+                        json!({ "mime": item["mime"], "utf8": String::from_utf8(bytes.to_vec()).unwrap() })
+                    })
+                    .collect();
+                json!(taken)
+            });
+            Ok(items)
+        } else {
+            Err(reply["error"]["code"].as_str().unwrap().to_owned())
+        };
+    }
+    let answers = send(
+        &mut engine,
+        &request(
+            99,
+            "query.a11y",
+            json!({ "doc_id": doc_id, "node": EDITABLE }),
+        ),
+    );
+    let tree = ok_payload(&answers, 99);
+    let caret = tree["caret"]["offset"].clone();
+    let (anchor, focus) = match tree["selection"].as_array().unwrap().first() {
+        Some(selection) => (
+            selection["anchor"]["offset"].clone(),
+            selection["focus"]["offset"].clone(),
+        ),
+        None => (caret.clone(), caret),
+    };
+    let mut result = json!({ "text": tree["root"]["text"], "anchor": anchor, "focus": focus });
+    match outcome {
+        Err(code) => result["error"] = json!(code),
+        Ok(Some(items)) => result["items"] = items,
+        Ok(None) => {}
+    }
+    result
+}
+
+#[test]
+fn a_reference_shell_sends_the_message_that_the_text_input_cases_name() {
+    let file = parse(TEXT_INPUT);
+    let cases = cases_for(&file, "shell");
+    assert!(cases.len() >= 6);
+    for case in cases {
+        assert_eq!(reference_shell(&case), case["send"], "{}", case["id"]);
+    }
+}
+
+#[test]
+fn a_reference_model_of_the_editable_line_gives_every_expected_result() {
+    let file = parse(TEXT_INPUT);
+    let nodes = node_ids();
+    assert!(nodes.contains(&EDITABLE) && nodes.contains(&2) && !nodes.contains(&999_999));
+    for case in cases_for(&file, "engine") {
+        let mut model = Model::from_before(&case["before"]);
+        let mut outcome = Ok(None);
+        for message in case_messages(&case) {
+            let before = model.clone();
+            outcome = model.handle(&message, &nodes);
+            // A refused message changes nothing.
+            if outcome.is_err() {
+                assert_eq!(model, before, "{}", case["id"]);
+            }
+        }
+        assert_eq!(model.result(outcome), case["expect"], "{}", case["id"]);
+    }
+}
+
+#[test]
+fn the_engine_handles_the_text_input_cases_as_they_say() {
+    let file = parse(TEXT_INPUT);
+    let cases = cases_for(&file, "engine");
+    assert!(cases.len() >= 25);
+    for case in cases {
+        assert_eq!(engine_result(&case), case["expect"], "{}", case["id"]);
     }
 }
 

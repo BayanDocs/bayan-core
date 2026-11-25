@@ -1,11 +1,15 @@
 //! The fixed content of the mock document: its blocks, in reading order.
 
+use crate::protocol::TextDirection;
+
 /// A block of the mock document.
 pub(crate) enum Block {
     /// A heading of the given level.
     Heading(u8, &'static str),
     /// A paragraph.
     Paragraph(&'static str),
+    /// A paragraph in a language and direction of its own, with parts in another language (spec §14.7).
+    Foreign(&'static Foreign),
     /// The editable line, which shows the text the shell sends (`input.text`, `input.composition`).
     Editable,
     /// A bulleted list.
@@ -16,11 +20,55 @@ pub(crate) enum Block {
     PageBreak,
 }
 
+/// A paragraph whose language and direction differ from the document's.
+pub(crate) struct Foreign {
+    /// The paragraph's language, as a BCP 47 tag.
+    pub(crate) lang: &'static str,
+    /// The paragraph's direction.
+    pub(crate) dir: TextDirection,
+    /// The text, in parts, in reading order.
+    pub(crate) parts: &'static [Part],
+}
+
+/// A part of a [`Foreign`] paragraph's text.
+pub(crate) struct Part {
+    /// The text.
+    pub(crate) text: &'static str,
+    /// The part's language and direction where they differ from the paragraph's: a run of the paragraph's accessibility node (spec §14.7).
+    pub(crate) run: Option<(&'static str, TextDirection)>,
+}
+
 /// The accessible name of the editable line.
 pub(crate) const EDITABLE_NAME: &str = "Editable line";
 
 /// The accessible name of the document.
 pub(crate) const DOCUMENT_NAME: &str = "BayanDocs mock document";
+
+/// The document's language, which every node inherits unless it sets its own (spec §14.7).
+pub(crate) const DOCUMENT_LANG: &str = "en";
+
+/// The document's direction, which every node inherits unless it sets its own.
+pub(crate) const DOCUMENT_DIR: TextDirection = TextDirection::Ltr;
+
+/// The paragraph in Arabic, right to left, with an English phrase, left to right, in the middle of its first line, so that both shells can test language, direction and runs end to end (CORE-014). It says: "This paragraph is written from right to left, and in it is the phrase Hello, world in English, which a screen reader reads in another voice." It is drawn as bars like the rest, laid out from the right; every character is in the Basic Multilingual Plane, so its offsets are its characters.
+pub(crate) const ARABIC: Foreign = Foreign {
+    lang: "ar",
+    dir: TextDirection::Rtl,
+    parts: &[
+        Part {
+            text: "هذه الفقرة مكتوبة من اليمين إلى اليسار، وفيها عبارة ",
+            run: None,
+        },
+        Part {
+            text: "Hello, world",
+            run: Some(("en", TextDirection::Ltr)),
+        },
+        Part {
+            text: " بالإنجليزية يقرؤها قارئ الشاشة بصوت آخر.",
+            run: None,
+        },
+    ],
+};
 
 /// The blocks, in reading order. The text is read by screen readers through the accessibility tree; on the page it is drawn as grey bars until the text pipeline exists (CORE-003).
 pub(crate) const BLOCKS: &[Block] = &[
@@ -72,5 +120,6 @@ pub(crate) const BLOCKS: &[Block] = &[
     Block::Paragraph(
         "The page size is US Letter, eight and a half by eleven inches, with margins of one inch.",
     ),
+    Block::Foreign(&ARABIC),
     Block::Paragraph("This is the end of the mock document."),
 ];

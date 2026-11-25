@@ -17,7 +17,11 @@ export interface Requests {
   "input.key": InputKey;
   "input.text": InputText;
   "input.composition": InputComposition;
+  "input.select": InputSelect;
+  "input.paste": InputPaste;
   "query.a11y": QueryA11y;
+  "query.hit": QueryHit;
+  "clipboard.copy": ClipboardCopy;
   "ui.manifest": UiManifestRequest;
   "diag.record.start": Empty;
   "diag.record.stop": Empty;
@@ -36,7 +40,11 @@ export interface Replies {
   "input.key": Empty;
   "input.text": Empty;
   "input.composition": Empty;
+  "input.select": Empty;
+  "input.paste": Empty;
   "query.a11y": A11yTree;
+  "query.hit": HitReply;
+  "clipboard.copy": ClipboardItems;
   "ui.manifest": UiManifest;
   "diag.record.start": Empty;
   "diag.record.stop": RecordStopped;
@@ -167,22 +175,38 @@ export interface A11yNode {
   children?: A11yNode[] | null;
   /** The index of the first child that the node holds, on a node that holds some but not all of its children; they are always one unbroken run. */
   children_start?: number | null;
+  /** The node's direction, on a node that sets it; its descendants inherit it unless they set their own. The document node always has it. */
+  dir?: TextDirection | null;
   /** Whether the user can edit the node's text. */
   editable?: boolean;
   /** The node's identifier, stable for its lifetime. */
   id: number;
+  /** The node's language, as a BCP 47 tag, on a node that sets it; its descendants inherit it unless they set their own (spec §14.7). The document node always has it. */
+  lang?: string | null;
   /** A heading's level, 1 to 9. */
   level?: number | null;
+  /** The offsets in `text` at which its lines start, as laid out, from 0 in increasing order; on every node that holds text. */
+  line_starts?: number[] | null;
   /** An accessible name where the content does not provide one. */
   name?: string | null;
   /** The node's role. */
   role: A11yRole;
+  /** The parts of the node's own text whose language or direction differs from the node's, in order and without overlapping. */
+  runs?: TextRun[] | null;
   /** The node's own text, on nodes that hold text. */
   text?: string | null;
 }
 
 /** The role of an accessibility node. */
 export type A11yRole = "document" | "heading" | "paragraph" | "list" | "list_item" | "table" | "row" | "column_header" | "cell";
+
+/** A selected range of text (spec §14.7): from `anchor`, the end that stays when the selection is extended, to `focus`, where the caret is. */
+export interface A11ySelection {
+  /** Where the selection starts. */
+  anchor: TextPosition;
+  /** Where the selection ends, and the caret is. */
+  focus: TextPosition;
+}
 
 /** The reply to `query.a11y`. */
 export interface A11yTree {
@@ -192,6 +216,8 @@ export interface A11yTree {
   doc_id: number;
   /** The requested subtree. */
   root: A11yNode;
+  /** The document's selection (spec §14.7): empty when nothing is selected, so that a caret alone is no selection. The engine always sends it; an engine of protocol v1 from before CORE-014 does not. */
+  selection?: A11ySelection[] | null;
 }
 
 /** `a11y.update`: changes to the accessibility tree. */
@@ -202,6 +228,8 @@ export interface A11yUpdate {
   changes: A11yChange[];
   /** The document. */
   doc_id: number;
+  /** The document's selection (spec §14.7): empty when nothing is selected. The engine always sends it; an engine of protocol v1 from before CORE-014 does not. */
+  selection?: A11ySelection[] | null;
 }
 
 /** One value in the `args` of an error or warning: only codes and numbers, never document content (spec §12). */
@@ -246,6 +274,28 @@ export interface ChildRange {
   count: number;
   /** The index of the first child, counting from 0. */
   start: number;
+}
+
+/** `clipboard.copy`: asks for the selection's content, for the platform's copy or cut action (spec §14.5). */
+export interface ClipboardCopy {
+  /** Whether to cut: the engine also deletes the selection where the document is editable. */
+  cut?: boolean;
+  /** The document. */
+  doc_id: number;
+}
+
+/** One format of a clipboard's content, as raw bytes (spec §14.5). */
+export interface ClipboardItem {
+  /** The bytes; text formats as UTF-8. */
+  blob: BlobRef;
+  /** The format, as a MIME type such as `text/plain`. */
+  mime: string;
+}
+
+/** The reply to `clipboard.copy`: the selection in every format the engine writes, which the shell writes to the platform's clipboard as raw bytes; empty when nothing is selected. */
+export interface ClipboardItems {
+  /** The formats, each as a blob that the shell releases. */
+  items: ClipboardItem[];
 }
 
 /** The phase of an input method composition. */
@@ -345,6 +395,22 @@ export interface Hello {
   theme?: string | null;
 }
 
+/** The text position at a point (spec §14.4). */
+export interface Hit {
+  /** The caret position nearest to the point: the offset at the nearer edge, in the line's visual order, of the character under or beside the point, so that in right-to-left text the right half of a character gives the offset before it. */
+  caret: number;
+  /** The offset of the character whose box holds the point, or `null` when the point lies on no character's box. */
+  character: number | null;
+  /** The accessibility node whose text the offsets are in. */
+  node: number;
+}
+
+/** The reply to `query.hit`. */
+export interface HitReply {
+  /** What lies at the point, or `null` when the point is on no page. */
+  hit: Hit | null;
+}
+
 /** An `ImageBitmap` transferred from the web worker (spec §3.2); only in the TypeScript declarations. */
 export type ImageBitmapRef = ImageBitmap;
 
@@ -376,6 +442,14 @@ export interface InputKey {
   repeat?: boolean;
 }
 
+/** `input.paste`: the content of the platform's clipboard, which the engine inserts at the selection (spec §14.5). */
+export interface InputPaste {
+  /** The document. */
+  doc_id: number;
+  /** The clipboard's bytes in every format that both the shell and the engine list. The engine inserts the richest format it reads and ignores the others: it keeps only the first item of each format of `welcome.clipboard_formats`, and skips every other item without storing it. */
+  items: ClipboardItem[];
+}
+
 /** `input.pointer`: a mouse, pen or touch event. */
 export interface InputPointer {
   /** The button, numbered as the DOM's `button`: 0 is the primary button. */
@@ -396,11 +470,23 @@ export interface InputPointer {
   y: number;
 }
 
-/** `input.text`: committed text. */
+/** `input.select`: sets the selection, which is a caret where `anchor` and `focus` are equal (spec §14.4). The engine answers with `overlay.update` and `a11y.update` when the selection changes. A node that does not exist is `not_found`; a node that is not editable, or an offset beyond its node's text or inside a surrogate pair, is `invalid_request`. */
+export interface InputSelect {
+  /** Where the selection starts: the end that stays when it is extended. */
+  anchor: TextPosition;
+  /** The document. */
+  doc_id: number;
+  /** Where the selection ends: the end that moves, and where the caret is. */
+  focus: TextPosition;
+}
+
+/** `input.text`: committed text (spec §6.5, §14.4). */
 export interface InputText {
   /** The document. */
   doc_id: number;
-  /** The text, inserted at the caret. */
+  /** The range of a node's text that `text` replaces; the caret ends after the new text (spec §14.4). A node that does not exist is `not_found`; a node that is not editable, a range outside its text or backwards, or an end inside a surrogate pair is `invalid_request`. */
+  replace?: TextReplace | null;
+  /** The text. Without `replace`, it replaces the selection, or is inserted at the caret when nothing is selected; an active composition ends, and the text takes its place. */
   text: string;
 }
 
@@ -491,6 +577,16 @@ export interface QueryA11y {
   doc_id: number;
   /** The node whose subtree to return; the whole document when omitted. */
   node?: number | null;
+}
+
+/** `query.hit`: asks which text position lies at a point (spec §14.4). */
+export interface QueryHit {
+  /** The document. */
+  doc_id: number;
+  /** The horizontal position, in device-independent pixels from the view origin, as for `input.pointer`. */
+  x: number;
+  /** The vertical position, in device-independent pixels from the view origin. */
+  y: number;
 }
 
 /** The reply to `diag.record.stop`. */
@@ -651,11 +747,44 @@ export interface ShellInfo {
   version?: string;
 }
 
+/** The direction of text (spec §14.7). */
+export type TextDirection = "ltr" | "rtl";
+
+/** A position in the text of an accessibility node (spec §14.4): the node, and an offset in UTF-16 code units into its `text`, never inside a surrogate pair. */
+export interface TextPosition {
+  /** The node. */
+  node: number;
+  /** The offset, in UTF-16 code units into the node's text. */
+  offset: number;
+}
+
 /** A range of UTF-16 code units. */
 export interface TextRange {
   /** The code unit after the last one; equal to `start` for an empty range (a caret). */
   end: number;
   /** The first code unit. */
+  start: number;
+}
+
+/** The range of a node's text that `input.text` replaces (spec §14.4), in UTF-16 code units of the node's text as the engine last sent it. */
+export interface TextReplace {
+  /** The code unit after the range; equal to `start` to insert without replacing. */
+  end: number;
+  /** The accessibility node whose text it is. */
+  node: number;
+  /** The first code unit of the range. */
+  start: number;
+}
+
+/** A part of a node's own text whose language or direction differs from the node's (spec §14.7). */
+export interface TextRun {
+  /** The part's direction, where it differs from the node's. */
+  dir?: TextDirection | null;
+  /** The code unit after the part. */
+  end: number;
+  /** The part's language, as a BCP 47 tag, where it differs from the node's. */
+  lang?: string | null;
+  /** The first UTF-16 code unit of the part. */
   start: number;
 }
 
@@ -786,6 +915,8 @@ export interface Warning {
 
 /** `welcome`: the reply to `hello`. */
 export interface Welcome {
+  /** The clipboard formats that the engine reads and writes, as MIME types, preferred first (spec §14.5): `text/plain`. The engine always sends it; an engine of protocol v1 from before CORE-014 does not, and reads and writes no clipboard formats. */
+  clipboard_formats?: string[] | null;
   /** The core's version as Semantic Versioning 2.0 writes it, at most 64 ASCII characters (spec §14.1). */
   engine_version: string;
   /** What this engine offers, such as `mock_document`. */

@@ -1,0 +1,302 @@
+{
+  "format": "bayan-engine-conformance",
+  "format_version": 1,
+  "protocol_version": 1,
+  "area": "text-input",
+  "cases": [
+    {
+      "id": "a-platform-range-replaces-the-same-range-of-the-node",
+      "description": "An EditContext's update range, a beforeinput event's target range or a text interface's replaceText counts UTF-16 code units of the mirrored text, which is the node's text: the emoji is the code units 1 and 2. The shell sends the range unchanged as input.text's replace; the engine replaces exactly that range and puts the caret after the new text.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "a😀b"},
+      "platform": {"replace": {"start": 1, "end": 3}, "text": "x"},
+      "send": {"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 1, "end": 3}}},
+      "expect": {"text": "axb", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-range-before-the-caret-counts-utf-16-code-units-from-it",
+      "description": "Qt's input-method event gives a range relative to the caret while nothing is composed: two code units before the caret at 4 are the emoji, the code units 2 and 3.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "ab😀cd", "focus": 4},
+      "platform": {"replace_from_caret": {"from": -2, "length": 2}, "text": "x"},
+      "send": {"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 2, "end": 4}}},
+      "expect": {"text": "abxcd", "anchor": 3, "focus": 3}
+    },
+    {
+      "id": "a-range-from-the-caret-may-follow-it",
+      "description": "A range relative to the caret that starts at it replaces the text after it.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "hello", "focus": 1},
+      "platform": {"replace_from_caret": {"from": 0, "length": 2}, "text": "EL"},
+      "send": {"type": "input.text", "payload": {"text": "EL", "replace": {"node": 5, "start": 1, "end": 3}}},
+      "expect": {"text": "hELlo", "anchor": 3, "focus": 3}
+    },
+    {
+      "id": "a-deletion-replaces-a-range-with-no-text",
+      "description": "A text interface's deleteText, or a beforeinput deletion with its target range, is input.text with empty text and the range.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "hello"},
+      "platform": {"delete": {"start": 1, "end": 4}},
+      "send": {"type": "input.text", "payload": {"text": "", "replace": {"node": 5, "start": 1, "end": 4}}},
+      "expect": {"text": "ho", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "an-insertion-replaces-an-empty-range",
+      "description": "A text interface's insertText at an offset is input.text with a range whose ends are equal; the caret ends after the new text, two code units long.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "hello"},
+      "platform": {"insert": 0, "text": "😀"},
+      "send": {"type": "input.text", "payload": {"text": "😀", "replace": {"node": 5, "start": 0, "end": 0}}},
+      "expect": {"text": "😀hello", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-platform-selection-keeps-its-direction",
+      "description": "A selection that a screen reader or the user makes in the mirror reaches the engine as input.select with its anchor and its focus, here backwards; the caret is at the focus.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "hello"},
+      "platform": {"select": {"anchor": 4, "focus": 1}},
+      "send": {"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 4}, "focus": {"node": 5, "offset": 1}}},
+      "expect": {"text": "hello", "anchor": 4, "focus": 1}
+    },
+    {
+      "id": "a-caret-position-is-a-selection-with-equal-ends",
+      "description": "A text interface's setCursorPosition reaches the engine as input.select with anchor and focus equal; the selection that was there goes.",
+      "for": ["shell", "engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "platform": {"caret": 2},
+      "send": {"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 2}, "focus": {"node": 5, "offset": 2}}},
+      "expect": {"text": "hello", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-replacement-of-the-composition-takes-its-place",
+      "description": "The composition xy is shown at the caret, the code units 2 and 3 of the node's text. A replacement of exactly that range commits its text in place, as input.text without a range would.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "abc", "focus": 2, "composition": "xy"},
+      "steps": [{"type": "input.text", "payload": {"text": "XY", "replace": {"node": 5, "start": 2, "end": 4}}}],
+      "expect": {"text": "abXYc", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "a-replacement-elsewhere-discards-the-composition",
+      "description": "A replacement ends an active composition, and what of the composition's text lies outside its range is discarded.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "abc", "focus": 2, "composition": "xy"},
+      "steps": [{"type": "input.text", "payload": {"text": "A", "replace": {"node": 5, "start": 0, "end": 1}}}],
+      "expect": {"text": "Abc", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "a-replacement-in-a-node-that-does-not-exist-is-not-found",
+      "description": "No node 999999 exists: not_found, and nothing changes.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 999999, "start": 0, "end": 0}}}],
+      "expect": {"error": "not_found", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-replacement-in-a-node-that-is-not-editable-is-refused",
+      "description": "Node 2, the mock document's first heading, is not editable: invalid_request.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 2, "start": 0, "end": 1}}}],
+      "expect": {"error": "invalid_request", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-replacement-beyond-the-text-is-refused",
+      "description": "The node's text is two code units long, so a range to 3 lies outside it.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 0, "end": 3}}}],
+      "expect": {"error": "invalid_request", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-backwards-replacement-is-refused",
+      "description": "A range whose start lies after its end is no range.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 2, "end": 1}}}],
+      "expect": {"error": "invalid_request", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-replacement-ending-inside-a-surrogate-pair-is-refused",
+      "description": "Offset 2 lies between the two code units of the emoji.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 0, "end": 2}}}],
+      "expect": {"error": "invalid_request", "text": "a😀b", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "a-replacement-starting-inside-a-surrogate-pair-is-refused",
+      "description": "Both ends of a range must lie between characters.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b"},
+      "steps": [{"type": "input.text", "payload": {"text": "x", "replace": {"node": 5, "start": 2, "end": 4}}}],
+      "expect": {"error": "invalid_request", "text": "a😀b", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "a-selection-inside-a-surrogate-pair-is-refused",
+      "description": "input.select refuses what input.text refuses: an offset between the two code units of the emoji.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b"},
+      "steps": [{"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 2}, "focus": {"node": 5, "offset": 2}}}],
+      "expect": {"error": "invalid_request", "text": "a😀b", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "a-selection-in-a-node-that-does-not-exist-is-not-found",
+      "description": "Either end in a node that does not exist: not_found.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.select", "payload": {"anchor": {"node": 999999, "offset": 0}, "focus": {"node": 5, "offset": 0}}}],
+      "expect": {"error": "not_found", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-selection-in-a-node-that-is-not-editable-is-refused",
+      "description": "In v1's mock document only the editable line holds a caret or a selection: an end in node 2, its first heading, is invalid_request.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 0}, "focus": {"node": 2, "offset": 0}}}],
+      "expect": {"error": "invalid_request", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "a-selection-beyond-the-text-is-refused",
+      "description": "Offset 3 lies beyond a text two code units long.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 0}, "focus": {"node": 5, "offset": 3}}}],
+      "expect": {"error": "invalid_request", "text": "ab", "anchor": 2, "focus": 2}
+    },
+    {
+      "id": "shift-with-arrow-left-extends-the-selection",
+      "description": "Each press moves the focus one character to the left; the anchor stays.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello"},
+      "steps": [
+        {"type": "input.key", "payload": {"key": "ArrowLeft", "code": "ArrowLeft", "modifiers": {"shift": true}}},
+        {"type": "input.key", "payload": {"key": "ArrowLeft", "code": "ArrowLeft", "modifiers": {"shift": true}}}
+      ],
+      "expect": {"text": "hello", "anchor": 5, "focus": 3}
+    },
+    {
+      "id": "shift-with-arrow-right-moves-over-a-surrogate-pair-whole",
+      "description": "The focus moves by characters, so it steps over both code units of the emoji.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b", "focus": 1},
+      "steps": [{"type": "input.key", "payload": {"key": "ArrowRight", "code": "ArrowRight", "modifiers": {"shift": true}}}],
+      "expect": {"text": "a😀b", "anchor": 1, "focus": 3}
+    },
+    {
+      "id": "shift-with-home-and-end-extends-the-selection-from-its-anchor",
+      "description": "Shift with Home selects to the start, then Shift with End to the end, both from the anchor.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "focus": 2},
+      "steps": [
+        {"type": "input.key", "payload": {"key": "Home", "code": "Home", "modifiers": {"shift": true}}},
+        {"type": "input.key", "payload": {"key": "End", "code": "End", "modifiers": {"shift": true}}}
+      ],
+      "expect": {"text": "hello", "anchor": 2, "focus": 5}
+    },
+    {
+      "id": "arrow-left-without-shift-collapses-the-selection-to-its-start",
+      "description": "Without Shift, ArrowLeft leaves the caret at the start of the selection.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "steps": [{"type": "input.key", "payload": {"key": "ArrowLeft", "code": "ArrowLeft"}}],
+      "expect": {"text": "hello", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "arrow-right-without-shift-collapses-the-selection-to-its-end",
+      "description": "Without Shift, ArrowRight leaves the caret at the end of the selection, whichever end the focus was.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 4, "focus": 1},
+      "steps": [{"type": "input.key", "payload": {"key": "ArrowRight", "code": "ArrowRight"}}],
+      "expect": {"text": "hello", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "typing-replaces-the-selection",
+      "description": "input.text without a range replaces the selection, and the caret ends after the new text.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "steps": [{"type": "input.text", "payload": {"text": "ipp"}}],
+      "expect": {"text": "hippo", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "backspace-deletes-the-selection",
+      "description": "Backspace deletes the selected text, not the character before it.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 4, "focus": 1},
+      "steps": [{"type": "input.key", "payload": {"key": "Backspace", "code": "Backspace"}}],
+      "expect": {"text": "ho", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "delete-deletes-the-selection",
+      "description": "Delete deletes the selected text, not the character after it.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "steps": [{"type": "input.key", "payload": {"key": "Delete", "code": "Delete"}}],
+      "expect": {"text": "ho", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "a-composition-replaces-the-selection",
+      "description": "Starting a composition deletes the selected text; the composition, empty so far, starts where it was.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "steps": [{"type": "input.composition", "payload": {"phase": "start"}}],
+      "expect": {"text": "ho", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "a-selection-while-composing-changes-nothing",
+      "description": "While a composition is active its input method owns the caret: a valid input.select changes nothing, and the caret stays at the input method's caret, the end of the composition xy.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "abc", "composition": "xy"},
+      "steps": [{"type": "input.select", "payload": {"anchor": {"node": 5, "offset": 0}, "focus": {"node": 5, "offset": 0}}}],
+      "expect": {"text": "abcxy", "anchor": 5, "focus": 5}
+    },
+    {
+      "id": "paste-replaces-the-selection-with-plain-text",
+      "description": "input.paste inserts the richest format the engine reads, text/plain in v1, in place of the selection, and ignores the image.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "hello", "anchor": 1, "focus": 4},
+      "steps": [{"type": "input.paste", "payload": {"items": [{"mime": "image/png", "bytes": [137, 80, 78, 71]}, {"mime": "text/plain", "utf8": "ipp"}]}}],
+      "expect": {"text": "hippo", "anchor": 4, "focus": 4}
+    },
+    {
+      "id": "paste-replaces-bytes-that-are-not-utf-8",
+      "description": "The engine reads text/plain as UTF-8 and replaces a byte that is not UTF-8 with U+FFFD.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": ""},
+      "steps": [{"type": "input.paste", "payload": {"items": [{"mime": "text/plain", "bytes": [97, 255, 98]}]}}],
+      "expect": {"text": "a�b", "anchor": 3, "focus": 3}
+    },
+    {
+      "id": "paste-removes-what-the-line-cannot-hold",
+      "description": "The mock document's editable line holds one line of text, so pasted line breaks and tabs go, as typed ones do.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": ""},
+      "steps": [{"type": "input.paste", "payload": {"items": [{"mime": "text/plain", "utf8": "one\r\ntwo\tthree"}]}}],
+      "expect": {"text": "onetwothree", "anchor": 11, "focus": 11}
+    },
+    {
+      "id": "copy-gives-the-selection-as-utf-8",
+      "description": "clipboard.copy answers with the selected text as text/plain in UTF-8, and changes nothing.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b", "anchor": 4, "focus": 1},
+      "steps": [{"type": "clipboard.copy", "payload": {}}],
+      "expect": {"items": [{"mime": "text/plain", "utf8": "😀b"}], "text": "a😀b", "anchor": 4, "focus": 1}
+    },
+    {
+      "id": "cut-gives-the-selection-and-deletes-it",
+      "description": "clipboard.copy with cut answers with the selected text and deletes it from the editable line.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "a😀b", "anchor": 4, "focus": 1},
+      "steps": [{"type": "clipboard.copy", "payload": {"cut": true}}],
+      "expect": {"items": [{"mime": "text/plain", "utf8": "😀b"}], "text": "a", "anchor": 1, "focus": 1}
+    },
+    {
+      "id": "copy-without-a-selection-gives-no-items",
+      "description": "With nothing selected, clipboard.copy answers with no items, and a cut deletes nothing.",
+      "for": ["engine"],
+      "before": {"node": 5, "text": "ab"},
+      "steps": [{"type": "clipboard.copy", "payload": {"cut": true}}],
+      "expect": {"items": [], "text": "ab", "anchor": 2, "focus": 2}
+    }
+  ],
+  "removed": []
+}

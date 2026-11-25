@@ -257,13 +257,27 @@ class Seeds(Isolated):
         for seed in (self.folder / "markup_compatibility").iterdir():
             self.assertIn(seed.read_bytes()[0], ci.MC_CONFIGURATIONS)
         self.assertEqual(counts["crdt_import"], 0)
-        # Sessions of messages, one per line, every line JSON but those written to be refused.
+        # The text to paste after its length, then sessions of messages, one per line, every line JSON but those written to be refused; some texts to paste are not UTF-8.
         self.assertEqual(counts["engine_messages"], len(ci.engine_sessions()))
+        self.assertEqual(ci.session(b"ab", b"{}"), b"\x02\x00ab{}")
+        pasted = []
         for seed in (self.folder / "engine_messages").iterdir():
-            lines = seed.read_bytes().split(b"\n")
+            data = seed.read_bytes()
+            length = int.from_bytes(data[:2], "little")
+            pasted.append(data[2 : 2 + length])
+            lines = data[2 + length :].split(b"\n")
             parsed = [json.loads(line) for line in lines if line not in (b"not json",)]
             self.assertGreater(len(parsed), 3, seed.name)
             self.assertTrue(all(isinstance(message, (dict, list)) for message in parsed), seed.name)
+        def is_utf8(text: bytes) -> bool:
+            try:
+                text.decode("utf-8")
+            except UnicodeDecodeError:
+                return False
+            return True
+
+        self.assertIn(ci.NOT_UTF8, pasted)
+        self.assertTrue(pasted and not any(is_utf8(text) for text in pasted))
         # A flags byte, the tile's size and a request.
         self.assertEqual(counts["engine_tile"], len(ci.tile_requests()))
         for seed in (self.folder / "engine_tile").iterdir():
