@@ -215,6 +215,36 @@ fn refuses_what_it_cannot_read() {
         &format!("{on}jobs:\n  build:\n    steps: [{{run: cargo build}}]\n"),
         "`steps:` must open a block of items below it",
     );
+    // A step, or one of its keys, in flow style (the review of bayan-core#61).
+    refused(
+        &format!("{on}jobs:\n  build:\n    steps:\n      - {{run: cargo build --locked}}\n"),
+        "`{run: cargo build --locked}` is a mapping or sequence in flow style where this test expects a key",
+    );
+    refused(
+        &format!("{on}jobs:\n  build:\n    steps:\n      - [cargo build --locked]\n"),
+        "is a mapping or sequence in flow style where this test expects a key",
+    );
+    refused(
+        &format!(
+            "{on}jobs:\n  build:\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with: {{fetch-depth: 0}}\n"
+        ),
+        "`with:` with a value on its line, where this test expects a block of keys below it",
+    );
+    refused(
+        "on:\n  pull_request:\n  merge_group: {types: [checks_requested]}\njobs:\n  quiet:\n    runs-on: ubuntu-24.04\n",
+        "`merge_group:` with a value on its line",
+    );
+    // A quoted value that does not end on its line, or that more than a comment follows.
+    refused(
+        &format!(
+            "{on}jobs:\n  build:\n    steps:\n      - run: \"cargo build\n          --locked\"\n"
+        ),
+        "a quoted value that does not end on its line",
+    );
+    refused(
+        &format!("{on}jobs:\n  build:\n    steps:\n      - run: \"cargo\" build\n"),
+        "a quoted value that does not end on its line, or that more than a comment follows",
+    );
     refused(
         &format!("{on}jobs:\n  build:\n    steps:\n    - run: cargo build\n"),
         "`- run: cargo build` is not a key of a mapping",
@@ -320,5 +350,70 @@ fn counts_every_codeql_analysis_that_can_include_rust() {
     assert!(!codeql_builds(
         &matrix("        language: [actions, javascript-typescript, python, c-cpp]\n"),
         from_matrix
+    ));
+}
+
+/// Whether a job whose one step is `step` (a step's lines, at six spaces) builds before the supply-chain checks.
+fn step_builds(step: &str) -> bool {
+    let workflow = format!(
+        "on:\n  pull_request:\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n{step}"
+    );
+    let (building, problems) = supply_chain_order("scratch.yml", &workflow).unwrap();
+    assert_eq!(building.len(), problems.len(), "{problems:?}");
+    !building.is_empty()
+}
+
+#[test]
+fn reads_quoted_values_and_action_names_as_github_does() {
+    // A `#` inside quotes starts no comment, and the quotes' escapes are decoded (the review of bayan-core#61).
+    assert!(step_builds(
+        "      - run: \"echo 'step #1'; cargo build --locked\"\n"
+    ));
+    assert!(step_builds(
+        "      - run: 'echo ''step #1''; cargo build --locked'\n"
+    ));
+    assert!(step_builds(
+        "      - run: \"bash -c \\\"cargo build --locked\\\"\"\n"
+    ));
+    assert!(step_builds("      - run: \"\\x63argo build --locked\"\n"));
+    assert!(step_builds(
+        "      - run: \"echo one\\ncargo build --locked\"\n"
+    ));
+    // A comment after the closing quote is a comment.
+    assert!(!step_builds(
+        "      - run: \"echo 'step #1'\" # cargo build --locked\n"
+    ));
+    assert!(!step_builds(
+        "      - run: echo step # cargo build --locked\n"
+    ));
+    // The checks themselves may be quoted.
+    let workflow = "on:\n  pull_request:\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          fetch-depth: \"0\"\n      - run: \"cargo xtask check-exact-pins\"\n      - run: 'cargo xtask check-lockfile-age'\n      - run: cargo build --locked\n";
+    assert_eq!(
+        supply_chain_order("scratch.yml", workflow).unwrap(),
+        (vec!["scratch.yml build".to_owned()], Vec::new())
+    );
+    // GitHub compares the names of owners and repositories in any letter case.
+    let codeql = |uses: &str, languages: &str| {
+        step_builds(&format!(
+            "      - uses: {uses}\n        with:\n          languages: {languages}\n"
+        ))
+    };
+    let pin = "33d7b85da1a04171e211befe2c739303b9a4c066";
+    assert!(codeql(&format!("GitHub/CodeQL-Action/init@{pin}"), "rust"));
+    assert!(codeql(
+        &format!("\"github/codeql-action/init@{pin}\""),
+        "rust"
+    ));
+    assert!(codeql(
+        &format!("GITHUB/CODEQL-ACTION/INIT@{pin}"),
+        "\"rust\""
+    ));
+    assert!(!codeql(
+        &format!("GitHub/CodeQL-Action/init@{pin}"),
+        "python"
+    ));
+    assert!(!codeql(
+        &format!("github/codeql-action/analyze@{pin}"),
+        "rust"
     ));
 }

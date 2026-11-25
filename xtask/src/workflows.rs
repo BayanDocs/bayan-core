@@ -1,4 +1,4 @@
-//! A reader of the GitHub Actions workflows in `.github/workflows/`, for the tests of `verify.rs` that check them: the events that start a workflow, its jobs, each job's steps, and the commands of their scripts. It reads YAML in the block style that the workflows use, at any indentation, and refuses every form it cannot read instead of passing over it, because a test that cannot see a job passes a workflow that breaks the test's rule (the review of bayan-core#61): flow style for the events, the jobs or the steps (`on: [push]`, `steps: [...]`), a line that is no key where a key must stand, keys of one mapping at different indentations, anchors, aliases and merge keys, and tabs in the indentation.
+//! A reader of the GitHub Actions workflows in `.github/workflows/`, for the tests of `verify.rs` that check them: the events that start a workflow, its jobs, each job's steps, and the commands of their scripts. It reads YAML in the block style that the workflows use, at any indentation, and refuses every form it cannot read instead of passing over it, because a test that cannot see a job passes a workflow that breaks the test's rule (the review of bayan-core#61): flow style for the events, the jobs, the steps, a step or a step's `with:` (`on: [push]`, `steps: [...]`, `- {run: …}`, `with: {…}`), a line that is no key where a key must stand, keys of one mapping at different indentations, a quoted value that does not end on its line, anchors, aliases and merge keys, and tabs in the indentation. It reads a quoted value whole up to its closing quote, as YAML does, so that a `#` inside the quotes starts no comment, decodes the quotes' escapes before it looks for commands, and compares the names of actions in any letter case, as GitHub compares the names of owners and repositories (the second review of bayan-core#61).
 //!
 //! What the tests still cannot see, so that review has to (the decision on bayan-core#61 lists them): a compiler that another program starts, other than `scripts/dev-setup.sh`, such as a program of the repository or of a tool (`python3 fuzz/ci.py` runs `cargo fuzz`, and `make`, `npm run` or a script file could run anything), the JavaScript that `actions/github-script` runs, or a container that a `docker://` action runs with its `args:`; a program named through a variable (`$CARGO build`) or written into a script by an expression `${{ … }}`; a step's `shell:` template, which names the program that runs the step's script (`shell: cargo run --quiet -- {0}` would build); the CodeQL command-line tool run from a script (`codeql database create --language=rust`); and `env:` or `working-directory:` on the two check steps, which can change what the checks see (another `CARGO_HOME`, another folder) while the steps read the same. A local action (`uses: ./…`), whose steps the reader does not read, counts as building instead.
 
@@ -71,7 +71,7 @@ pub struct Key<'n, 'a> {
     pub below: &'n [Node<'a>],
 }
 
-/// Splits `name: value` or `name:` into the name, without quotes, and the value, without a comment after it.
+/// Splits `name: value` or `name:` into the name, without quotes, and what follows the colon.
 fn split(text: &str) -> Option<(&str, &str)> {
     let (name, rest) = match text.chars().next()? {
         quote @ ('"' | '\'') => {
@@ -92,13 +92,52 @@ fn split(text: &str) -> Option<(&str, &str)> {
     if !(rest.is_empty() || rest.starts_with(' ')) {
         return None;
     }
+    Some((name, rest))
+}
+
+/// The index of the quote that closes the quoted value at the start of `value`: in double quotes a backslash escapes the next character, and in single quotes two quotes stand for one.
+fn closing_quote(value: &str, quote: char) -> Option<usize> {
+    let mut characters = value.char_indices().skip(1).peekable();
+    while let Some((index, character)) = characters.next() {
+        if quote == '"' && character == '\\' {
+            characters.next();
+        } else if character == quote {
+            if quote == '\'' && characters.next_if(|&(_, next)| next == '\'').is_some() {
+                continue;
+            }
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// A key's value as it stands after the colon, without a comment after it, which starts at a `#` after white space. A quoted value is kept whole up to its closing quote, as YAML reads it, so that a `#` inside the quotes stays (the review of bayan-core#61); `None` for a quoted value that does not end on its line, or that anything but a comment follows.
+fn value_of(rest: &str) -> Option<&str> {
     let value = rest.trim();
-    let value = if value.starts_with('#') {
-        ""
-    } else {
-        value.split(" #").next().unwrap_or(value).trim_end()
-    };
-    Some((name, value))
+    match value.chars().next() {
+        None | Some('#') => Some(""),
+        Some(quote @ ('"' | '\'')) => {
+            let end = closing_quote(value, quote)?;
+            let after = value.get(end + 1..)?.trim_start();
+            if after.is_empty() || after.starts_with('#') {
+                value.get(..=end)
+            } else {
+                None
+            }
+        }
+        Some(_) => {
+            let end = value
+                .char_indices()
+                .find(|&(index, character)| {
+                    character == '#'
+                        && value
+                            .get(..index)
+                            .is_some_and(|before| before.ends_with([' ', '\t']))
+                })
+                .map_or(value.len(), |(index, _)| index);
+            value.get(..end).map(str::trim_end)
+        }
+    }
 }
 
 fn key<'n, 'a>(
@@ -107,9 +146,19 @@ fn key<'n, 'a>(
     text: &'a str,
     below: &'n [Node<'a>],
 ) -> Result<Key<'n, 'a>, String> {
-    let (name, value) = split(text).ok_or_else(|| {
+    if text.starts_with(['{', '[']) {
+        return Err(format!(
+            "{context}, line {number}: `{text}` is a mapping or sequence in flow style where this test expects a key; write it in block style"
+        ));
+    }
+    let (name, rest) = split(text).ok_or_else(|| {
         format!(
             "{context}, line {number}: `{text}` is not a key of a mapping; this test cannot read it"
+        )
+    })?;
+    let value = value_of(rest).ok_or_else(|| {
+        format!(
+            "{context}, line {number}: a quoted value that does not end on its line, or that more than a comment follows; this test cannot read it"
         )
     })?;
     let named = |sigil: char| {
@@ -149,6 +198,21 @@ pub fn keys<'n, 'a>(context: &str, nodes: &'n [Node<'a>]) -> Result<Vec<Key<'n, 
             key(context, node.number, node.text, &node.children)
         })
         .collect()
+}
+
+/// The keys below a key whose value must be a block of keys, such as a step's `with:`.
+///
+/// # Errors
+///
+/// A value on the key's own line, such as a mapping in flow style (`with: {fetch-depth: 0}`), and every error of [`keys`].
+pub fn block<'n, 'a>(context: &str, key: &Key<'n, 'a>) -> Result<Vec<Key<'n, 'a>>, String> {
+    if !key.value.is_empty() {
+        return Err(format!(
+            "{context}, line {}: `{}:` with a value on its line, where this test expects a block of keys below it; write it in block style",
+            key.number, key.name
+        ));
+    }
+    keys(context, key.below)
 }
 
 /// The items of the sequence of mappings that `nodes` hold, which must all stand at one indentation, each as its keys.
@@ -302,7 +366,7 @@ pub fn on_every_pull_request(file: &str, workflow: &str) -> Result<Option<bool>,
     let Some(merge_group) = events.iter().find(|event| event.name == "merge_group") else {
         return Ok(Some(false));
     };
-    let types = keys(&format!("{file}, `merge_group:`"), merge_group.below)?;
+    let types = block(&format!("{file}, `merge_group:`"), merge_group)?;
     Ok(Some(types.iter().any(|key| {
         key.name == "types" && list(file, key).is_ok_and(|types| types == ["checks_requested"])
     })))
@@ -471,18 +535,74 @@ fn script(run: &Key<'_, '_>) -> String {
     if run.value.starts_with(['|', '>']) {
         return below.join("\n");
     }
-    std::iter::once(unquoted(run.value))
+    std::iter::once(unquoted(run.value).as_str())
         .chain(below)
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// A value without the quotes around it.
-fn unquoted(value: &str) -> &str {
-    ['"', '\'']
-        .iter()
-        .find_map(|quote| value.strip_prefix(*quote)?.strip_suffix(*quote))
-        .unwrap_or(value)
+/// A value as YAML reads it: without the quotes around it; in double quotes with its escapes decoded (`\\n`, `\\t`, `\\r`, `\\x`, `\\u` and `\\U` as YAML defines them, and any other escaped character as itself, which is enough to find a command); in single quotes with each doubled quote read as one.
+fn unquoted(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        let mut out = String::new();
+        let mut characters = inner.chars();
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                out.push(character);
+                continue;
+            }
+            let digits = match characters.next() {
+                Some('n') => {
+                    out.push('\n');
+                    continue;
+                }
+                Some('t') => {
+                    out.push('\t');
+                    continue;
+                }
+                Some('r') => {
+                    out.push('\r');
+                    continue;
+                }
+                Some('x') => 2,
+                Some('u') => 4,
+                Some('U') => 8,
+                Some(other) => {
+                    out.push(other);
+                    continue;
+                }
+                None => break,
+            };
+            let hex: String = characters.by_ref().take(digits).collect();
+            if let Some(decoded) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                out.push(decoded);
+            }
+        }
+        return out;
+    }
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return inner.replace("''", "'");
+    }
+    value.to_owned()
+}
+
+/// Whether a step's `uses:` names the action `name` (`owner/repository/path`), in any letter case, as GitHub compares the names of owners and repositories (the review of bayan-core#61), whatever version or commit follows its `@`.
+fn uses_action(step: &[Key<'_, '_>], name: &str) -> bool {
+    step.iter()
+        .find(|key| key.name == "uses")
+        .is_some_and(|uses| {
+            let uses = unquoted(uses.value);
+            let action = uses
+                .split_once('@')
+                .map_or(uses.as_str(), |(action, _)| action);
+            action.trim_end_matches('/').eq_ignore_ascii_case(name)
+        })
 }
 
 /// The languages that a CodeQL step's `languages:` names: the words of its value, or of the job's matrix where the value is one value of it (`${{ matrix.language }}`); `None` where this test cannot resolve them: another expression, no such list in the job's `strategy:`, or a matrix with `include:` or `exclude:`, which can add or remove values.
@@ -491,11 +611,11 @@ fn languages_of<'a>(
     job: &[Key<'_, 'a>],
     languages: &Key<'_, 'a>,
 ) -> Result<Option<Vec<&'a str>>, String> {
-    if !languages.value.contains("${{") {
+    let value = unquoted(languages.value);
+    if !value.contains("${{") {
         return list(context, languages).map(Some);
     }
-    let Some(name) = languages
-        .value
+    let Some(name) = value
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
         .and_then(|value| value.trim().strip_prefix("matrix."))
@@ -526,14 +646,11 @@ fn languages_of<'a>(
 
 /// Whether a step runs a CodeQL analysis that can include Rust, whose extractor runs `cargo check`: an `init` step of `github/codeql-action` whose `languages:` names `rust`, directly or through the job's matrix, or names no language at all, because the pinned action then finds the repository's languages itself, Rust among them (the decision on bayan-core#61). A value that this test cannot resolve counts as Rust, and so does a value of the matrix that is an expression itself.
 fn analyses_rust(context: &str, job: &[Key<'_, '_>], step: &[Key<'_, '_>]) -> Result<bool, String> {
-    let get = |name: &str| step.iter().find(|key| key.name == name);
-    if !get("uses")
-        .is_some_and(|uses| unquoted(uses.value).starts_with("github/codeql-action/init@"))
-    {
+    if !uses_action(step, "github/codeql-action/init") {
         return Ok(false);
     }
-    let with = match get("with") {
-        Some(with) => keys(context, with.below)?,
+    let with = match step.iter().find(|key| key.name == "with") {
+        Some(with) => block(context, with)?,
         None => Vec::new(),
     };
     let Some(languages) = with.iter().find(|key| key.name == "languages") else {
@@ -600,9 +717,9 @@ pub fn supply_chain_order(
             let get = |name: &str| step.iter().find(|key| key.name == name);
             let line = step.first().map_or(0, |key| key.number);
             if let Some(with) = get("with")
-                && keys(&context, with.below)?
+                && block(&context, with)?
                     .iter()
-                    .any(|key| key.name == "fetch-depth" && key.value == "0")
+                    .any(|key| key.name == "fetch-depth" && unquoted(key.value) == "0")
             {
                 full_history = true;
             }
@@ -616,7 +733,7 @@ pub fn supply_chain_order(
                     problems.push(format!("{context}, line {}: `{check}` runs only `if: {}`, so a job that builds can run without it", condition.number, condition.value));
                 }
                 if let Some(allowed) = get("continue-on-error")
-                    && allowed.value != "false"
+                    && unquoted(allowed.value) != "false"
                 {
                     problems.push(format!("{context}, line {}: `{check}` may fail without stopping the job (`continue-on-error: {}`)", allowed.number, allowed.value));
                 }
