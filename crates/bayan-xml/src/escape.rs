@@ -1,9 +1,9 @@
 //! Escaping text and attribute values for writing, so that reading them back gives exactly the same characters.
 //!
-//! Both functions expect characters that XML allows (callers check); they never fail.
+//! Both functions expect characters that XML allows (callers check, with [`crate::chars::is_char`]); they never fail. The writer escapes with them, and so does code that writes XML text of its own.
 
 /// Appends `value` to `out` as the content of a double-quoted attribute value: `&`, `<`, `>` and `"` as entity references, and tab, line feed and carriage return as character references, which attribute-value normalization (XML 1.0 §3.3.3) keeps as they are.
-pub(crate) fn attribute(value: &str, out: &mut String) {
+pub fn attribute(value: &str, out: &mut String) {
     for character in value.chars() {
         match character {
             '&' => out.push_str("&amp;"),
@@ -19,7 +19,7 @@ pub(crate) fn attribute(value: &str, out: &mut String) {
 }
 
 /// Appends `value` to `out` as character data: `&`, `<` and `>` as entity references, and carriage return as a character reference, which line-end normalization (XML 1.0 §2.11) keeps.
-pub(crate) fn text(value: &str, out: &mut String) {
+pub fn text(value: &str, out: &mut String) {
     for character in value.chars() {
         match character {
             '&' => out.push_str("&amp;"),

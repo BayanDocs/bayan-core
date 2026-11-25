@@ -1,8 +1,8 @@
-//! Reading a run of text that is all references grows WebAssembly's memory by one copy of the run at most, however many references it holds (finding M3 of the architecture review of 2026-10-27: the reader listed every piece of a run before decoding any, and every reference is a piece of its own, so that memory grew six to twelve times the part for runs of `&lt;` and `x&#9;`).
+//! Reading a run of text that is all references grows WebAssembly's memory by one copy of the run at most, however many references it holds (finding M3 of the architecture review of 2026-10-27: the reader listed every piece of a run before decoding any, and every reference is a piece of its own, so that memory grew six to twelve times the part for runs of `&lt;` and `x&#9;`). A UTF-16 part adds its decoded text and no more: exactly the room that the text takes in UTF-8, also for characters that take three bytes there and two in UTF-16 (finding L14 of the architecture review of 2026-11-20: `Source::new` gave the text as many bytes as the part had, and the text doubled that room as it grew).
 //!
 //! A test program of its own, with this one test, because WebAssembly's linear memory never shrinks and the tests of one program share one instance: an earlier test that grew memory would let this one reuse it, see no growth and pass even on code that keeps far too much. Never add a test here (see `memory/mod.rs`).
 //!
-//! WebAssembly only, because only there can a test measure all the memory a program holds without `unsafe` code or a dependency (`core::arch::wasm32::memory_size`). In every configuration, `keeps_one_copy_of_a_run_of_text_however_many_references_it_holds` in `src/reader.rs` measures the capacities of the reader's buffers for the same runs.
+//! WebAssembly only, because only there can a test measure all the memory a program holds without `unsafe` code or a dependency (`core::arch::wasm32::memory_size`), and because WebAssembly's memory grows for all the room a buffer reserves, where an operating system counts only the pages written. In every configuration, `keeps_one_copy_of_a_run_of_text_however_many_references_it_holds` in `src/reader.rs` measures the capacities of the reader's buffers for the same runs, and `decodes_utf16_into_exactly_the_room_the_text_needs` in `src/source.rs` that of the decoded text.
 #![cfg(target_arch = "wasm32")]
 
 mod memory;
@@ -39,4 +39,12 @@ fn a_run_of_references_takes_one_copy_of_the_run_at_most() {
             part.len()
         );
     }
+    // The largest decoded text: characters that take three bytes in UTF-8 and two in UTF-16, after a reference that makes the reader copy the run. The decoded text and the run's copy each take one and a half times the part, three times the part together, and a quarter more is left for WebAssembly's pages of 64 KiB; a text that doubled its room as it grew took four and a half times the part (18,874,368 bytes for this part of 4,194,328 bytes, measured before the decoded text got exactly the room it needs). The part is about four times `SIZE`, so that the rounding to pages counts for less.
+    let wide = utf16(&format!("<r>&lt;{}</r>", "\u{4E2D}".repeat(2 * SIZE)));
+    let grown = growth(|| assert_eq!(read(&wide), None));
+    assert!(
+        grown * 4 <= wide.len() * 13,
+        "took {grown} bytes for a UTF-16 part of {} bytes",
+        wide.len()
+    );
 }

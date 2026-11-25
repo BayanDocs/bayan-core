@@ -269,7 +269,7 @@ impl Doc {
 
     /// Imports a blob from another replica or from storage, within `limits`. Changes that depend on changes not received yet wait and are applied when those arrive, so blobs may arrive in any order.
     ///
-    /// Every blob that does not come from this device is untrusted input, and the limits narrow what it can do without making the CRDT library safe (see [`ImportLimits`] and the crate documentation): a crafted blob can make Loro 1.16.2 panic, which is contained here where panics unwind and poisons the document; it can make it abort the process, which nothing here can catch; and **the panic message, which Rust's panic hook prints before the panic is contained, can quote document text**, whichever crate raises it, so the host must install a panic hook that never prints or records any panic's message before it imports untrusted blobs.
+    /// Every blob that does not come from this device is untrusted input, and the limits narrow what it can do without making the CRDT library safe (see [`ImportLimits`] and the crate documentation): a crafted blob can make Loro panic (CORE-004 found many such blobs for 1.16.2), which is contained here where panics unwind and poisons the document; it can make it abort the process, which nothing here can catch; and **the panic message, which Rust's panic hook prints before the panic is contained, can quote document text**, whichever crate raises it, so the host must install a panic hook that never prints or records any panic's message before it imports untrusted blobs.
     ///
     /// # Errors
     ///
@@ -286,7 +286,7 @@ impl Doc {
         if self.is_poisoned() {
             return Err(ImportError::Poisoned);
         }
-        // Loro 1.16.2 panics on many crafted blobs whose checksum is correct (CORE-004 report). Such a panic is contained here, where the document is known: its state may be half updated and the library's locks are poisoned, so the document is poisoned too, which also means it is never freed, because freeing it can panic again. Where panics abort instead of unwinding (WebAssembly builds), the host must restart the engine and reload the last good state.
+        // Loro can panic on crafted blobs whose checksum is correct, as 1.16.2 did on many (CORE-004 report). Such a panic is contained here, where the document is known: its state may be half updated and the library's locks are poisoned, so the document is poisoned too, which also means it is never freed, because freeing it can panic again. Where panics abort instead of unwinding (WebAssembly builds), the host must restart the engine and reload the last good state.
         std::panic::catch_unwind(AssertUnwindSafe(import)).unwrap_or_else(|_| {
             self.poison.set();
             Err(ImportError::Panicked)

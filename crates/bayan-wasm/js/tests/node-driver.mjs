@@ -364,6 +364,23 @@ async function main() {
       ok(await shell.request(42, "doc.close", { doc_id: docId }));
     });
 
+    await check("input.paste copies none of the items the engine skips, so they cannot fill the blob store (§3.2, §14.5)", async () => {
+      // Four image/png items of exactly 64 MiB, each within the blob limit, fill the 256 MiB that all blobs together may hold
+      // if they are copied into the engine, as the worker host did before it copied only what the engine reads: the
+      // text/plain item after them would then find the store full and be refused. The engine reads none of the images, so
+      // none is copied, and the text pastes (the security review of bayan-core#60).
+      const file = bytesOf("document");
+      const docId = ok(await shell.request(43, "doc.open", { blob: file }, [file])).doc_id;
+      const images = [0, 1, 2, 3].map(() => new ArrayBuffer(64 * 1024 * 1024));
+      const text = bytesOf("ok");
+      const items = [...images.map((blob) => ({ mime: "image/png", blob })), { mime: "text/plain", blob: text }];
+      ok(await shell.request(44, "input.paste", { doc_id: docId, items }, [...images, text]));
+      await shell.event("render.invalidate");
+      await shell.event("overlay.update");
+      assert.equal((await shell.event("a11y.update")).payload.changes[0].node.text, "ok");
+      ok(await shell.request(45, "doc.close", { doc_id: docId }));
+    });
+
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
       // With a request identifier, the refusal is the reply.
       shell.send({ v: 1, id: 15, type: "hello", payload: { protocol_versions: [1n] } });

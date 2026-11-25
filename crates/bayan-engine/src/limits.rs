@@ -25,6 +25,9 @@ pub const MAX_TILE_SIDE: u32 = 4096;
 /// The largest magnitude of a tile rectangle's coordinates, and the largest width and height, in BLU: 2⁴⁰ BLU, about 1,100 kilometres, so the rasterizer's integer arithmetic cannot overflow.
 pub const MAX_TILE_COORDINATE: i64 = 1 << 40;
 
+/// The deepest nesting of arrays and objects that the engine reads JSON into: 127 levels, the top-level value counting as one. It is serde_json's own recursion limit, which the engine relies on and does not set: wherever serde_json recurses, into a level of a type or of a `serde_json::Value`, it refuses a value nested any deeper as soon as it reaches the next level, before it reads any further. Messages and recordings are read into types of a fixed depth, so their levels are few; the values that those types skip, or keep as raw JSON (a message's payload until its type is known), serde_json reads without recursion and without a limit on their depth, bounded only by the size of the message or recording. A configuration is read into a `serde_json::Value` first, the one place where the engine recurses as deeply as its input nests, up to this limit. The engine's tests read JSON at this depth, and skip values nested far deeper, on the stacks the engine runs on: natively on a thread of 2 MiB, the size of the engine thread's stack, and in WebAssembly on the JavaScript engine's stack, which a browser sets and the module cannot (the architecture review of 2026-11-20, finding L14); they also check that serde_json still stops here, so that a version that changed its limit is noticed.
+pub const MAX_JSON_DEPTH: usize = 127;
+
 /// The most entries a recording may hold.
 pub const MAX_RECORDING_ENTRIES: usize = 100_000;
 

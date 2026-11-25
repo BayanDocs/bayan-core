@@ -4,7 +4,7 @@
 resolver = "3"
 # crates/ holds only the engine's crates (architecture §4), so it can use a glob. Spike and Fidelity Lab crates are added by name (for example "spikes/text-pipeline"), because a glob would also match their report and schema folders, which have no Cargo.toml, and break the workspace.
 members = ["crates/*", "xtask", "xtask/lint-canary", "spikes/crdt-workload", "spikes/crdt-model", "spikes/crdt-model-automerge", "spikes/text-pipeline", "lab/bayan-lab", "lab/bayan-lab-compare", "lab/bayan-lab-layout"]
-# fuzz/ will be a separate workspace: cargo-fuzz needs the nightly toolchain.
+# fuzz/ is a separate workspace, with its own Cargo.lock and deny.toml, because cargo-fuzz needs the nightly toolchain (fuzz/README.md).
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -40,17 +40,17 @@ num-bigint = { version = "=0.5.1", default-features = false }
 serde_test = "=1.0.177"
 # SHA-256, the identity of every Fidelity Lab corpus document (LAB-001). From RustCrypto, the family of ADR-0016's crypto provider; without default features (no allocation helpers or object identifiers). Already in Cargo.lock through automerge, so it adds no package. Published 2026-10-12; MIT OR Apache-2.0.
 sha2 = { version = "=0.11.1", default-features = false }
-# The CRDT library of ADR-0008 (MIT, published 2026-10-22). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004).
+# The CRDT library of ADR-0008 (MIT, published 2026-10-22). Only bayan-crdt may use it, so that Loro stays replaceable (CORE-004); the gate's preflight fails on any other member's normal or build dependency on it (xtask/src/layers.rs).
 loro = "=1.17.1"
 # The alternative CRDT of the CORE-004 comparison (MIT, published 2026-09-16). Only the spike crate spikes/crdt-model-automerge uses it.
 automerge = "=0.12.0"
-# DEFLATE in pure Rust for bayan-opc's ZIP layer (CORE-005), which decompresses the parts of a package and compresses the parts BayanDocs writes, and for the Fidelity Lab's package scanner (LAB-001), which only decompresses. It and its only dependency, adler2, are `#![forbid(unsafe_code)]`; the default features (`with-alloc` only) leave out serde and the SIMD checksum. Published 2026-03-13; MIT OR Zlib OR Apache-2.0.
+# DEFLATE in pure Rust for bayan-opc's ZIP layer (CORE-005), which decompresses the parts of a package and compresses the parts BayanDocs writes; the Fidelity Lab's PDF reader decodes FlateDecode streams with it (bayan-lab-layout, LAB-003), and the text pipeline spike compresses its PNG images. bayan-lab's scanner reads packages with bayan-opc since CORE-011, so bayan-lab, like bayan-xml, uses it only in its tests, to compress the packages they craft. It and its only dependency, adler2, are `#![forbid(unsafe_code)]`; the default features (`with-alloc` only) leave out serde and the SIMD checksum. Published 2026-03-13; MIT OR Zlib OR Apache-2.0.
 miniz_oxide = "=0.9.1"
 # Read-only access to OLE compound files (`.doc` files, VBA projects, encrypted packages) behind bayan-opc's small API (CORE-005). Safe Rust; it brings uuid and web-time (and fnv, already here). Published 2026-10-31; MIT.
 cfb = "=0.16.0"
 # The tokenizer under bayan-xml (CORE-006): it splits a part's text into tags, text, references, comments, CDATA sections and processing instructions, with exact byte positions, from a borrowed slice without copying. bayan-xml checks everything inside those pieces itself, because quick-xml accepts much that XML forbids. `#![forbid(unsafe_code)]`; its only required dependency is memchr, already here. 0.41 fixed two denial-of-service advisories (RUSTSEC-2026-0194, RUSTSEC-2026-0195). No features. Published 2026-08-22; MIT.
 quick-xml = { version = "=0.42.0", default-features = false }
-# The text stack of ADR-0009 and the rasterizers of ADR-0011, which the CORE-003 spike (spikes/text-pipeline) validates; only that spike uses them. The font crates are built with `libm` instead of `std`, so that every transcendental function they call (`hypot` for the offsets of transformed components in TrueType composite glyphs, `sin_cos` and `tan` for variable composite glyphs, `sin`, `cos` and `tan` for colour-glyph transforms) comes from the pure-Rust libm crate rather than each platform's math library (ADR-0005 §4); spikes/text-pipeline/REPORT.md §4 explains each choice.
+# The text stack of ADR-0009 and the rasterizers of ADR-0011, which the CORE-003 spike (spikes/text-pipeline) validates; the spike uses them all, and the Fidelity Lab's layout crate two of them, unicode-bidi and icu_properties, to put the right-to-left lines of a PDF in reading order (LAB-003). The font crates are built with `libm` instead of `std`, so that every transcendental function they call (`hypot` for the offsets of transformed components in TrueType composite glyphs, `sin_cos` and `tan` for variable composite glyphs, `sin`, `cos` and `tan` for colour-glyph transforms) comes from the pure-Rust libm crate rather than each platform's math library (ADR-0005 §4); spikes/text-pipeline/REPORT.md §4 explains each choice.
 # Shaping: HarfBuzz 15.1.0 ported to Rust, `#![forbid(unsafe_code)]`, output in integer font units. Without `std` it needs spin (a lock for its caches) and core_maths. Published 2026-11-12; MIT.
 harfrust = { version = "=0.16.0", default-features = false, features = ["libm"] }
 # Glyph outlines (TrueType and CFF), drawn unhinted (ADR-0011 §4); the same read-fonts parser as harfrust, so one font parser serves shaping and rendering (ADR-0009 §1). `#![forbid(unsafe_code)]`. Published 2026-11-10; MIT OR Apache-2.0.

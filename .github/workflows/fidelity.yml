@@ -3,7 +3,7 @@
 # - Word's side: ground truth from the reference machine (LAB-002), which does not exist yet, so no document is compared with Word's layout. BayanDocs' side: bayan-cli cannot lay out documents until Phase 1, so every document counts as laid out on no pages. The report's scores are therefore zero, and only M7, the agreement with the w:lastRenderedPageBreak hints that the documents themselves carry, has data. As ground truth and layouts arrive, the steps "Word's layouts" and "BayanDocs' layouts" fill their folders.
 # - It compares with no baseline yet: work package LAB-106 decides where the baselines of the fidelity gate are stored, and `bayan-lab report --baseline` is ready for it.
 # - The report and the summary hold public-corpus results only, and name documents by their public identifiers (SHA-256 and their source's path).
-# It runs on pull requests that change the lab, the package and XML readers that M7 uses, or the workspace's build settings, on pushes to main, weekly, and on demand. It is not a required check: a path filter skips it on most pull requests, and required checks are a setting of main's ruleset, which is the owner's.
+# It runs on pull requests that change the lab, the package and XML readers that M7 uses, bayan-units (which bayan-lab-layout converts every layout's BLU with), or the workspace's build settings, on pushes to main, weekly, and on demand. It is not a required check: a path filter skips it on most pull requests, and required checks are a setting of main's ruleset, which is the owner's.
 # Workflow conventions (AGENTS.md): permissions only to read the repository; no credentials kept after checkout; GitHub's own actions only, pinned to full commit SHAs with the version in a comment; a timeout; one concurrency group; no secrets; no cache. Before anything of the workspace is built, the job runs the supply-chain checks of the gate's first step, as the CodeQL and fuzzing jobs do (bayan-core#22): building runs the dependencies' build scripts and procedural macros, and the gate checks a pull request's Cargo.lock only in parallel with this job.
 name: fidelity
 
@@ -13,6 +13,7 @@ on:
       - lab/**
       - crates/bayan-opc/**
       - crates/bayan-xml/**
+      - crates/bayan-units/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -24,6 +25,7 @@ on:
       - lab/**
       - crates/bayan-opc/**
       - crates/bayan-xml/**
+      - crates/bayan-units/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml

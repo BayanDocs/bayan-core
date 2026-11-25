@@ -94,15 +94,25 @@ impl<'a> Source<'a> {
 }
 
 /// Decodes the bytes, after a byte order mark if there is one: UTF-8 is borrowed as it is, UTF-16 converted to UTF-8.
+///
+/// UTF-16 is decoded in two passes: the first checks the text and counts the bytes it takes in UTF-8, the second converts it into exactly that much room. A character takes up to one and a half times as many bytes in UTF-8 as in UTF-16 (two bytes become three for most of the Basic Multilingual Plane), so room for as many bytes as the part has would not do for such text, and the text would double its room as it grew: to twice the part, where one and a half times is all it needs (the architecture review of 2026-11-20, finding L14).
 fn decode(bytes: &[u8]) -> Result<(Cow<'_, str>, Encoding), Error> {
     let utf16 = |rest: &[u8], encoding, unit: fn([u8; 2]) -> u16| {
         let (pairs, odd) = rest.as_chunks::<2>();
         if !odd.is_empty() {
             return Err(Error::new(0, ErrorKind::InvalidEncoding));
         }
-        let mut text = String::with_capacity(rest.len());
-        for character in char::decode_utf16(pairs.iter().map(|&pair| unit(pair))) {
-            // The offset of a decoding error is that of the text decoded so far, where the bad character would have gone.
+        let characters = || char::decode_utf16(pairs.iter().map(|&pair| unit(pair)));
+        // The offset of a decoding error is that of the text decoded so far, where the bad character would have gone.
+        let mut length = 0;
+        for character in characters() {
+            let character =
+                character.map_err(|_| Error::new(length, ErrorKind::InvalidEncoding))?;
+            length += character.len_utf8();
+        }
+        let mut text = String::with_capacity(length);
+        for character in characters() {
+            // The first pass found no error, so neither does this one.
             let character =
                 character.map_err(|_| Error::new(text.len(), ErrorKind::InvalidEncoding))?;
             text.push(character);
@@ -243,4 +253,61 @@ fn declaration(text: &str, encoding: Encoding) -> Result<Option<Declaration>, Er
         declares_encoding,
         standalone,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `text` in UTF-16, little-endian, with a byte order mark.
+    fn utf16(text: &str) -> Vec<u8> {
+        [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    }
+
+    #[test]
+    fn decodes_utf16_into_exactly_the_room_the_text_needs() {
+        // ASCII takes half the bytes in UTF-8; most of the Basic Multilingual Plane one and a half times as many; characters beyond it as many.
+        for text in [
+            "<r>plain</r>",
+            "<r>\u{4E2D}\u{6587}</r>",
+            "<r>\u{1F600}</r>",
+            "",
+        ] {
+            let part = utf16(text);
+            let (decoded, _) = decode(&part).unwrap();
+            assert_eq!(decoded, text);
+            let Cow::Owned(decoded) = decoded else {
+                panic!("UTF-16 is decoded into a text of its own");
+            };
+            assert_eq!(decoded.capacity(), decoded.len(), "{text:?}");
+        }
+        // The largest case: a character of three bytes in UTF-8 for every two of the part.
+        let text = format!("<r>{}</r>", "\u{4E2D}".repeat(4096));
+        let part = utf16(&text);
+        let (decoded, _) = decode(&part).unwrap();
+        assert_eq!(decoded.len(), 3 * 4096 + 7);
+        let Cow::Owned(decoded) = decoded else {
+            panic!("UTF-16 is decoded into a text of its own");
+        };
+        assert_eq!(decoded.capacity(), decoded.len());
+    }
+
+    #[test]
+    fn reports_a_decoding_error_where_the_bad_character_would_have_gone() {
+        // `<r>` and then a lone low surrogate.
+        let mut part = utf16("<r>");
+        part.extend_from_slice(&[0x00, 0xDC]);
+        assert_eq!(
+            decode(&part).unwrap_err(),
+            Error::new(3, ErrorKind::InvalidEncoding)
+        );
+        // An odd number of bytes after the byte order mark.
+        assert_eq!(
+            decode(&[0xFF, 0xFE, b'<']).unwrap_err(),
+            Error::new(0, ErrorKind::InvalidEncoding)
+        );
+    }
 }

@@ -470,6 +470,42 @@ fn writes_new_core_properties() {
     );
 }
 
+/// The exact bytes of a tab, a line feed and a carriage return in the metadata parts that bayan-opc writes: in an attribute value all three are character references, because a reader turns them into spaces otherwise (XML 1.0 §3.3.3), and in text only the carriage return is, because line-end normalization turns it into a line feed (§2.11). They are spelled as bayan-xml's writer spells them, `&#x9;`, `&#xA;` and `&#xD;`, since bayan-opc uses its escaping (FU-29, the architecture review of 2026-11-20, finding L15; before, bayan-opc wrote `&#9;`, `&#10;` and `&#13;`). Every reader gets the same characters from either spelling, but the parts' bytes differ, so a change of the spelling has to show up here.
+#[test]
+fn writes_tabs_and_line_ends_in_metadata_as_character_references() {
+    let target = "a\tb\nc\rd";
+    let mut relationships = Relationships::new();
+    relationships
+        .add(Relationship::new(
+            "rId1",
+            "http://example.com/relationship",
+            target,
+            TargetMode::External,
+        ))
+        .unwrap();
+    let xml = relationships.to_xml();
+    assert_eq!(
+        String::from_utf8(xml.clone()).unwrap(),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://example.com/relationship\" Target=\"a&#x9;b&#xA;c&#xD;d\" TargetMode=\"External\"/></Relationships>"
+    );
+    let read = Relationships::parse(&xml, &Limits::default()).unwrap();
+    assert_eq!(read.get("rId1").unwrap().target(), target);
+
+    let properties = CoreProperties {
+        title: Some(target.to_owned()),
+        ..CoreProperties::default()
+    };
+    let xml = properties.to_xml().unwrap();
+    assert_eq!(
+        String::from_utf8(xml.clone()).unwrap(),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><dc:title>a\tb\nc&#xD;d</dc:title></cp:coreProperties>"
+    );
+    assert_eq!(
+        CoreProperties::parse(&xml, &Limits::default()).unwrap(),
+        properties
+    );
+}
+
 #[test]
 fn reads_back_every_part_name_it_writes() {
     // A part name may hold a non-ASCII character that IRIs do not allow as itself (U+0080 here, which is not a `ucschar`) only percent-encoded; reading must leave that encoding alone, or the part would vanish (the review of pull request 17). `%C3%A9`, by contrast, is how a ZIP entry name writes `é`.

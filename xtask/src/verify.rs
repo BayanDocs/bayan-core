@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::dep_info::{self, DataFiles};
+use crate::layers::{self, Layer};
 use crate::lint_audit::{self, Guarded};
 use crate::outside_world::{self, Approved, Exemption, Uses};
 use crate::policy::Package;
@@ -152,6 +153,35 @@ pub const DATA_FILES: [DataFiles; 11] = [
         members: &["xtask"],
         reason: "recorded answers of crates.io that the tests of `cargo xtask check-lockfile-age` replay, so that they never use the network (see the README.md next to them)",
     },
+];
+
+/// Every workspace member in its layer, the lowest layer first (the architecture review of 2026-11-20, finding M16). A crate may depend only on crates of its own layer or of a layer before it: the engine's crates stand in the eight layers of architecture §4, from Foundation to Bindings and tools, and the Fidelity Lab, the spikes and the build tools stand above all of them, in that order, so that they may use every crate of the engine and no crate of the engine may depend on them (lab/README.md, spikes/README.md), the lab may not depend on a spike, which is an experiment that will be deleted, and nothing may depend on xtask or its lint canary. The preflight checks the members' normal and build dependencies against the table, before anything is built, and also that no member but bayan-crdt depends on Loro (ADR-0008 decision 1) and that no member whose license is not under the GPL, such as the Apache-2.0 protocol crate to come, depends on one whose license is (ADR-0003; `layers.rs`). A new member fails the preflight until it is given its layer here, the one that architecture §4 names for it, and the table cannot go stale: an entry that names no member, or names one twice, fails too. The layers that hold no crate yet are the architecture's, kept so that the order is the architecture's from the start.
+pub const LAYERS: [Layer; 11] = [
+    ("Foundation", &["bayan-opc", "bayan-units", "bayan-xml"]),
+    ("Model and formats", &["bayan-crdt", "bayan-model"]),
+    ("Text", &[]),
+    ("Layout", &[]),
+    ("Output", &[]),
+    ("Interaction", &[]),
+    ("Engine", &["bayan-engine"]),
+    (
+        "Bindings and tools",
+        &["bayan-cli", "bayan-ffi", "bayan-wasm"],
+    ),
+    (
+        "Fidelity Lab",
+        &["bayan-lab", "bayan-lab-compare", "bayan-lab-layout"],
+    ),
+    (
+        "Spikes",
+        &[
+            "crdt-model",
+            "crdt-model-automerge",
+            "crdt-workload",
+            "text-pipeline",
+        ],
+    ),
+    ("Build tools", &["lint-canary", "xtask"]),
 ];
 
 /// Workspace members whose code that ships may reach the outside world, each with what it may use and the reason: whole modules of Rust's standard library that exist for the outside world, or exactly some items of them. The engine never touches the outside world itself (ADR-0012 §5). After its runs, the Clippy step checks that the code that ships of every other member names none of `std::env`, `std::fs`, `std::net`, `std::process` and `std::time` and uses none of the items of `ITEMS` in `outside_world.rs`, through which std reaches the outside world outside those modules (the file-system methods of `std::path::Path`, `RandomState`, threads without a stack size, sleeping and timeouts, backtraces, `available_parallelism`, the operating system's errors of `std::io::Error` and the standard streams), except the uses of an item in a file that [`APPROVED_ITEMS`] approves, counted; this includes the strings of attributes. It reads every line of the Rust files that the compiler compiled into each member's units that are not tests, as their dependency files list them, so tests may use these modules and items in integration tests and in modules declared with `#[cfg(test)] mod name;`, never in a test module written in place (`outside_world.rs`). xtask reads the source text itself, so no attribute can switch the check off. An entry that lists whole modules is a tool that reaches the outside world anyway: its code is not checked for `ITEMS`, and with `std::env` its units that ship may read any environment variable while they are compiled, where the Clippy step allows the others only Cargo's `CARGO_PKG_*` and Clippy's own (`dep_info.rs`). An entry that lists items allows exactly those, named right after their module, and none of `ITEMS`. It covers the standard library in the workspace's own code, as far as its model of the source text reaches: its rules cover the forms of naming these modules and items found so far, and `outside_world.rs` lists what it does not see, such as a dependency's re-export of std. A member that the list does not name may not depend on one that it names, except for its tests, and the list cannot go stale: an entry for a member that does not exist, or a module or item that the member's code that ships no longer uses, fails too.
@@ -476,6 +506,10 @@ fn preflight(root: &Path) -> Result<Gate, String> {
         &OUTSIDE_WORLD,
         &APPROVED_ITEMS,
     )?;
+    println!("    {line}");
+
+    // The layers of the members, Loro's one user and the licenses of dependencies between members, read from the manifests before anything is built.
+    let line = layers::check(&metadata, &LAYERS)?;
     println!("    {line}");
 
     // Checked before Clippy first runs, because code under a condition that no Clippy run sets, or that a macro builds, would pass the Clippy step unseen.
@@ -1199,6 +1233,28 @@ mod tests {
         assert_eq!(ignored(&fuzz), ignored(&main));
     }
 
+    /// The fuzz workspace's policy bans what the main one bans, with the same settings: today the two bans that keep the nine heapless exceptions of SEC-HEAPLESS no broader than their reasons, which go together with those exceptions (bayan-core#58), so that the two policies still differ only by libFuzzer's NCSA license. Comments may differ.
+    #[test]
+    fn the_fuzz_workspace_bans_the_same_crates() {
+        fn bans(text: &str) -> Vec<&str> {
+            let start = text
+                .find("\n[bans]\n")
+                .expect("a deny.toml without [bans]; update this test")
+                + 1;
+            let rest = &text[start..];
+            let end = rest.find("\n[").map_or(rest.len(), |next| next + 1);
+            rest[..end]
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
+        }
+        let main = include_str!("../../deny.toml").replace("\r\n", "\n");
+        let fuzz = include_str!("../../fuzz/deny.toml").replace("\r\n", "\n");
+        assert!(bans(&main).contains(&"deny = ["), "{:?}", bans(&main));
+        assert_eq!(bans(&fuzz), bans(&main));
+    }
+
     #[test]
     fn reads_tool_versions() {
         assert_eq!(
@@ -1224,28 +1280,58 @@ mod tests {
         );
     }
 
-    /// The fuzzing workflow builds the fuzz workspace's dependencies, whose build scripts and procedural macros run code, in parallel with the gate, so it runs the gate's supply-chain checks first, after checking out the full history that the age check needs (bayan-core#22), before it fetches, builds or tests anything of that workspace (the tests of the targets' harness too, CORE-010).
+    /// Every workflow of the repository, as its file name and its text, read when the test runs, so that a workflow added later is checked too.
+    fn workflows() -> Vec<(String, String)> {
+        let folder = crate::workspace_root().join(".github").join("workflows");
+        let mut found: Vec<(String, String)> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "yml" || extension == "yaml")
+            })
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("\r\n", "\n");
+                (name, text)
+            })
+            .collect();
+        found.sort();
+        assert!(
+            found.iter().any(|(name, _)| name == "verify.yml"),
+            "no verify.yml in {folder:?}"
+        );
+        found
+    }
+
+    /// Building runs code of the dependencies (build scripts and procedural macros), so every job of every workflow that builds runs the gate's supply-chain checks as its first steps, before it builds anything, after a checkout of the full history that the age check needs: as the gate does in its first step, and the CodeQL, fuzzing and fidelity jobs did first (bayan-core#22). Inside each job, not in a job of their own that the others wait for, because GitHub counts a required check that it skipped as passed (the architecture review of 2026-11-20, finding L12). Each check is a step of its own, without a condition and not allowed to fail, and no step that builds runs after a failed step. `crate::workflows` reads the workflows, at any indentation, and fails on what it cannot read; its documentation says what it still cannot see (the review of bayan-core#61).
     #[test]
-    fn the_fuzz_workflow_runs_the_supply_chain_checks_before_it_builds() {
-        let workflow = include_str!("../../.github/workflows/fuzz.yml");
-        let position = |text: &str| {
-            workflow
-                .find(text)
-                .unwrap_or_else(|| panic!("fuzz.yml no longer contains `{text}`; update this test"))
-        };
-        let first_build = position("\"+$FUZZ_TOOLCHAIN\" fetch --locked")
-            .min(position("\"+$FUZZ_TOOLCHAIN\" fuzz build"))
-            .min(position("\"+$FUZZ_TOOLCHAIN\" test --locked"));
-        for check in [
-            "run: cargo xtask check-exact-pins",
-            "run: cargo xtask check-lockfile-age",
-        ] {
-            assert!(
-                position(check) < first_build,
-                "fuzz.yml must run `{check}` before it fetches, builds or tests the fuzz workspace"
-            );
+    fn every_job_that_builds_runs_the_supply_chain_checks_first() {
+        let mut building = Vec::new();
+        let mut problems = Vec::new();
+        for (file, workflow) in workflows() {
+            let (jobs, found) = crate::workflows::supply_chain_order(&file, &workflow)
+                .unwrap_or_else(|problem| panic!("{problem}"));
+            building.extend(jobs);
+            problems.extend(found);
         }
-        assert!(position("fetch-depth: 0") < position("run: cargo xtask check-lockfile-age"));
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+        // The jobs that build today, so that this test notices when it stops recognizing them.
+        assert_eq!(
+            building,
+            [
+                "artifacts.yml sdk",
+                "artifacts.yml wasm",
+                "artifacts.yml miri",
+                "codeql.yml rust-analysis",
+                "fidelity.yml report",
+                "fuzz.yml fuzz",
+                "text-pipeline.yml native",
+                "text-pipeline.yml wasm",
+            ]
+        );
     }
 
     /// A fuzzing run in which a target failed saves no corpus, because the workflows of pull requests can read the cache and the corpus of a target that ran out of memory can hold the input that used the memory: libFuzzer checks the peak memory once a second and blames the input that is running then (FU-6). So the corpora are minimized only when fuzzing passed, and saved only when minimizing passed too.
@@ -1280,27 +1366,41 @@ mod tests {
         );
     }
 
-    /// The jobs of these workflows are, or are to become, required checks of `main`'s ruleset, and the merge queue waits for every required check on the commit it is about to merge, so they must run there too (AGENTS.md, "Workflow conventions"; the review of 2026-10-27, finding H1).
+    /// A workflow that runs on every pull request, without a path filter, can hold a required check of `main`'s ruleset (docs/scripts/github-settings.py requires only such jobs: verify.yml's, artifacts.yml's, codeql.yml's upload jobs and the jobs of the workflows that every BayanDocs repository shares), and the merge queue waits for every required check on the commit it is about to merge, so it must run there too (AGENTS.md, "Workflow conventions"; the review of 2026-10-27, finding H1, and of 2026-11-20, finding L12).
     #[test]
     fn the_workflows_with_required_checks_run_in_the_merge_queue() {
-        for (name, workflow) in [
-            (
-                "artifacts.yml",
-                include_str!("../../.github/workflows/artifacts.yml"),
-            ),
-            (
-                "verify.yml",
-                include_str!("../../.github/workflows/verify.yml"),
-            ),
-        ] {
-            let workflow = workflow.replace("\r\n", "\n");
+        let mut every_pull_request = Vec::new();
+        for (file, workflow) in workflows() {
+            let found = crate::workflows::on_every_pull_request(&file, &workflow)
+                .unwrap_or_else(|problem| panic!("{problem}"));
+            let Some(merge_queue) = found else {
+                continue;
+            };
             assert!(
-                workflow.contains(
-                    "\non:\n  pull_request:\n  merge_group:\n    types: [checks_requested]\n"
-                ),
-                "{name} must run on pull_request and on merge_group with `types: [checks_requested]`"
+                merge_queue,
+                "{file} runs on every pull request, so it must also run on merge_group with `types: [checks_requested]`"
             );
+            every_pull_request.push(file);
         }
+        assert_eq!(
+            every_pull_request,
+            [
+                "artifacts.yml",
+                "codeql.yml",
+                "dco.yml",
+                "reuse.yml",
+                "supply-chain.yml",
+                "verify.yml",
+                "workflow-lint.yml",
+            ]
+        );
+    }
+
+    /// The real table of layers is right, and the real workspace keeps its rules (`layers.rs`).
+    #[test]
+    fn the_real_layer_table_is_right() {
+        let metadata = policy::metadata(&crate::workspace_root()).unwrap();
+        layers::check(&metadata, &LAYERS).unwrap_or_else(|problem| panic!("{problem}"));
     }
 
     #[test]

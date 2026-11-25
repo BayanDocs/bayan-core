@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use bayan_units::{Blu, Rounding, scale};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
@@ -15,8 +16,8 @@ use serde_json::error::Category;
 /// The identifier of version 1 of the layout JSON, the value of every file's `schema` field.
 pub const SCHEMA_ID: &str = "urn:bayandocs:lab:layout:v1";
 
-/// BLU per point: 1 BLU is 1/25,400 of a point (ADR-0005).
-pub const BLU_PER_POINT: i64 = 25_400;
+/// BLU per point: 1 BLU is 1/25,400 of a point (ADR-0005), bayan-units' [`Blu::POINT`].
+pub const BLU_PER_POINT: i64 = Blu::POINT.0;
 
 /// The largest magnitude of a length, in thousandths of a point: a billion points, about 350 kilometres. Every such value is exactly an `f64`, so lengths survive JSON unchanged; anything larger is refused.
 pub const MAX_MILLIPOINTS: i64 = 1_000_000_000_000;
@@ -51,11 +52,9 @@ impl Points {
     /// The length of `blu` BLU, rounded to the nearest thousandth of a point (no value lies exactly halfway, since a thousandth of a point is 25.4 BLU), or `None` beyond [`MAX_MILLIPOINTS`].
     #[must_use]
     pub fn from_blu(blu: i64) -> Option<Self> {
-        // A thousandth of a point is 25.4 BLU, so millis = blu × 5 / 127, rounded.
-        let numerator = i128::from(blu).checked_mul(5)?;
-        let magnitude = (numerator.unsigned_abs() * 2 + 127) / 254;
-        let millis = i64::try_from(magnitude).ok()?;
-        Self::from_millis(if blu < 0 { -millis } else { millis })
+        // blu × 1,000 ÷ 25,400 thousandths of a point, computed exactly and rounded once by bayan-units, as the engine converts its own lengths.
+        let millis = scale(blu, 1000, BLU_PER_POINT, Rounding::HalfAwayFromZero)?;
+        Self::from_millis(millis)
     }
 
     /// The length of `points` points, rounded to the nearest thousandth (halves away from zero), or `None` if it is not finite or beyond [`MAX_MILLIPOINTS`].
@@ -731,6 +730,19 @@ mod tests {
         assert_eq!(Points::from_blu(-13), Points::from_millis(-1));
         assert_eq!(Points::from_blu(i64::MAX), None);
         assert_eq!(Points::from_blu(i64::MIN), None);
+        // The same lengths as the conversion that the lab wrote by hand before it used bayan-units (the architecture review of 2026-11-20, finding L15): blu × 5 ÷ 127, its magnitude rounded half up.
+        let by_hand = |blu: i64| {
+            let magnitude = (i128::from(blu).unsigned_abs() * 10 + 127) / 254;
+            let millis = i64::try_from(magnitude).ok()?;
+            Points::from_millis(if blu < 0 { -millis } else { millis })
+        };
+        let edge = MAX_MILLIPOINTS * 127 / 5;
+        for blu in (-254_000..=254_000)
+            .chain(edge - 300..=edge + 300)
+            .chain(-edge - 300..=-edge + 300)
+        {
+            assert_eq!(Points::from_blu(blu), by_hand(blu), "{blu}");
+        }
     }
 
     #[test]

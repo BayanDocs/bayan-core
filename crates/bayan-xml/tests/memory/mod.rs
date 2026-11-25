@@ -7,7 +7,7 @@ use bayan_xml::{Error, Limits, Reader, Source};
 /// About the size of the crafted parts: large enough that memory kept for every piece of a run or every field of a declaration shows far above the bound, small enough to read quickly in a debug build and in WebAssembly.
 pub const SIZE: usize = 1 << 20;
 
-/// The most memory that reading a crafted part may take, in bytes for every byte of the part: the bound the tests hold the reader to. The parts' text is ASCII. Reading keeps one copy of a run of text, never longer than the run itself, so at most the part's size; a UTF-16 part adds its decoded text, for which `Source::new` reserves as many bytes as the part has, while the run's copy then takes half as many, one and a half times the part in all. Memory kept for every piece of a run or every field of a declaration goes far beyond this.
+/// The most memory that reading a crafted part may take, in bytes for every byte of the part: the bound the tests hold the reader to. The parts' text is ASCII. Reading keeps one copy of a run of text, never longer than the run itself, so at most the part's size; a UTF-16 part adds its decoded text, for which `Source::new` reserves exactly the bytes the text takes in UTF-8, half the part for these, while the run's copy then takes as many, the part's size in all. `memory_runs` holds a UTF-16 part of wider characters to a bound of its own. Memory kept for every piece of a run or every field of a declaration goes far beyond this.
 #[cfg(target_arch = "wasm32")]
 pub const AT_MOST: usize = 2;
 
