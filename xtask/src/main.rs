@@ -32,6 +32,8 @@ mod supply_chain;
 mod toml_subset;
 mod verify;
 mod wasm_imports;
+#[cfg(test)]
+mod workflows;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

@@ -1306,87 +1306,16 @@ mod tests {
         found
     }
 
-    /// The jobs of a workflow, as each job's identifier and its text: every line from its identifier, which stands two spaces in under `jobs:`, to the next.
-    fn jobs(workflow: &str) -> Vec<(&str, &str)> {
-        let start = workflow
-            .find("\njobs:\n")
-            .expect("a workflow without `jobs:`; update this test")
-            + "\njobs:\n".len();
-        let body = &workflow[start..];
-        let mut starts: Vec<(usize, &str)> = Vec::new();
-        let mut offset = 0;
-        for line in body.split_inclusive('\n') {
-            let trimmed = line.trim_end();
-            if let Some(name) = trimmed
-                .strip_prefix("  ")
-                .and_then(|rest| rest.strip_suffix(':'))
-                && !name.starts_with([' ', '#'])
-                && !name.contains(' ')
-            {
-                starts.push((offset, name));
-            }
-            offset += line.len();
-        }
-        starts
-            .iter()
-            .enumerate()
-            .map(|(index, &(at, name))| {
-                let end = starts.get(index + 1).map_or(body.len(), |&(next, _)| next);
-                (name, &body[at..end])
-            })
-            .collect()
-    }
-
-    /// Whether a line of a job builds or runs code of the workspace's dependencies, which their build scripts and procedural macros can do: Cargo with any command but the supply-chain checks themselves, the gate (which runs them as its first step) and printing versions; scripts/dev-setup.sh, which can build tools from crates.io; and CodeQL's analysis of Rust, whose extractor runs `cargo check`.
-    fn builds(line: &str) -> bool {
-        let command = line.trim();
-        let command = command.strip_prefix("- ").unwrap_or(command);
-        let command = command.strip_prefix("run: ").unwrap_or(command);
-        if command == "languages: rust" || command.starts_with("scripts/dev-setup.sh") {
-            return true;
-        }
-        let Some(arguments) = command.strip_prefix("cargo ") else {
-            return false;
-        };
-        ![
-            "xtask check-exact-pins",
-            "xtask check-lockfile-age",
-            "xtask verify",
-            "--version",
-            "deny --version",
-        ]
-        .contains(&arguments)
-    }
-
-    /// Building runs code of the dependencies (build scripts and procedural macros), so every job of every workflow that builds runs the gate's supply-chain checks as its first steps, before it builds anything, after a checkout of the full history that the age check needs: as the gate does in its first step, and the CodeQL, fuzzing and fidelity jobs did first (bayan-core#22). Inside each job, not in a job of their own that the others wait for, because GitHub counts a required check that it skipped as passed (the architecture review of 2026-11-20, finding L12).
+    /// Building runs code of the dependencies (build scripts and procedural macros), so every job of every workflow that builds runs the gate's supply-chain checks as its first steps, before it builds anything, after a checkout of the full history that the age check needs: as the gate does in its first step, and the CodeQL, fuzzing and fidelity jobs did first (bayan-core#22). Inside each job, not in a job of their own that the others wait for, because GitHub counts a required check that it skipped as passed (the architecture review of 2026-11-20, finding L12). Each check is a step of its own, without a condition and not allowed to fail, and no step that builds runs after a failed step. `crate::workflows` reads the workflows, at any indentation, and fails on what it cannot read; its documentation says what it still cannot see (the review of bayan-core#61).
     #[test]
     fn every_job_that_builds_runs_the_supply_chain_checks_first() {
         let mut building = Vec::new();
         let mut problems = Vec::new();
         for (file, workflow) in workflows() {
-            for (job, text) in jobs(&workflow) {
-                let (mut full_history, mut pins, mut age) = (false, false, false);
-                for line in text.lines() {
-                    match line.trim() {
-                        "fetch-depth: 0" => full_history = true,
-                        "run: cargo xtask check-exact-pins" => pins = true,
-                        "run: cargo xtask check-lockfile-age" => {
-                            if !full_history {
-                                problems.push(format!("{file}, job `{job}`: `cargo xtask check-lockfile-age` runs before a checkout with `fetch-depth: 0`"));
-                            }
-                            age = true;
-                        }
-                        _ => {}
-                    }
-                    if builds(line) {
-                        if !(pins && age) {
-                            problems.push(format!("{file}, job `{job}`: `{}` runs before `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age`", line.trim()));
-                        }
-                        building.push(format!("{file} {job}"));
-                        break;
-                    }
-                }
-            }
+            let (jobs, found) = crate::workflows::supply_chain_order(&file, &workflow)
+                .unwrap_or_else(|problem| panic!("{problem}"));
+            building.extend(jobs);
+            problems.extend(found);
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
         // The jobs that build today, so that this test notices when it stops recognizing them.
@@ -1442,28 +1371,13 @@ mod tests {
     fn the_workflows_with_required_checks_run_in_the_merge_queue() {
         let mut every_pull_request = Vec::new();
         for (file, workflow) in workflows() {
-            let start = workflow
-                .find("\non:\n")
-                .unwrap_or_else(|| panic!("{file} has no `on:` block; update this test"))
-                + "\non:\n".len();
-            let triggers: Vec<&str> = workflow[start..]
-                .lines()
-                .take_while(|line| line.is_empty() || line.starts_with([' ', '#']))
-                .filter(|line| !line.trim_start().starts_with('#'))
-                .collect();
-            let block = triggers.join("\n");
-            let Some(at) = triggers.iter().position(|line| *line == "  pull_request:") else {
+            let found = crate::workflows::on_every_pull_request(&file, &workflow)
+                .unwrap_or_else(|problem| panic!("{problem}"));
+            let Some(merge_queue) = found else {
                 continue;
             };
-            let filtered = triggers[at + 1..]
-                .iter()
-                .take_while(|line| line.starts_with("    "))
-                .any(|line| matches!(line.trim(), "paths:" | "paths-ignore:"));
-            if filtered {
-                continue;
-            }
             assert!(
-                block.contains("\n  merge_group:\n    types: [checks_requested]"),
+                merge_queue,
                 "{file} runs on every pull request, so it must also run on merge_group with `types: [checks_requested]`"
             );
             every_pull_request.push(file);

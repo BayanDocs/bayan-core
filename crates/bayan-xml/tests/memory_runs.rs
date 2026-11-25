@@ -39,7 +39,7 @@ fn a_run_of_references_takes_one_copy_of_the_run_at_most() {
             part.len()
         );
     }
-    // The largest decoded text: characters that take three bytes in UTF-8 and two in UTF-16, after a reference that makes the reader copy the run. The decoded text and the run's copy each take one and a half times the part, three times the part together, and a quarter more is left for WebAssembly's pages of 64 KiB; a text that doubled its room as it grew took three and a half times the part. The part is about four times `SIZE`, so that the rounding to pages counts for less.
+    // The largest decoded text: characters that take three bytes in UTF-8 and two in UTF-16, after a reference that makes the reader copy the run. The decoded text and the run's copy each take one and a half times the part, three times the part together, and a quarter more is left for WebAssembly's pages of 64 KiB; a text that doubled its room as it grew took four and a half times the part (18,874,368 bytes for this part of 4,194,328 bytes, measured before the decoded text got exactly the room it needs). The part is about four times `SIZE`, so that the rounding to pages counts for less.
     let wide = utf16(&format!("<r>&lt;{}</r>", "\u{4E2D}".repeat(2 * SIZE)));
     let grown = growth(|| assert_eq!(read(&wide), None));
     assert!(
