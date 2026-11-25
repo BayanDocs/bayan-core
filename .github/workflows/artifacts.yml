@@ -13,6 +13,11 @@
 # credentials kept after checkout, a timeout on every job, and tools downloaded at pinned versions and checked against SHA-256 checksums.
 # Unlike verify.yml, nothing here uses a cache: the artifacts are distributed, so they are built from a fresh checkout and fresh downloads,
 # each checked by Cargo or against a pinned checksum, and never from files a cache restored (which nothing checks again).
+# Each job that builds runs the supply-chain checks of the gate's first step (cargo xtask check-exact-pins and check-lockfile-age) before it
+# builds anything, as the CodeQL, fuzzing and fidelity jobs do (the architecture review of 2026-11-20, finding L12): building runs the
+# dependencies' build scripts and procedural macros, and the gate checks a pull request's Cargo.lock only in parallel with these jobs. The
+# checks run inside each job rather than in a job of their own that the others wait for, because GitHub counts a required check that it
+# skipped as passed.
 name: artifacts
 
 on:
@@ -71,6 +76,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -78,6 +85,13 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
+
+      # Before anything of the workspace is built (L12). They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       # Before the MSVC developer environment: without it, rustc finds Microsoft's linker by itself, as in verify.yml.
       - name: Build the C SDK
@@ -146,6 +160,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -153,6 +169,13 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
+
+      # Before anything of the workspace is built (L12). They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       - name: Install wasm-bindgen (pinned release archive, SHA-256 checked)
         run: |
@@ -334,6 +357,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -341,6 +366,13 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
+
+      # Before anything of the workspace is built (L12). They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       - name: Install Miri on the pinned nightly toolchain (scripts/dev-setup.sh)
         run: scripts/dev-setup.sh --no-wasm-bindgen --no-node

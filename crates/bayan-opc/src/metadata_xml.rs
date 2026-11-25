@@ -7,7 +7,7 @@
 //! - A rule of the model that an event breaks is remembered, the model sees no more events, and reading goes on to the end of the part, so that a part that is not acceptable XML, or has too many nodes, is refused as such, whatever its model would say: the errors are the same as when the whole part was parsed before its model looked at it.
 //! - It keeps the decoded text, which every span of bayan-xml's events refers to, and the part's encoding, so that a model can write an unchanged part back exactly as it was ([`encode`] gives the original bytes back, UTF-16 included, since decoding UTF-16 without errors loses nothing) and a changed part in its own encoding (bayan-xml's writer writes only UTF-8, so a part kept in UTF-16 is encoded here).
 //!
-//! Writing is plain text, assembled by the models from the original text and new entries, with [`escape_attribute`] and [`escape_text`] and the character checks below; the rules for names exist once, in bayan-xml ([`is_ncname`]).
+//! Writing is plain text, assembled by the models from the original text and new entries, with bayan-xml's rules for escaping, characters and names ([`escape_attribute`], [`escape_text`], [`is_xml_character`], [`is_ncname`]), which exist once, there.
 
 use bayan_xml::{Event, Reader, Source};
 
@@ -199,50 +199,13 @@ pub(crate) fn namespace_of<'r>(name: &bayan_xml::Name<'r>) -> Option<&'r str> {
     name.namespace().map(|namespace| namespace.uri())
 }
 
-/// Whether XML 1.0 allows `character` (§2.2, `Char`), as itself or as a character reference: no control characters other than tab, line feed and carriage return, and neither U+FFFE nor U+FFFF. What a writer checks before it writes text from elsewhere.
-pub(crate) fn is_xml_character(character: char) -> bool {
-    matches!(character, '\t' | '\n' | '\r' | ' '..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
-}
+// The rules for characters, names and escaping are bayan-xml's, which its reader and writer apply too, so that they exist once (the architecture review of 2026-11-20, finding L15): `is_xml_character` is whether XML 1.0 allows a character (§2.2, `Char`), as itself or as a character reference, what a writer checks before it writes text from elsewhere; `is_ncname` whether a text is an `NCName` of Namespaces in XML (a name without a colon), the form of `xsd:ID` values such as relationship identifiers; `escape_attribute` writes a value as the content of an attribute in double quotes, `&`, `<`, `>` and `"` as entity references and tab, line feed and carriage return as character references, so that attribute value normalization gives them back; and `escape_text` writes a value as character data, `&`, `<` and `>` as entity references and carriage return as a character reference, so that line end normalization gives it back.
+pub(crate) use bayan_xml::chars::{is_char as is_xml_character, is_ncname};
+pub(crate) use bayan_xml::escape::{attribute as escape_attribute, text as escape_text};
 
-/// XML white space (§2.3, `S`).
+/// XML white space (§2.3, `S`), as bayan-xml judges it.
 pub(crate) fn is_space(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\r' | '\n')
-}
-
-/// Whether `text` is an `NCName` of Namespaces in XML (a name without a colon), the form of `xsd:ID` values such as relationship identifiers: as bayan-xml's writer judges the name of an element without a prefix, so that the rules for names exist once, in bayan-xml.
-pub(crate) fn is_ncname(text: &str) -> bool {
-    bayan_xml::Writer::new()
-        .start(bayan_xml::QName::unqualified(text))
-        .is_ok()
-}
-
-/// Writes `value` as the content of an attribute in double quotes: `&`, `<`, `>` and `"` as entity references, and tab, line feed and carriage return as character references, so that attribute value normalization gives them back.
-pub(crate) fn escape_attribute(value: &str, out: &mut String) {
-    for character in value.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\t' => out.push_str("&#9;"),
-            '\n' => out.push_str("&#10;"),
-            '\r' => out.push_str("&#13;"),
-            other => out.push(other),
-        }
-    }
-}
-
-/// Writes `value` as character data: `&`, `<` and `>` as entity references, and carriage return as a character reference, so that line end normalization gives it back.
-pub(crate) fn escape_text(value: &str, out: &mut String) {
-    for character in value.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '\r' => out.push_str("&#13;"),
-            other => out.push(other),
-        }
-    }
+    u8::try_from(character).is_ok_and(bayan_xml::chars::is_space)
 }
 
 /// Encodes `text` in `encoding`, with the byte order mark the original had.

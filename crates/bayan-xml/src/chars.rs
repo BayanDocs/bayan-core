@@ -1,7 +1,9 @@
 //! XML's character classes (XML 1.0 Fifth Edition §2.2, §2.3) and qualified names (Namespaces in XML 1.0 Third Edition §3, §4).
+//!
+//! The reader and the writer judge characters and names with these functions; code that writes XML text of its own uses them too, so that the rules exist once.
 
-/// Whether `character` is one that XML allows (production [2] `Char`): tab, line feed, carriage return and everything from U+0020 except the surrogates, U+FFFE and U+FFFF.
-pub(crate) fn is_char(character: char) -> bool {
+/// Whether `character` is one that XML allows (production \[2\] `Char`): tab, line feed, carriage return and everything from U+0020 except the surrogates, U+FFFE and U+FFFF.
+pub fn is_char(character: char) -> bool {
     matches!(
         character,
         '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'
@@ -23,13 +25,13 @@ pub(crate) fn find_invalid_char(text: &str) -> Option<usize> {
     })
 }
 
-/// Whether `byte` is XML white space (production [3] `S`): space, tab, carriage return or line feed.
-pub(crate) const fn is_space(byte: u8) -> bool {
+/// Whether `byte` is XML white space (production \[3\] `S`): space, tab, carriage return or line feed.
+pub const fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-/// Whether `character` may start a name (production [4] `NameStartChar`).
-pub(crate) fn is_name_start_char(character: char) -> bool {
+/// Whether `character` may start a name (production \[4\] `NameStartChar`).
+pub fn is_name_start_char(character: char) -> bool {
     matches!(
         character,
         ':' | 'A'..='Z'
@@ -50,8 +52,8 @@ pub(crate) fn is_name_start_char(character: char) -> bool {
     )
 }
 
-/// Whether `character` may continue a name (production [4a] `NameChar`).
-pub(crate) fn is_name_char(character: char) -> bool {
+/// Whether `character` may continue a name (production \[4a\] `NameChar`).
+pub fn is_name_char(character: char) -> bool {
     is_name_start_char(character)
         || matches!(
             character,
@@ -59,18 +61,18 @@ pub(crate) fn is_name_char(character: char) -> bool {
         )
 }
 
-/// Whether `text` is an XML name (production [5] `Name`).
-pub(crate) fn is_name(text: &str) -> bool {
+/// Whether `text` is an XML name (production \[5\] `Name`).
+pub fn is_name(text: &str) -> bool {
     let mut characters = text.chars();
     characters.next().is_some_and(is_name_start_char) && characters.all(is_name_char)
 }
 
-/// Whether `text` is an `NCName`: a name without a colon (Namespaces in XML, production [4]).
-pub(crate) fn is_ncname(text: &str) -> bool {
+/// Whether `text` is an `NCName`: a name without a colon (Namespaces in XML, production \[4\]).
+pub fn is_ncname(text: &str) -> bool {
     !text.contains(':') && is_name(text)
 }
 
-/// Splits a qualified name into its prefix and its local part: `("", "p")` for `p` and `("w", "p")` for `w:p`. `None` if `text` is not a qualified name (Namespaces in XML, production [7] `QName`), for example `:p`, `w:`, `a:b:c` or anything that is not a name.
+/// Splits a qualified name into its prefix and its local part: `("", "p")` for `p` and `("w", "p")` for `w:p`. `None` if `text` is not a qualified name (Namespaces in XML, production \[7\] `QName`), for example `:p`, `w:`, `a:b:c` or anything that is not a name.
 pub(crate) fn split_qname(text: &str) -> Option<(&str, &str)> {
     match text.split_once(':') {
         None => is_ncname(text).then_some(("", text)),

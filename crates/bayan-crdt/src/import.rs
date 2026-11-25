@@ -96,7 +96,7 @@ pub enum ImportError {
     Rejected(String),
     /// The imported changes contain a value nested deeper than [`MAX_VALUE_DEPTH`]. The document now holds that value, and freeing it would recurse once per level, so the document is **poisoned**: it, and every handle to it, refuses every further call or answers as for an empty document (see [`crate::CrdtError::Poisoned`]), and when it is dropped its memory is deliberately leaked instead of freed. Discard it and reload the last good state (for example the last snapshot) without the offending update.
     ValueTooDeep,
-    /// The CRDT library panicked while decoding or applying the blob, which Loro 1.16.2 does for many crafted blobs (CORE-004 report). The document may be half updated, so it is **poisoned** as with [`ImportError::ValueTooDeep`]: discard it and reload the last good state without the offending blob. Only where panics unwind; where they abort (WebAssembly builds), the engine stops and the host restarts it.
+    /// The CRDT library panicked while decoding or applying the blob, which Loro can do on crafted blobs, as 1.16.2 did on many (CORE-004 report). The document may be half updated, so it is **poisoned** as with [`ImportError::ValueTooDeep`]: discard it and reload the last good state without the offending blob. Only where panics unwind; where they abort (WebAssembly builds), the engine stops and the host restarts it.
     Panicked,
     /// The document was poisoned by an earlier import (see [`ImportError::ValueTooDeep`] and [`ImportError::Panicked`]).
     Poisoned,

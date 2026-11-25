@@ -4,7 +4,7 @@ A spike is a time-boxed experiment that answers a design question before product
 
 ## Spikes are excluded from release builds
 
-- No crate under `crates/` may depend on a spike crate, so spike code can never reach a release. Release artifacts are built from bayan-ffi, bayan-wasm and bayan-cli and their dependencies only.
+- No crate under `crates/` may depend on a spike crate, so spike code can never reach a release. Release artifacts are built from bayan-ffi, bayan-wasm and bayan-cli and their dependencies only. The gate checks it: `LAYERS` in `xtask/src/verify.rs` puts the spikes in a layer of their own above the engine's crates and the Fidelity Lab, so neither may depend on a spike (`xtask/src/layers.rs`). Add a new spike crate to that layer.
 - Code that proves itself moves into a crate under `crates/` through a work package, with tests and review.
 
 ## Spikes are still checked

@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# BLU and their exact conversion to points, with one rounding step (ADR-0005; the architecture review of 2026-11-20, finding L15).
+bayan-units = { path = "../../crates/bayan-units" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

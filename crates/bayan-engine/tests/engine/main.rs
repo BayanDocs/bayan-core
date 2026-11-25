@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 mod conformance;
+mod depth;
 mod hostile_input;
 mod panic_recovery;
 mod protocol_schema;

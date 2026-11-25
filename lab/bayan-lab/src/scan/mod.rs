@@ -43,7 +43,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The limits the corpus tools use: the engine's own defaults, bayan-opc's and bayan-xml's, except that entries may uncompress to at most 256 MiB each and 1 GiB together (bayan-opc allows 512 MiB and 2 GiB), as the scanner always allowed. None is looser than the engine's: a document that BayanDocs would refuse is recorded as refused. Real documents stay far below them: in the 17,458 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 29 elements, and no name is longer than 37 bytes.
+    /// The limits the corpus tools use: the engine's own defaults, bayan-opc's and bayan-xml's, except that entries may uncompress to at most 256 MiB each and 1 GiB together (bayan-opc allows 512 MiB and 2 GiB), as the scanner always allowed. None is looser than the engine's: a document that BayanDocs would refuse is recorded as refused (the test `the_limits_are_never_looser_than_the_engines` compares them, limit by limit). Real documents stay far below them: in the 17,458 XML parts of the public corpus v1, no element has more than 76 attributes, no more than 74 namespace declarations are in scope at once, nothing is nested deeper than 29 elements, and no name is longer than 37 bytes.
     pub const DEFAULT: Self = Self {
         max_package_size: 512 * 1024 * 1024,
         package: bayan_opc::Limits {
@@ -407,6 +407,118 @@ impl Parts<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scanner's limits are never looser than the engine's own defaults, bayan-opc's and bayan-xml's, as `Limits::DEFAULT` promises (the architecture review of 2026-11-20, finding L15): every limit a document's package or XML meets in the engine, the scanner applies at least as strictly. Both structs are taken apart field by field, so that a new limit in either fails to compile here until it is compared too. `max_package_size` and `max_parts` are the scanner's own: the engine does not open documents yet, and the work package that lets it compares its limit on a document's size with the scanner's here.
+    #[test]
+    fn the_limits_are_never_looser_than_the_engines() {
+        let Limits {
+            max_package_size: _,
+            package,
+            xml,
+            max_parts: _,
+        } = Limits::DEFAULT;
+        let bayan_opc::Limits {
+            max_entries,
+            max_name_length,
+            max_entry_size,
+            max_total_size,
+            max_compression_ratio,
+            compression_ratio_grace,
+            max_metadata_size,
+            max_metadata_total_size,
+            max_xml_nodes,
+            max_xml_depth,
+            max_xml_attributes,
+            max_xml_name_length,
+            max_compound_file_entries,
+        } = bayan_opc::Limits::DEFAULT;
+        for (name, scanner, engine) in [
+            ("max_entries", package.max_entries, max_entries),
+            ("max_name_length", package.max_name_length, max_name_length),
+            (
+                "max_metadata_size",
+                package.max_metadata_size,
+                max_metadata_size,
+            ),
+            (
+                "max_metadata_total_size",
+                package.max_metadata_total_size,
+                max_metadata_total_size,
+            ),
+            ("max_xml_nodes", package.max_xml_nodes, max_xml_nodes),
+            ("max_xml_depth", package.max_xml_depth, max_xml_depth),
+            (
+                "max_xml_attributes",
+                package.max_xml_attributes,
+                max_xml_attributes,
+            ),
+            (
+                "max_xml_name_length",
+                package.max_xml_name_length,
+                max_xml_name_length,
+            ),
+            (
+                "max_compound_file_entries",
+                package.max_compound_file_entries,
+                max_compound_file_entries,
+            ),
+        ] {
+            assert!(
+                scanner <= engine,
+                "bayan-opc's {name}: the scanner allows {scanner}, the engine {engine}"
+            );
+        }
+        for (name, scanner, engine) in [
+            ("max_entry_size", package.max_entry_size, max_entry_size),
+            ("max_total_size", package.max_total_size, max_total_size),
+            (
+                "max_compression_ratio",
+                package.max_compression_ratio,
+                max_compression_ratio,
+            ),
+            (
+                "compression_ratio_grace",
+                package.compression_ratio_grace,
+                compression_ratio_grace,
+            ),
+        ] {
+            assert!(
+                scanner <= engine,
+                "bayan-opc's {name}: the scanner allows {scanner}, the engine {engine}"
+            );
+        }
+        let bayan_xml::Limits {
+            max_size,
+            max_depth,
+            max_attributes,
+            max_name_length,
+            max_namespaces,
+            max_namespace_name_length,
+            max_compatibility_tokens,
+        } = bayan_xml::Limits::DEFAULT;
+        for (name, scanner, engine) in [
+            ("max_size", xml.max_size, max_size),
+            ("max_depth", xml.max_depth, max_depth),
+            ("max_attributes", xml.max_attributes, max_attributes),
+            ("max_name_length", xml.max_name_length, max_name_length),
+            ("max_namespaces", xml.max_namespaces, max_namespaces),
+            (
+                "max_namespace_name_length",
+                xml.max_namespace_name_length,
+                max_namespace_name_length,
+            ),
+            (
+                "max_compatibility_tokens",
+                xml.max_compatibility_tokens,
+                max_compatibility_tokens,
+            ),
+        ] {
+            assert!(
+                scanner <= engine,
+                "bayan-xml's {name}: the scanner allows {scanner}, the engine {engine}"
+            );
+        }
+    }
 
     #[test]
     fn hidden_characters_are_refused_and_visible_ones_kept() {

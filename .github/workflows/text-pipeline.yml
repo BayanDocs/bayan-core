@@ -12,7 +12,9 @@
 # (spikes/text-pipeline/tests/determinism.rs, the gate's determinism step).
 # Workflow rules (ADR-0017), as in artifacts.yml: actions pinned to full commit SHAs with the version in a comment, minimal permissions, no
 # credentials kept after checkout, a timeout on every job, tools and fonts downloaded at pinned versions and checked against SHA-256
-# checksums, and no cache.
+# checksums, and no cache. As there, each job that builds runs the supply-chain checks of the gate's first step before it builds anything
+# (the architecture review of 2026-11-20, finding L12): the workflow runs whenever Cargo.lock changes, and building runs the dependencies'
+# build scripts and procedural macros.
 name: text-pipeline
 
 on:
@@ -91,6 +93,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -98,6 +102,13 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
+
+      # Before anything of the workspace is built (L12). They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       - name: Fetch the fonts (pinned SHA-256 checksums in spikes/text-pipeline/fonts/manifest.txt)
         run: spikes/text-pipeline/fonts/fetch.sh
@@ -129,6 +140,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The full history: `cargo xtask check-lockfile-age` compares each Cargo.lock with the merge base of the pull request (for other runs, with origin/main) and finds the commit that added each new package version.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the Rust toolchain pinned in rust-toolchain.toml
@@ -136,6 +149,13 @@ jobs:
           rustup set auto-self-update disable
           rustup toolchain install
           rustc --version
+
+      # Before anything of the workspace is built (L12). They read every Cargo workspace of the repository and build nothing: `cargo metadata` downloads crate files, but runs none of their code.
+      - name: Every dependency is pinned exactly (cargo xtask check-exact-pins)
+        run: cargo xtask check-exact-pins
+
+      - name: Cargo builds exactly what each Cargo.lock lists, and every new package version is at least 24 hours old, with the checksum crates.io published (cargo xtask check-lockfile-age)
+        run: cargo xtask check-lockfile-age
 
       - name: Install wasm-bindgen (pinned release archive, SHA-256 checked)
         run: |

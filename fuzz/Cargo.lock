@@ -133,6 +133,7 @@ dependencies = [
 name = "bayan-lab-layout"
 version = "0.0.0"
 dependencies = [
+ "bayan-units",
  "icu_properties",
  "miniz_oxide",
  "schemars",
@@ -148,6 +149,13 @@ dependencies = [
  "bayan-xml",
  "cfb",
  "miniz_oxide",
+]
+
+[[package]]
+name = "bayan-units"
+version = "0.0.0"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]

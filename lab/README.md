@@ -54,7 +54,7 @@ bayan-lab layout check word-layout.json
 
 ## Rules
 
-- Lab tools belong to the **Bindings and tools** layer: they may use every engine crate, and no crate under `crates/` may depend on them (architecture §4).
+- Lab tools stand above the engine's crates, in the layer **Fidelity Lab** of `LAYERS` in `xtask/src/verify.rs`: they may use every engine crate, and no crate under `crates/` may depend on them (architecture §4). The gate checks both, and that the lab depends on no spike (`xtask/src/layers.rs`). Add a new lab crate to that layer.
 - Add each lab crate to `members` in the root `Cargo.toml` by name (for example `"lab/bayan-lab"`), so `cargo xtask verify` checks it like every other crate. Do not use a glob such as `"lab/*"`: a folder without a `Cargo.toml` (for example `lab/corpus/`) would break the whole workspace. A lab crate that cannot run in a browser is listed in `NATIVE_ONLY` in `xtask/src/verify.rs`, as bayan-lab is.
 - Corpus documents are never committed to Git; only their manifests are. Microsoft font files and full font metric tables never leave the reference machine. Content of the private corpus never appears in logs, reports or test snapshots.
 - Every PDF is hostile input too. bayan-lab-layout's reader reads only what extraction needs, within the limits of `bayan_lab_layout::pdf::Limits`, refuses what it does not support (encryption, LZW, vertical writing, optional content and more) instead of guessing or repairing, and has the fuzz target `pdf_extract` in `fuzz/`. A layout JSON contains its document's text: keep the layout of a private document as private as the document.
