@@ -146,7 +146,7 @@ fn checks_the_order_of_every_job_at_any_indentation() {
             "scratch.yml, job `shallow`, line 37: `cargo xtask check-exact-pins` may fail without stopping the job (`continue-on-error: true`)",
             "scratch.yml, job `shallow`, line 39: `cargo xtask check-lockfile-age` runs only `if: github.event_name == 'push'`, so a job that builds can run without it",
             "scratch.yml, job `shallow`, line 38: `cargo xtask check-lockfile-age` runs before a checkout with `fetch-depth: 0`",
-            "scratch.yml, job `codeql`, line 47: `CodeQL's analysis of Rust` runs before `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age`",
+            "scratch.yml, job `codeql`, line 47: `a CodeQL analysis that can include Rust` runs before `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age`",
             "scratch.yml, job `local`, line 53: `uses: ./.github/actions/build` runs before `cargo xtask check-exact-pins` and `cargo xtask check-lockfile-age`",
         ]
     );
@@ -247,10 +247,78 @@ fn refuses_what_it_cannot_read() {
         "on:\n  - pull_request\njobs:\n  quiet:\n    runs-on: ubuntu-24.04\n",
         "`- pull_request` is not a key of a mapping",
     );
-    refused(
-        &format!(
-            "{on}jobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066\n        with:\n          languages: ${{{{ fromJSON(inputs.languages) }}}}\n"
-        ),
-        "languages from an expression other than one value of the job's matrix",
+}
+
+/// Whether a job whose first step is CodeQL's `init`, with these lines below its `uses:`, in a job with this `strategy:`, counts as building (it runs before the supply-chain checks, so building is also a problem).
+fn codeql_builds(strategy: &str, with: &str) -> bool {
+    let workflow = format!(
+        "on:\n  pull_request:\njobs:\n  analysis:\n{strategy}    runs-on: ubuntu-24.04\n    steps:\n      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3\n{with}"
     );
+    let (building, problems) = supply_chain_order("scratch.yml", &workflow).unwrap();
+    assert_eq!(building.len(), problems.len(), "{problems:?}");
+    !building.is_empty()
+}
+
+#[test]
+fn counts_every_codeql_analysis_that_can_include_rust() {
+    let matrix = |languages: &str| format!("    strategy:\n      matrix:\n{languages}");
+    let from_matrix = "        with:\n          languages: ${{ matrix.language }}\n";
+    // Without `languages:`, the action finds the repository's languages itself, Rust among them.
+    assert!(codeql_builds("", ""));
+    assert!(codeql_builds(
+        "",
+        "        with:\n          build-mode: none\n"
+    ));
+    assert!(codeql_builds(
+        "",
+        "        with:\n          languages: \"\"\n"
+    ));
+    // Rust named directly or through the matrix, in any letter case.
+    assert!(codeql_builds(
+        "",
+        "        with:\n          languages: rust\n"
+    ));
+    assert!(codeql_builds(
+        "",
+        "        with:\n          languages: python, Rust\n"
+    ));
+    assert!(codeql_builds(
+        "",
+        "        with:\n          languages:\n            - python\n            - rust\n"
+    ));
+    assert!(codeql_builds(
+        &matrix("        language: [python, rust]\n"),
+        from_matrix
+    ));
+    assert!(codeql_builds(
+        &matrix("        language:\n          - c-cpp\n          - rust\n"),
+        from_matrix
+    ));
+    // What this test cannot resolve counts as Rust.
+    assert!(codeql_builds(
+        "",
+        "        with:\n          languages: ${{ inputs.languages }}\n"
+    ));
+    assert!(codeql_builds("", from_matrix));
+    assert!(codeql_builds(
+        &matrix("        language: [python]\n        include:\n          - language: rust\n"),
+        from_matrix
+    ));
+    assert!(codeql_builds(
+        &matrix("        language: ${{ fromJSON(inputs.languages) }}\n"),
+        from_matrix
+    ));
+    assert!(codeql_builds(
+        &matrix("        os: [ubuntu-24.04]\n"),
+        from_matrix
+    ));
+    // Languages without Rust build nothing.
+    assert!(!codeql_builds(
+        "",
+        "        with:\n          languages: javascript-typescript\n"
+    ));
+    assert!(!codeql_builds(
+        &matrix("        language: [actions, javascript-typescript, python, c-cpp]\n"),
+        from_matrix
+    ));
 }

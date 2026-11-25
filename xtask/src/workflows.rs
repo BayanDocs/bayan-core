@@ -1,6 +1,6 @@
 //! A reader of the GitHub Actions workflows in `.github/workflows/`, for the tests of `verify.rs` that check them: the events that start a workflow, its jobs, each job's steps, and the commands of their scripts. It reads YAML in the block style that the workflows use, at any indentation, and refuses every form it cannot read instead of passing over it, because a test that cannot see a job passes a workflow that breaks the test's rule (the review of bayan-core#61): flow style for the events, the jobs or the steps (`on: [push]`, `steps: [...]`), a line that is no key where a key must stand, keys of one mapping at different indentations, anchors, aliases and merge keys, and tabs in the indentation.
 //!
-//! What the tests still cannot see: a compiler that a program of the repository or of a tool runs, other than `scripts/dev-setup.sh` (`python3 fuzz/ci.py` runs `cargo fuzz`, and `make`, `npm run` or a script file could run anything); a command that an expression `${{ … }}` writes into a script; and the steps of a local action (`uses: ./…`), which count as building for that reason. So review still has to see that no job runs such a program before the supply-chain checks.
+//! What the tests still cannot see, so that review has to (the decision on bayan-core#61 lists them): a compiler that another program starts, other than `scripts/dev-setup.sh`, such as a program of the repository or of a tool (`python3 fuzz/ci.py` runs `cargo fuzz`, and `make`, `npm run` or a script file could run anything), the JavaScript that `actions/github-script` runs, or a container that a `docker://` action runs with its `args:`; a program named through a variable (`$CARGO build`) or written into a script by an expression `${{ … }}`; a step's `shell:` template, which names the program that runs the step's script (`shell: cargo run --quiet -- {0}` would build); the CodeQL command-line tool run from a script (`codeql database create --language=rust`); and `env:` or `working-directory:` on the two check steps, which can change what the checks see (another `CARGO_HOME`, another folder) while the steps read the same. A local action (`uses: ./…`), whose steps the reader does not read, counts as building instead.
 
 /// A line of a workflow that holds something, with the lines indented below it. Blank lines and lines that hold only a comment are left out, also inside scripts, where `#` starts a comment too.
 #[derive(Debug)]
@@ -471,69 +471,84 @@ fn script(run: &Key<'_, '_>) -> String {
     if run.value.starts_with(['|', '>']) {
         return below.join("\n");
     }
-    let value = run.value;
-    let value = ['"', '\'']
-        .iter()
-        .find_map(|quote| value.strip_prefix(*quote)?.strip_suffix(*quote))
-        .unwrap_or(value);
-    std::iter::once(value)
+    std::iter::once(unquoted(run.value))
         .chain(below)
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// The CodeQL languages of a step's `with:`, read through the job's matrix where the step names one (`${{ matrix.language }}`).
-fn languages<'a>(
+/// A value without the quotes around it.
+fn unquoted(value: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|quote| value.strip_prefix(*quote)?.strip_suffix(*quote))
+        .unwrap_or(value)
+}
+
+/// The languages that a CodeQL step's `languages:` names: the words of its value, or of the job's matrix where the value is one value of it (`${{ matrix.language }}`); `None` where this test cannot resolve them: another expression, no such list in the job's `strategy:`, or a matrix with `include:` or `exclude:`, which can add or remove values.
+fn languages_of<'a>(
     context: &str,
     job: &[Key<'_, 'a>],
-    with: &[Key<'_, 'a>],
-) -> Result<Vec<&'a str>, String> {
-    let Some(languages) = with.iter().find(|key| key.name == "languages") else {
-        return Ok(Vec::new());
-    };
+    languages: &Key<'_, 'a>,
+) -> Result<Option<Vec<&'a str>>, String> {
     if !languages.value.contains("${{") {
-        return list(context, languages);
+        return list(context, languages).map(Some);
     }
-    let name = languages
+    let Some(name) = languages
         .value
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
         .and_then(|value| value.trim().strip_prefix("matrix."))
-        .ok_or_else(|| {
-            format!(
-                "{context}, line {}: languages from an expression other than one value of the job's matrix; this test cannot read it",
-                languages.number
-            )
-        })?;
-    let unreadable = || {
-        format!(
-            "{context}, line {}: the job's `strategy:` has no `matrix:` with `{name}:` as a list, or a matrix with `include:` or `exclude:`; this test cannot read it",
-            languages.number
-        )
+    else {
+        return Ok(None);
     };
-    let strategy = job
-        .iter()
-        .find(|key| key.name == "strategy")
-        .ok_or_else(unreadable)?;
-    let matrix = keys(context, strategy.below)?
+    let Some(strategy) = job.iter().find(|key| key.name == "strategy") else {
+        return Ok(None);
+    };
+    let Some(matrix) = keys(context, strategy.below)?
         .into_iter()
         .find(|key| key.name == "matrix")
-        .ok_or_else(unreadable)?;
+    else {
+        return Ok(None);
+    };
     let values = keys(context, matrix.below)?;
     if values
         .iter()
         .any(|key| matches!(key.name, "include" | "exclude"))
     {
-        return Err(unreadable());
+        return Ok(None);
     }
-    let values = values
-        .iter()
-        .find(|key| key.name == name)
-        .ok_or_else(unreadable)?;
-    list(context, values)
+    match values.iter().find(|key| key.name == name) {
+        Some(values) => list(context, values).map(Some),
+        None => Ok(None),
+    }
 }
 
-/// What a step builds, if it builds: a command of its script that [`builds`], CodeQL's analysis of Rust, whose extractor runs `cargo check`, or a local action, whose steps this test does not read.
+/// Whether a step runs a CodeQL analysis that can include Rust, whose extractor runs `cargo check`: an `init` step of `github/codeql-action` whose `languages:` names `rust`, directly or through the job's matrix, or names no language at all, because the pinned action then finds the repository's languages itself, Rust among them (the decision on bayan-core#61). A value that this test cannot resolve counts as Rust, and so does a value of the matrix that is an expression itself.
+fn analyses_rust(context: &str, job: &[Key<'_, '_>], step: &[Key<'_, '_>]) -> Result<bool, String> {
+    let get = |name: &str| step.iter().find(|key| key.name == name);
+    if !get("uses")
+        .is_some_and(|uses| unquoted(uses.value).starts_with("github/codeql-action/init@"))
+    {
+        return Ok(false);
+    }
+    let with = match get("with") {
+        Some(with) => keys(context, with.below)?,
+        None => Vec::new(),
+    };
+    let Some(languages) = with.iter().find(|key| key.name == "languages") else {
+        return Ok(true);
+    };
+    let Some(values) = languages_of(context, job, languages)? else {
+        return Ok(true);
+    };
+    Ok(values.is_empty()
+        || values
+            .iter()
+            .any(|value| value.contains("${{") || value.eq_ignore_ascii_case("rust")))
+}
+
+/// What a step builds, if it builds: a command of its script that [`builds`], a CodeQL analysis that can include Rust ([`analyses_rust`]), or a local action, whose steps this test does not read.
 fn what_builds(
     context: &str,
     job: &[Key<'_, '_>],
@@ -541,15 +556,12 @@ fn what_builds(
 ) -> Result<Option<String>, String> {
     let get = |name: &str| step.iter().find(|key| key.name == name);
     if let Some(uses) = get("uses")
-        && uses.value.starts_with("./")
+        && unquoted(uses.value).starts_with("./")
     {
         return Ok(Some(format!("uses: {}", uses.value)));
     }
-    if let Some(with) = get("with") {
-        let with = keys(context, with.below)?;
-        if languages(context, job, &with)?.contains(&"rust") {
-            return Ok(Some("CodeQL's analysis of Rust".to_owned()));
-        }
+    if analyses_rust(context, job, step)? {
+        return Ok(Some("a CodeQL analysis that can include Rust".to_owned()));
     }
     let Some(run) = get("run") else {
         return Ok(None);
