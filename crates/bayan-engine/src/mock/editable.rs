@@ -22,6 +22,17 @@ pub(crate) enum EditError {
     TooLong,
 }
 
+/// What `input.select` did to the line's selection (spec §14.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Selected {
+    /// The selection already was the one asked for.
+    Unchanged,
+    /// The selection is now the one asked for.
+    Changed,
+    /// A composition is active, whose input method owns the caret, and the selection asked for differs from the line's, which stays: the shell has to hear the line's selection, or its mirror drifts from the engine's.
+    Kept,
+}
+
 /// The state of the editable line.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EditableLine {
@@ -238,24 +249,34 @@ impl EditableLine {
         Ok(*self != old)
     }
 
-    /// Sets the selection from the UTF-16 offsets `anchor` and `focus` of the shown text (spec §14.4), unless a composition is active, whose input method owns the caret; an offset beyond the text or inside a surrogate pair is refused either way. Returns whether the selection changed.
-    pub(crate) fn select(&mut self, anchor: u32, focus: u32) -> Result<bool, EditError> {
+    /// Sets the selection from the UTF-16 offsets `anchor` and `focus` of the shown text (spec §14.4), unless a composition is active, whose input method owns the caret; an offset beyond the text or inside a surrogate pair is refused either way.
+    pub(crate) fn select(&mut self, anchor: u32, focus: u32) -> Result<Selected, EditError> {
         let shown = self.shown();
         let (Some(anchor), Some(focus)) = (boundary(&shown, anchor), boundary(&shown, focus))
         else {
             return Err(EditError::Invalid);
         };
-        if self.composing() {
-            return Ok(false);
-        }
         let (anchor, focus) = (
             u32::try_from(anchor).unwrap_or(u32::MAX),
             u32::try_from(focus).unwrap_or(u32::MAX),
         );
+        if self.composing() {
+            // Nothing is selected while composing: the line's selection is the input method's caret.
+            let caret = self.shown_caret();
+            return Ok(if (anchor, focus) == (caret, caret) {
+                Selected::Unchanged
+            } else {
+                Selected::Kept
+            });
+        }
         let old = (self.caret, self.anchor);
         self.caret = focus;
         self.anchor = (anchor != focus).then_some(anchor);
-        Ok((self.caret, self.anchor) != old)
+        Ok(if (self.caret, self.anchor) == old {
+            Selected::Unchanged
+        } else {
+            Selected::Changed
+        })
     }
 
     /// Applies an editing key, unless a composition is active; `shift` extends the selection with ArrowLeft, ArrowRight, Home and End. Returns whether anything changed.
@@ -613,19 +634,23 @@ mod tests {
     #[test]
     fn selects_by_utf16_offsets_of_the_shown_text_except_while_composing() {
         let mut line = selecting("a😀b", 0, 0);
-        assert_eq!(line.select(4, 1), Ok(true));
+        assert_eq!(line.select(4, 1), Ok(Selected::Changed));
         assert_eq!(state(&line), ("a😀b".to_owned(), 3, 1));
         assert_eq!(line.selected_text(), "😀b");
-        assert_eq!(line.select(4, 1), Ok(false));
+        assert_eq!(line.select(4, 1), Ok(Selected::Unchanged));
         assert_eq!(line.select(2, 2), Err(EditError::Invalid));
         assert_eq!(line.select(0, 5), Err(EditError::Invalid));
         // A caret is a selection with equal ends.
-        assert_eq!(line.select(1, 1), Ok(true));
+        assert_eq!(line.select(1, 1), Ok(Selected::Changed));
         assert_eq!(line.anchor, None);
-        // While composing, the input method owns the caret: a valid selection changes nothing, an invalid one is still refused.
+        // While composing, the input method owns the caret: a valid selection changes nothing, and one that differs from the line's is kept from it, so that the shell hears the line's; an invalid one is still refused.
         line.update_composition("にほ", None).unwrap();
-        assert_eq!(line.select(0, 0), Ok(false));
+        let composing = line.clone();
+        assert_eq!(line.select(0, 0), Ok(Selected::Kept));
+        assert_eq!(line.select(3, 1), Ok(Selected::Kept));
+        assert_eq!(line.select(3, 3), Ok(Selected::Unchanged));
         assert_eq!(line.select(9, 0), Err(EditError::Invalid));
+        assert_eq!(line, composing);
         assert_eq!(line.shown_caret(), 3);
     }
 

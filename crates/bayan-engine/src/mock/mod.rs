@@ -25,7 +25,7 @@ use crate::protocol::{
 use crate::raster::{Shape, TileGeometry, rasterize};
 
 use editable::{EditError, EditableLine, Shown};
-pub(crate) use editable::{TooLong, clipboard_text};
+pub(crate) use editable::{Selected, TooLong, clipboard_text};
 use geometry::{
     ACCENT, CARET_WIDTH, CHAR_GAP, CHAR_HEIGHT, EDITABLE_BORDER, EDITABLE_FILL, EDITABLE_PADDING,
     INK, PAGE_GAP, PAGE_HEIGHT, PAGE_WIDTH, UNDERLINE,
@@ -519,12 +519,12 @@ impl MockDocument {
         Ok(self.edit(|line| line.replace(start, end, text))?)
     }
 
-    /// Sets the selection (`input.select`, spec §14.4). Returns whether it changed.
+    /// Sets the selection (`input.select`, spec §14.4), unless a composition keeps it.
     pub(crate) fn select(
         &mut self,
         anchor: TextPosition,
         focus: TextPosition,
-    ) -> Result<bool, TextError> {
+    ) -> Result<Selected, TextError> {
         editable_nodes(&[anchor.node, focus.node])?;
         Ok(self.line.select(anchor.offset, focus.offset)?)
     }
@@ -975,7 +975,10 @@ mod tests {
             node: editable,
             offset,
         };
-        assert_eq!(document.select(position(4), position(1)), Ok(true));
+        assert_eq!(
+            document.select(position(4), position(1)),
+            Ok(Selected::Changed)
+        );
         let area = text_area(MockDocument::editable_region().rect);
         let rects = document.selection_rects();
         assert_eq!(

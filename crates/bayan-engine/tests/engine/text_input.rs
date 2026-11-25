@@ -191,6 +191,49 @@ fn input_select_refuses_what_input_text_refuses_with_and_without_an_identifier()
 }
 
 #[test]
+fn input_select_during_a_composition_answers_with_the_selection_the_engine_kept() {
+    let (mut engine, doc_id) = typed("abc");
+    for (id, payload) in [
+        (4, json!({ "doc_id": doc_id, "phase": "start" })),
+        (
+            5,
+            json!({ "doc_id": doc_id, "phase": "update", "text": "xy", "selection": { "start": 2, "end": 2 } }),
+        ),
+    ] {
+        ok_payload(
+            &send(&mut engine, &request(id, "input.composition", payload)),
+            id,
+        );
+    }
+    let select =
+        |anchor, focus| json!({ "doc_id": doc_id, "anchor": at(anchor), "focus": at(focus) });
+    // The input method owns the caret, at the end of the composition: a selection that differs from it changes nothing, and the engine answers with the overlay and the tree as they are, so that the shell's mirror follows the engine's selection rather than the one it asked for.
+    let answers = send(&mut engine, &request(6, "input.select", select(0, 1)));
+    ok_payload(&answers, 6);
+    assert!(events(&answers, "render.invalidate").is_empty());
+    let overlay = events(&answers, "overlay.update")[0];
+    assert_eq!(overlay["payload"]["selection"], json!([]));
+    let update = events(&answers, "a11y.update")[0];
+    assert_eq!(update["payload"]["selection"], json!([]));
+    assert_eq!(update["payload"]["caret"]["offset"], json!(5));
+    assert_eq!(
+        line_state(&mut engine, doc_id),
+        ("abcxy".to_owned(), 5, json!([]))
+    );
+    // The selection the engine has, a caret at 5, gets no events, so that a shell that hears the engine's selection back starts no loop.
+    let answers = send(&mut engine, &request(7, "input.select", select(5, 5)));
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    // A notice without an identifier is answered the same way.
+    let answers = send(&mut engine, &notice("input.select", select(1, 1)));
+    assert_eq!(events(&answers, "overlay.update").len(), 1);
+    assert_eq!(events(&answers, "a11y.update").len(), 1);
+    assert_eq!(
+        line_state(&mut engine, doc_id),
+        ("abcxy".to_owned(), 5, json!([]))
+    );
+}
+
+#[test]
 fn shift_with_the_arrows_home_and_end_extends_the_selection_and_typing_replaces_it() {
     let (mut engine, doc_id) = typed("hello");
     let key = |key: &str, shift: bool| json!({ "doc_id": doc_id, "key": key, "code": key, "modifiers": { "shift": shift } });

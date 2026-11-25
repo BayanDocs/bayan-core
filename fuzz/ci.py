@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -247,7 +248,7 @@ def synthetic_hint_parts() -> List[bytes]:
 
 
 def jsonl(*messages: object) -> bytes:
-    """One input of engine_messages: the messages as compact JSON, one per line, and texts that are not JSON as they are."""
+    """The messages of one input of engine_messages: as compact JSON, one per line, and texts that are not JSON as they are."""
     return b"\n".join(message if isinstance(message, bytes) else json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode() for message in messages)
 
 
@@ -259,12 +260,23 @@ def request(id_: int, kind: str, payload: object = None) -> Dict[str, object]:
     return message
 
 
+def session(pasted: bytes, messages: bytes) -> bytes:
+    """One input of engine_messages: the bytes of blob 5, the text that input.paste pastes, after their length as a little-endian 16-bit number, then the messages (fuzz/src/engine.rs)."""
+    return struct.pack("<H", len(pasted)) + pasted + messages
+
+
+# The text to paste of most sessions: a byte that is not UTF-8, a line feed and a character outside the Basic Multilingual Plane.
+PASTED = b"pasted \xff text\n\xf0\x9f\x98\x80"
+# Clipboard bytes that are not UTF-8 in other ways, which the engine replaces with U+FFFD (spec §14.5): an overlong encoding, an encoded surrogate, a code point beyond U+10FFFF, a sequence cut short and a lone continuation byte; and characters that it removes from typed text: NUL, a carriage return, a line feed and the line separator.
+NOT_UTF8 = b"\xc0\xaf \xed\xa0\x80 \xf4\x90\x80\x80 \xe2\x82 \x80 a\x00b\r\n\xe2\x80\xa8c"
+
+
 # The whole of a page of the mock document, in BLU (US Letter at 1,905 BLU a point, as bayan-engine's tests ask for it).
 PAGE = {"x": 0, "y": 0, "width": 15_544_800, "height": 20_116_800}
 
 
 def engine_sessions() -> List[bytes]:
-    """Inputs of engine_messages, each a session of messages, one per line: every message a shell sends, a recording and its replay, the refusals of the envelope and of the handshake, and the limits of the engine and of the mock document. Blob 1 is empty, blob 3 is a recording and blob 5 is text to paste (fuzz/src/engine.rs); document 1 is the first that doc.open opens."""
+    """Inputs of engine_messages, each a session of messages, one per line, after the text to paste (session): every message a shell sends, a recording and its replay, the refusals of the envelope and of the handshake, the limits of the engine and of the mock document, and pastes of bytes that are not UTF-8. Blob 1 is empty, blob 3 is a recording and blob 5 holds the text to paste that the input gives (fuzz/src/engine.rs); document 1 is the first that doc.open opens."""
     tile = {"doc_id": 1, "page": 0, "rect": PAGE, "width": 64, "height": 83, "zoom": 1.5, "device_scale": 2, "mode": "interactive"}
     document = jsonl(
         request(2, "doc.open", {"blob": 1}),
@@ -339,7 +351,7 @@ def engine_sessions() -> List[bytes]:
         request(16, "render.tile", tile),
         request(17, "hello", {"protocol_versions": [1], "shell": {"platform": "windows", "runtime": "native"}}),
     )
-    # Protocol v1, part 2 (CORE-014): ranges of text to replace, the selection, hit-testing, the clipboard, and the Arabic paragraph's node. Blob 5 holds text to paste with a byte that is not UTF-8 (fuzz/src/engine.rs); node 5 is the editable line, node 2 a heading, node 35 the Arabic paragraph.
+    # Protocol v1, part 2 (CORE-014): ranges of text to replace, the selection, hit-testing, the clipboard, and the Arabic paragraph's node. Blob 5 holds PASTED; node 5 is the editable line, node 2 a heading, node 35 the Arabic paragraph.
     version_1_text = jsonl(
         request(2, "doc.open", {"blob": 1}),
         request(3, "view.set", {"doc_id": 1, "viewport": {"x": 0, "y": 0, "width": 816, "height": 1056}, "zoom": 1, "device_scale": 1, "mode": "print"}),
@@ -360,7 +372,16 @@ def engine_sessions() -> List[bytes]:
         request(18, "input.composition", {"doc_id": 1, "phase": "update", "text": "かな"}),
         request(19, "input.select", {"doc_id": 1, "anchor": {"node": 5, "offset": 0}, "focus": {"node": 999, "offset": 0}}),
     )
-    return [document, recording, refusals, limits, version_1, version_1_text]
+    # Pasting NOT_UTF8 over a selection, with a second text/plain item that the engine skips.
+    pasting = jsonl(
+        request(2, "doc.open", {"blob": 1}),
+        request(3, "input.paste", {"doc_id": 1, "items": [{"mime": "text/plain", "blob": 5}]}),
+        request(4, "input.select", {"doc_id": 1, "anchor": {"node": 5, "offset": 0}, "focus": {"node": 5, "offset": 2}}),
+        request(5, "input.paste", {"doc_id": 1, "items": [{"mime": "text/plain", "blob": 5}, {"mime": "text/plain", "blob": 3}]}),
+        request(6, "query.a11y", {"doc_id": 1, "node": 5}),
+    )
+    sessions = [document, recording, refusals, limits, version_1, version_1_text]
+    return [session(PASTED, messages) for messages in sessions] + [session(NOT_UTF8, pasting)]
 
 
 def tile_requests() -> List[bytes]:

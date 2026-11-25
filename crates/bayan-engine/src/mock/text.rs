@@ -142,6 +142,8 @@ pub(crate) struct TextBlock {
     left: i64,
     top: i64,
     width: i64,
+    /// Whether the text runs right to left, so that its lines start at the right edge.
+    rtl: bool,
     /// The characters of each line, in reading order.
     lines: Vec<Vec<Placed>>,
 }
@@ -184,6 +186,7 @@ impl TextBlock {
     ) -> Self {
         let mut block = Self::broken(text, style, left, top, width);
         if bidi.dir == TextDirection::Rtl {
+            block.rtl = true;
             for line in &mut block.lines {
                 mirror(line, width, bidi.ltr);
             }
@@ -259,6 +262,7 @@ impl TextBlock {
             left,
             top,
             width,
+            rtl: false,
             lines,
         }
     }
@@ -295,7 +299,12 @@ impl TextBlock {
                     top,
                     bottom: top + self.style.line_pitch,
                     start: line.first().map_or(0, |placed| placed.start),
-                    empty_x: self.left,
+                    // Where the caret of a line without characters stands: where the line starts.
+                    empty_x: if self.rtl {
+                        self.left + self.width
+                    } else {
+                        self.left
+                    },
                     items,
                 }
             })
@@ -512,5 +521,12 @@ mod tests {
         let lines = block.hit_lines();
         assert_eq!((lines.len(), lines[0].start, lines[0].empty_x), (1, 0, 5));
         assert!(lines[0].items.is_empty());
+        // Right-to-left text starts at the right edge, so its empty line's caret stands there.
+        let rtl = Bidi {
+            dir: TextDirection::Rtl,
+            ltr: &[],
+        };
+        let lines = TextBlock::directed("", BODY, 5, 7, 100, rtl).hit_lines();
+        assert_eq!((lines.len(), lines[0].empty_x), (1, 105));
     }
 }

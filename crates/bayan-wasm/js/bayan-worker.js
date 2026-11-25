@@ -10,7 +10,7 @@
 // SPDX-FileCopyrightText: 2026 BayanDocs contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-BayanDocs-App-Store-Permission
 
-import init, { WasmEngine, __wbg_reset_state, engineVersion, maxBlobBytes, maxMessageBytes } from "./bayan_wasm.js";
+import init, { WasmEngine, __wbg_reset_state, clipboardFormats, engineVersion, maxBlobBytes, maxMessageBytes } from "./bayan_wasm.js";
 
 /** The largest request and blob identifier, 2⁵³ − 1 (§4); it also stands in for a blob's identifier while a message's size is checked. */
 const MAX_ID = Number.MAX_SAFE_INTEGER;
@@ -192,7 +192,7 @@ function toJson(message) {
 
 /**
  * The objects of a payload that may hold a blob in their `blob` field (§3.2): the payload itself, and each item of its
- * `items`, as input.paste and the reply to clipboard.copy carry them (§14.5).
+ * `items`, as the reply to clipboard.copy carries them (§14.5).
  */
 function blobHolders(payload) {
   if (!isObject(payload)) {
@@ -203,26 +203,46 @@ function blobHolders(payload) {
 }
 
 /**
- * Takes the bytes of every blob that a message carries (an ArrayBuffer, a SharedArrayBuffer, or a view of one such
- * as a Uint8Array) and puts the largest identifier in its place, so the message's size can be checked before the
- * bytes are copied into the engine. Returns each object that held a blob, with the blob's bytes.
+ * Takes the bytes of every blob that a message carries and that the engine reads, and puts the largest identifier in
+ * its place, so the message's size can be checked before the bytes are copied into the engine. The engine reads the
+ * payload's own blob, and of the items of input.paste only the first of each format it reads (§14.5): every other
+ * item's blob becomes blob 0 without being copied, so that items the engine skips cost no memory it would never give
+ * back. Returns each object that holds a blob to copy, with the blob's bytes.
  */
 function takeBlobs(message) {
   const taken = [];
-  for (const holder of blobHolders(isObject(message) ? message.payload : undefined)) {
-    const value = holder.blob;
-    let bytes = null;
-    if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
-      bytes = new Uint8Array(value);
-    } else if (ArrayBuffer.isView(value)) {
-      bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (!isObject(message) || !isObject(message.payload)) {
+    return taken;
+  }
+  const payload = message.payload;
+  // A format leaves the set with its first item, so a later item of the same format is not read.
+  const formats = new Set(message.type === "input.paste" ? clipboardFormats().split("\n") : []);
+  const items = Array.isArray(payload.items) ? payload.items.filter(isObject) : [];
+  for (const holder of [payload, ...items]) {
+    const read = holder === payload || formats.delete(holder.mime);
+    const bytes = bufferBytes(holder.blob);
+    if (bytes === null) {
+      continue;
     }
-    if (bytes !== null) {
+    if (read) {
       holder.blob = MAX_ID;
       taken.push({ holder, bytes });
+    } else {
+      holder.blob = 0;
     }
   }
   return taken;
+}
+
+/** The bytes of a blob the shell sent: an ArrayBuffer, a SharedArrayBuffer, or a view of one such as a Uint8Array; null for anything else. */
+function bufferBytes(value) {
+  if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return null;
 }
 
 /**

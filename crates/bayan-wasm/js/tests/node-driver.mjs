@@ -338,6 +338,32 @@ async function main() {
       ok(await shell.request(38, "doc.close", { doc_id: docId }));
     });
 
+    await check("input.paste copies only the items the engine reads, each within the blob limit (§3.2, §14.5)", async () => {
+      const file = bytesOf("document");
+      const docId = ok(await shell.request(39, "doc.open", { blob: file }, [file])).doc_id;
+      // An image/png item over 64 MiB, which the engine does not read, is not copied and does not stop the
+      // text/plain item; nor does a second text/plain item over 64 MiB, which the engine does not read either.
+      const image = new ArrayBuffer(64 * 1024 * 1024 + 1);
+      const text = bytesOf("ok");
+      const again = new ArrayBuffer(64 * 1024 * 1024 + 1);
+      const items = [
+        { mime: "image/png", blob: image },
+        { mime: "text/plain", blob: text },
+        { mime: "text/plain", blob: again },
+      ];
+      ok(await shell.request(40, "input.paste", { doc_id: docId, items }, [image, text, again]));
+      await shell.event("render.invalidate");
+      await shell.event("overlay.update");
+      assert.equal((await shell.event("a11y.update")).payload.changes[0].node.text, "ok");
+      // The text/plain item that the engine reads, over 64 MiB, is refused before it is copied: as blob 0, which
+      // the engine answers with limit_exceeded, and the line keeps its text.
+      const huge = new ArrayBuffer(64 * 1024 * 1024 + 1);
+      const error = errorOf(await shell.request(41, "input.paste", { doc_id: docId, items: [{ mime: "text/plain", blob: huge }] }, [huge]));
+      assert.equal(error.code, "limit_exceeded");
+      assert.equal(error.args.limit, "blob");
+      ok(await shell.request(42, "doc.close", { doc_id: docId }));
+    });
+
     await check("messages JSON cannot hold are refused as invalid_message", async () => {
       // With a request identifier, the refusal is the reply.
       shell.send({ v: 1, id: 15, type: "hello", payload: { protocol_versions: [1n] } });

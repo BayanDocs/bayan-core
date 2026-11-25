@@ -21,7 +21,7 @@ use crate::limits::{
     MAX_VIEW_COORDINATE, MAX_ZOOM, MIN_ZOOM,
 };
 use crate::manifest;
-use crate::mock::{MockDocument, TextError, clipboard_text};
+use crate::mock::{MockDocument, Selected, TextError, clipboard_text};
 use crate::protocol::{
     A11yChange, A11yChangeKind, A11yTree, A11yUpdate, BlobRef, CLIPBOARD_FORMATS, ClipboardCopy,
     ClipboardItem, ClipboardItems, CompositionPhase, DiagReplay, DocClose, DocOpen, DocOpened,
@@ -899,12 +899,12 @@ impl Engine {
         let select: InputSelect = envelope.payload()?;
         let document = self.document(select.doc_id)?;
         let revision = document.revision();
-        // As for keys, the engine answers with the overlay and the accessibility tree when the selection changed (spec §14.4).
-        let changed = document
+        // As for keys, the engine answers with the overlay and the accessibility tree when the selection changed; and when a composition kept the selection from changing to another, with the selection it kept, so that the shell's mirror does not drift from it (spec §14.4).
+        let selected = document
             .select(select.anchor, select.focus)
             .map_err(|error| text_error(error, &envelope.kind))?;
         outbox.reply(envelope.id, None, &Empty {});
-        if changed {
+        if selected != Selected::Unchanged {
             line_changed(select.doc_id, document, revision, outbox);
         }
         Ok(())

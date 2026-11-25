@@ -36,12 +36,12 @@ fn last_tile(doc_id: u64) -> String {
 /// The most messages of one input that `engine_messages` hands to the engine; the rest is ignored. Each message's work is small or counted against [`PIXEL_BUDGET`], but the largest answer, the accessibility tree of the whole mock document (about 180 KB), takes about 30 ms under AddressSanitizer to answer and check, so 64 of them stay well within the timeout of 10 seconds.
 pub const MAX_MESSAGES: usize = 64;
 
-/// The shell's blobs that `engine_messages` puts before each input, with odd identifiers as the shell's blobs get them: blob 1, empty, for `doc.open`, blob 3, the recording that the engine's tests commit as `session.json`, for `diag.replay`, and blob 5, text to paste with `input.paste` (CORE-014).
+/// The shell's blobs that `engine_messages` puts before each input, with odd identifiers as the shell's blobs get them: blob 1, empty, for `doc.open`, blob 3, the recording that the engine's tests commit as `session.json`, for `diag.replay`, and blob 5, text to paste with `input.paste` (CORE-014), whose bytes each input of `engine_messages` gives ([`messages`]).
 pub const EMPTY_BLOB: BlobId = 1;
 pub const RECORDING_BLOB: BlobId = 3;
 pub const TEXT_BLOB: BlobId = 5;
 
-/// The bytes of [`TEXT_BLOB`]: clipboard text with a byte that is not UTF-8, a line feed and a character outside the Basic Multilingual Plane, which the engine reads as UTF-8 and cleans as typed text (spec §14.5).
+/// The bytes of [`TEXT_BLOB`] where no input gives them, in `engine_tile` and in this harness's tests: clipboard text with a byte that is not UTF-8, a line feed and a character outside the Basic Multilingual Plane, which the engine reads as UTF-8 and cleans as typed text (spec §14.5).
 pub const PASTED_TEXT: &[u8] = b"pasted \xff text\n\xf0\x9f\x98\x80";
 
 /// The recording of [`RECORDING_BLOB`]: a session recorded by the engine's tests (`crates/bayan-engine/tests/engine/record_replay.rs`), committed and kept current by them.
@@ -238,12 +238,12 @@ pub fn recording_pixels(recording: &[u8]) -> u64 {
     pixels
 }
 
-/// An engine with the given configuration and the harness's blobs, after a successful handshake.
-fn engine_after_hello(config: Config) -> Engine {
+/// An engine with the given configuration and the harness's blobs, with `pasted` in [`TEXT_BLOB`], after a successful handshake.
+fn engine_after_hello(config: Config, pasted: &[u8]) -> Engine {
     let blobs = Arc::new(BlobStore::new());
     assert_eq!(blobs.put_shell(b""), Ok(EMPTY_BLOB));
     assert_eq!(blobs.put_shell(SESSION_RECORDING), Ok(RECORDING_BLOB));
-    assert_eq!(blobs.put_shell(PASTED_TEXT), Ok(TEXT_BLOB));
+    assert_eq!(blobs.put_shell(pasted), Ok(TEXT_BLOB));
     let mut engine = Engine::new(config, blobs);
     let welcome = send(
         &mut engine,
@@ -282,14 +282,30 @@ fn send(engine: &mut Engine, message: &[u8]) -> Vec<Value> {
     send_at(engine, message, 0)
 }
 
-/// `engine_messages`: the input split into messages at each line feed (which JSON writes only as whitespace between tokens), handed one by one to an engine with the test switches off after a valid handshake (see [`messages_with`]).
+/// `engine_messages`: the input is the bytes of [`TEXT_BLOB`], the text that `input.paste` pastes, after their length as a little-endian 16-bit number, so that the fuzzer varies the clipboard bytes that the engine decodes too (spec §14.5), and then messages, split at each line feed (which JSON writes only as whitespace between tokens), handed one by one to an engine with the test switches off after a valid handshake (see [`messages_with`]).
 pub fn messages(data: &[u8]) {
     messages_with(config(), data);
 }
 
+/// Splits an input of `engine_messages` into the bytes of [`TEXT_BLOB`] and the messages ([`messages`]); an input shorter than the length it gives pastes what there is.
+pub fn pasted_and_messages(data: &[u8]) -> (&[u8], &[u8]) {
+    let Some((length, rest)) = data.split_first_chunk::<2>() else {
+        return (&[], &[]);
+    };
+    rest.split_at(usize::from(u16::from_le_bytes(*length)).min(rest.len()))
+}
+
+/// The input of `engine_messages` that pastes `pasted`, at most 65,535 bytes, and sends `messages` ([`messages`]).
+#[cfg(test)]
+pub(crate) fn messages_input(pasted: &[u8], messages: &[u8]) -> Vec<u8> {
+    let length = u16::try_from(pasted.len()).expect("at most 65,535 bytes to paste");
+    [&length.to_le_bytes()[..], pasted, messages].concat()
+}
+
 /// `engine_messages` with another configuration, for the tests of this harness. Properties: no panic, also none that the engine catches; every answer is a valid protocol message (the engine's `schema` module, as `hostile_input.rs` checks); and valid requests after the hostile ones still succeed: a new handshake, opening the mock document and rendering a tile of it.
 pub fn messages_with(config: Config, data: &[u8]) {
-    let mut engine = engine_after_hello(config);
+    let (pasted, data) = pasted_and_messages(data);
+    let mut engine = engine_after_hello(config, pasted);
     let mut pixels = LAST_TILE_PIXELS;
     for (index, message) in data
         .split(|&byte| byte == b'\n')
@@ -345,7 +361,7 @@ fn tile_cost(width: u32, height: u32, record: bool) -> u64 {
 
 /// An engine after the handshake with the mock document open as document 1, as `engine_tile` starts.
 fn engine_with_document(config: Config) -> Engine {
-    let mut engine = engine_after_hello(config);
+    let mut engine = engine_after_hello(config, PASTED_TEXT);
     let opened = send(
         &mut engine,
         format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
@@ -448,7 +464,7 @@ pub fn config_json(data: &[u8]) {
             || serde_json::from_slice::<Value>(data).is_ok_and(|value| value.is_object()),
         "only an object is a configuration"
     );
-    let mut engine = engine_after_hello(config);
+    let mut engine = engine_after_hello(config, PASTED_TEXT);
     if !config.allow_panic {
         let refused = send(&mut engine, br#"{"v":1,"id":2,"type":"diag.panic"}"#);
         assert_eq!(
@@ -573,7 +589,7 @@ mod tests {
     fn sets_aside_what_the_engine_renders_for_the_last_tile() {
         // The budget of `engine_messages` keeps LAST_TILE_PIXELS for the tile after the input (CORE-010's review, round 2): the harness counts exactly that for the request it sends, and the engine renders exactly that many pixels for it, so that a change to either the request or the constant fails here.
         assert_eq!(message_pixels(last_tile(1).as_bytes()), LAST_TILE_PIXELS);
-        let mut engine = engine_after_hello(config());
+        let mut engine = engine_after_hello(config(), PASTED_TEXT);
         let opened = send(
             &mut engine,
             format!(r#"{{"v":1,"id":2,"type":"doc.open","payload":{{"blob":{EMPTY_BLOB}}}}}"#)
@@ -684,8 +700,11 @@ mod tests {
 
     #[test]
     fn releases_the_engine_blobs_of_clipboard_items() {
-        let mut engine = engine_after_hello(config());
-        send(&mut engine, br#"{"v":1,"id":2,"type":"doc.open","payload":{"blob":1}}"#);
+        let mut engine = engine_after_hello(config(), PASTED_TEXT);
+        send(
+            &mut engine,
+            br#"{"v":1,"id":2,"type":"doc.open","payload":{"blob":1}}"#,
+        );
         let pasted = send(
             &mut engine,
             br#"{"v":1,"id":3,"type":"input.paste","payload":{"doc_id":1,"items":[{"mime":"text/plain","blob":5}]}}"#,
@@ -709,8 +728,38 @@ mod tests {
     }
 
     #[test]
+    fn the_input_gives_the_bytes_that_input_paste_pastes() {
+        // Their length comes first, little-endian; an input shorter than it pastes what there is.
+        assert_eq!(
+            pasted_and_messages(b"\x03\x00ab\xffM\nN"),
+            (&b"ab\xff"[..], &b"M\nN"[..])
+        );
+        assert_eq!(pasted_and_messages(b"\x09\x00ab"), (&b"ab"[..], &b""[..]));
+        assert_eq!(pasted_and_messages(b"\x01"), (&b""[..], &b""[..]));
+        assert_eq!(messages_input(b"ab\xff", b"M\nN"), b"\x03\x00ab\xffM\nN");
+        // The engine reads them as UTF-8, with U+FFFD for what is not, and cleans them as typed text.
+        let mut engine = engine_after_hello(config(), b"ab\xff\ncd");
+        send(
+            &mut engine,
+            br#"{"v":1,"id":2,"type":"doc.open","payload":{"blob":1}}"#,
+        );
+        send(
+            &mut engine,
+            br#"{"v":1,"id":3,"type":"input.paste","payload":{"doc_id":1,"items":[{"mime":"text/plain","blob":5}]}}"#,
+        );
+        let tree = send(
+            &mut engine,
+            br#"{"v":1,"id":4,"type":"query.a11y","payload":{"doc_id":1,"node":5}}"#,
+        );
+        assert_eq!(
+            tree[0].pointer("/payload/root/text"),
+            Some(&json!("ab\u{FFFD}cd"))
+        );
+    }
+
+    #[test]
     fn the_seeds_pass() {
-        messages(b"{\"v\":1,\"id\":2,\"type\":\"doc.open\",\"payload\":{\"blob\":1}}\n{\"v\":1,\"id\":3,\"type\":\"diag.replay\",\"payload\":{\"blob\":3}}\n{\"v\":1,\"id\":4,\"type\":\"diag.panic\"}");
+        messages(&messages_input(PASTED_TEXT, b"{\"v\":1,\"id\":2,\"type\":\"doc.open\",\"payload\":{\"blob\":1}}\n{\"v\":1,\"id\":3,\"type\":\"diag.replay\",\"payload\":{\"blob\":3}}\n{\"v\":1,\"id\":4,\"type\":\"diag.panic\"}"));
         let mut input = vec![1, 64, 0, 48, 0];
         input.extend_from_slice(REFERENCE_TILE);
         tile(&input);

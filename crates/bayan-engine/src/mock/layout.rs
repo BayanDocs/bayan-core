@@ -569,6 +569,26 @@ mod tests {
     }
 
     #[test]
+    fn a_line_without_characters_puts_its_caret_where_its_lines_start() {
+        let layout = lay_out();
+        let empty_x = |id: u64| -> Vec<i64> {
+            layout
+                .lines
+                .iter()
+                .find_map(|lines| match lines {
+                    Lines::Fixed { node, lines, .. } if *node == id => {
+                        Some(lines.iter().map(|line| line.empty_x).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        // The Arabic paragraph's lines start at the right edge of the column, the last paragraph's at its left edge.
+        assert_eq!(empty_x(35), [MARGIN + CONTENT_WIDTH; 2]);
+        assert_eq!(empty_x(36), [MARGIN]);
+    }
+
+    #[test]
     fn the_content_holds_no_bidirectional_formatting_characters() {
         // Right-to-left text in a source file is shown reordered by editors; formatting characters could make code or text read differently from what it is ("Trojan Source"). The content uses none: only letters, digits, spaces and punctuation, whose order the Unicode Bidirectional Algorithm alone decides.
         let formatting = |character: char| {
